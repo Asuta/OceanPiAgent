@@ -18,6 +18,7 @@ import type {
   RoomWorkspaceState,
   ToolExecution,
 } from "@/lib/chat/types";
+import { DEFAULT_MAX_TOOL_LOOP_STEPS } from "@/lib/chat/types";
 
 const DEFAULT_AGENT_ID: RoomAgentId = "concierge";
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
@@ -27,7 +28,7 @@ const DEFAULT_SETTINGS: ChatSettings = {
   model: "",
   systemPrompt: "",
   providerMode: "auto",
-  maxToolLoopSteps: 6,
+  maxToolLoopSteps: DEFAULT_MAX_TOOL_LOOP_STEPS,
   thinkingLevel: "off",
   enabledSkillIds: [] as string[],
 };

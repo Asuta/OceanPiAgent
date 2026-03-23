@@ -241,6 +241,15 @@ function getCurrentAgentId(context?: ToolExecutionContext): RoomAgentId {
   return roomContext.currentAgentId;
 }
 
+function getCurrentRoomId(context?: ToolExecutionContext): string {
+  const roomContext = getRoomToolContext(context);
+  if (!roomContext.currentRoomId) {
+    throw new Error("The current room id is missing from the room context.");
+  }
+
+  return roomContext.currentRoomId;
+}
+
 function uniqueAgentIds(agentIds: RoomAgentId[]): RoomAgentId[] {
   return [...new Set(agentIds)];
 }
@@ -1051,14 +1060,14 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     name: "workspace_list",
     displayName: "Workspace List",
     description:
-      "List files and directories inside this agent's dedicated workspace. Use relative paths by default. Recursive listing is optional and stays inside the current agent workspace unless the operator explicitly enables outside access on the server.",
+      "List files and directories inside this agent's dedicated workspace for the current room. Use relative paths by default. Recursive listing is optional and stays inside the current room workspace unless the operator explicitly enables outside access on the server.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: {
           type: "string",
-          description: "Optional relative directory path inside the current agent workspace. Omit to list the workspace root.",
+          description: "Optional relative directory path inside the current room workspace. Omit to list the workspace root.",
         },
         recursive: {
           type: "boolean",
@@ -1074,8 +1083,10 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     execute: async (value, _signal, context) => {
       const args = value as z.infer<typeof workspaceListArgsSchema>;
       const agentId = getCurrentAgentId(context);
+      const roomId = getCurrentRoomId(context);
       const result = await listAgentWorkspace({
         agentId,
+        roomId,
         path: args.path,
         recursive: args.recursive,
         limit: args.limit,
@@ -1088,14 +1099,14 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     name: "workspace_read",
     displayName: "Workspace Read",
     description:
-      "Read a text file from this agent's dedicated workspace using a relative path. Use fromLine and lineCount to inspect large files in focused slices.",
+      "Read a text file from this agent's dedicated workspace for the current room using a relative path. Use fromLine and lineCount to inspect large files in focused slices.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: {
           type: "string",
-          description: "Relative file path inside the current agent workspace.",
+          description: "Relative file path inside the current room workspace.",
         },
         fromLine: {
           type: "number",
@@ -1112,8 +1123,10 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     execute: async (value, _signal, context) => {
       const args = value as z.infer<typeof workspaceReadArgsSchema>;
       const agentId = getCurrentAgentId(context);
+      const roomId = getCurrentRoomId(context);
       const result = await readAgentWorkspaceFile({
         agentId,
+        roomId,
         path: args.path,
         fromLine: args.fromLine,
         lineCount: args.lineCount,
@@ -1126,14 +1139,14 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     name: "workspace_write",
     displayName: "Workspace Write",
     description:
-      "Create or overwrite a text file inside this agent's dedicated workspace. Parent directories are created automatically.",
+      "Create or overwrite a text file inside this agent's dedicated workspace for the current room. Parent directories are created automatically.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: {
           type: "string",
-          description: "Relative file path inside the current agent workspace.",
+          description: "Relative file path inside the current room workspace.",
         },
         content: {
           type: "string",
@@ -1146,8 +1159,10 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     execute: async (value, _signal, context) => {
       const args = value as z.infer<typeof workspaceWriteArgsSchema>;
       const agentId = getCurrentAgentId(context);
+      const roomId = getCurrentRoomId(context);
       const result = await writeAgentWorkspaceFile({
         agentId,
+        roomId,
         path: args.path,
         content: args.content,
       });
@@ -1159,14 +1174,14 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     name: "workspace_delete",
     displayName: "Workspace Delete",
     description:
-      "Delete a file or directory inside this agent's dedicated workspace. Set recursive to true when deleting a non-empty directory. The workspace root itself cannot be deleted.",
+      "Delete a file or directory inside this agent's dedicated workspace for the current room. Set recursive to true when deleting a non-empty directory. The workspace root itself cannot be deleted.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: {
           type: "string",
-          description: "Relative path to the file or directory inside the current agent workspace.",
+          description: "Relative path to the file or directory inside the current room workspace.",
         },
         recursive: {
           type: "boolean",
@@ -1179,8 +1194,10 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     execute: async (value, _signal, context) => {
       const args = value as z.infer<typeof workspaceDeleteArgsSchema>;
       const agentId = getCurrentAgentId(context);
+      const roomId = getCurrentRoomId(context);
       const result = await deleteAgentWorkspaceEntry({
         agentId,
+        roomId,
         path: args.path,
         recursive: args.recursive,
       });
@@ -1192,14 +1209,14 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     name: "workspace_append",
     displayName: "Workspace Append",
     description:
-      "Append text to the end of a file inside this agent's dedicated workspace. Create the file automatically if it does not exist yet.",
+      "Append text to the end of a file inside this agent's dedicated workspace for the current room. Create the file automatically if it does not exist yet.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: {
           type: "string",
-          description: "Relative file path inside the current agent workspace.",
+          description: "Relative file path inside the current room workspace.",
         },
         content: {
           type: "string",
@@ -1212,8 +1229,10 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     execute: async (value, _signal, context) => {
       const args = value as z.infer<typeof workspaceAppendArgsSchema>;
       const agentId = getCurrentAgentId(context);
+      const roomId = getCurrentRoomId(context);
       const result = await appendAgentWorkspaceFile({
         agentId,
+        roomId,
         path: args.path,
         content: args.content,
       });
@@ -1225,18 +1244,18 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     name: "workspace_move",
     displayName: "Workspace Move",
     description:
-      "Rename or move a file or directory inside this agent's dedicated workspace. The destination must not already exist.",
+      "Rename or move a file or directory inside this agent's dedicated workspace for the current room. The destination must not already exist.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         fromPath: {
           type: "string",
-          description: "Existing relative source path inside the current agent workspace.",
+          description: "Existing relative source path inside the current room workspace.",
         },
         toPath: {
           type: "string",
-          description: "Relative destination path inside the current agent workspace.",
+          description: "Relative destination path inside the current room workspace.",
         },
       },
       required: ["fromPath", "toPath"],
@@ -1245,8 +1264,10 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     execute: async (value, _signal, context) => {
       const args = value as z.infer<typeof workspaceMoveArgsSchema>;
       const agentId = getCurrentAgentId(context);
+      const roomId = getCurrentRoomId(context);
       const result = await moveAgentWorkspaceEntry({
         agentId,
+        roomId,
         fromPath: args.fromPath,
         toPath: args.toPath,
       });
@@ -1258,14 +1279,14 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     name: "workspace_mkdir",
     displayName: "Workspace Mkdir",
     description:
-      "Create a directory inside this agent's dedicated workspace. Recursive creation is enabled by default.",
+      "Create a directory inside this agent's dedicated workspace for the current room. Recursive creation is enabled by default.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: {
           type: "string",
-          description: "Relative directory path inside the current agent workspace.",
+          description: "Relative directory path inside the current room workspace.",
         },
         recursive: {
           type: "boolean",
@@ -1278,8 +1299,10 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
     execute: async (value, _signal, context) => {
       const args = value as z.infer<typeof workspaceMkdirArgsSchema>;
       const agentId = getCurrentAgentId(context);
+      const roomId = getCurrentRoomId(context);
       const result = await mkdirAgentWorkspace({
         agentId,
+        roomId,
         path: args.path,
         recursive: args.recursive,
       });

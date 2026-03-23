@@ -225,7 +225,7 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "workspace_list",
       label: "Workspace List",
-      description: "List files and directories in your dedicated shared workspace for this agent type.",
+      description: "List files and directories in your dedicated workspace for this agent in the current room.",
       parameters: Type.Object({
         path: Type.Optional(Type.String({ description: "Optional relative directory path inside the workspace." })),
         recursive: Type.Optional(Type.Boolean({ description: "Whether to include nested entries recursively." })),
@@ -237,7 +237,7 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "workspace_read",
       label: "Workspace Read",
-      description: "Read a text file from your dedicated shared workspace for this agent type.",
+      description: "Read a text file from your dedicated workspace for this agent in the current room.",
       parameters: Type.Object({
         path: Type.String({ description: "Relative file path inside the workspace." }),
         fromLine: Type.Optional(Type.Integer({ description: "Optional 1-based starting line number." })),
@@ -249,7 +249,7 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "workspace_write",
       label: "Workspace Write",
-      description: "Create or overwrite a text file in your dedicated shared workspace for this agent type.",
+      description: "Create or overwrite a text file in your dedicated workspace for this agent in the current room.",
       parameters: Type.Object({
         path: Type.String({ description: "Relative file path inside the workspace." }),
         content: Type.String({ description: "Full file content to write." }),
@@ -260,7 +260,7 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "workspace_delete",
       label: "Workspace Delete",
-      description: "Delete a file or directory in your dedicated shared workspace. Use recursive=true for non-empty directories.",
+      description: "Delete a file or directory in your dedicated workspace for this agent in the current room. Use recursive=true for non-empty directories.",
       parameters: Type.Object({
         path: Type.String({ description: "Relative path inside the workspace." }),
         recursive: Type.Optional(Type.Boolean({ description: "Whether to delete directories recursively." })),
@@ -271,7 +271,7 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "workspace_append",
       label: "Workspace Append",
-      description: "Append text to the end of a file in your dedicated shared workspace, creating the file if needed.",
+      description: "Append text to the end of a file in your dedicated workspace for this agent in the current room, creating the file if needed.",
       parameters: Type.Object({
         path: Type.String({ description: "Relative file path inside the workspace." }),
         content: Type.String({ description: "Text content to append." }),
@@ -282,7 +282,7 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "workspace_move",
       label: "Workspace Move",
-      description: "Rename or move a file or directory within your dedicated shared workspace.",
+      description: "Rename or move a file or directory within your dedicated workspace for this agent in the current room.",
       parameters: Type.Object({
         fromPath: Type.String({ description: "Existing relative source path inside the workspace." }),
         toPath: Type.String({ description: "Relative destination path inside the workspace." }),
@@ -293,7 +293,7 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "workspace_mkdir",
       label: "Workspace Mkdir",
-      description: "Create a directory in your dedicated shared workspace, with recursive parent creation by default.",
+      description: "Create a directory in your dedicated workspace for this agent in the current room, with recursive parent creation by default.",
       parameters: Type.Object({
         path: Type.String({ description: "Relative directory path inside the workspace." }),
         recursive: Type.Optional(Type.Boolean({ description: "Whether to create missing parent directories automatically." })),

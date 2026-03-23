@@ -12,11 +12,11 @@ export type ProviderMode = "auto" | ProviderKey;
 
 export type ToolScope = "default" | "room";
 
-export const DEFAULT_MAX_TOOL_LOOP_STEPS = 6;
+export const DEFAULT_MAX_TOOL_LOOP_STEPS = 50;
 
 export const MIN_MAX_TOOL_LOOP_STEPS = 1;
 
-export const MAX_MAX_TOOL_LOOP_STEPS = 24;
+export const MAX_MAX_TOOL_LOOP_STEPS = 200;
 
 export type ChatCompletionsToolStyle = "tools" | "functions";
 

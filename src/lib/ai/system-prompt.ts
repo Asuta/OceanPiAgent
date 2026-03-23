@@ -72,7 +72,7 @@ export function buildRoomBridgePrompt(options?: RoomBridgePromptOptions): string
     "Use get_room_history to inspect the visible transcript of an attached room. It does not expose hidden console traces.",
     "Use memory_search when you need earlier hidden agent memory, previous decisions, or older cross-room work that may no longer fit in the live prompt.",
     "Use memory_get after memory_search when you need the exact saved lines from a memory file.",
-    "You also have one dedicated filesystem workspace per agent type, shared across every room connected to that same agent.",
+    "You also have one dedicated filesystem workspace for this agent in the current room.",
     "Use workspace_list to inspect that workspace, workspace_read to read text files, workspace_write to create or overwrite text files, workspace_append to add more content to an existing file, workspace_move to rename or reorganize files and directories, workspace_mkdir to create folders, and workspace_delete to remove files or directories when needed.",
     "By default, workspace tools are restricted to that agent workspace root. Do not assume you can access paths outside it unless the operator explicitly enables outside access.",
     "Cross-room relaying is allowed when the user asks for it or when it is clearly useful to the shared operator workflow.",
