@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ROOM_AGENTS,
   formatTimestamp,
@@ -247,6 +247,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const [consoleViewMode, setConsoleViewMode] = useState<"formatted" | "raw">("formatted");
   const [newParticipantName, setNewParticipantName] = useState("");
   const [titleDraftByRoomId, setTitleDraftByRoomId] = useState<Record<string, string>>({});
+  const threadListRef = useRef<HTMLDivElement | null>(null);
 
   const room = getRoomById(roomId);
 
@@ -266,6 +267,23 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
       router.replace(fallback ? `/rooms/${fallback.id}` : "/rooms");
     }
   }, [activeRooms, hydrated, room, router]);
+
+  useEffect(() => {
+    if (!room) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      const threadList = threadListRef.current;
+      if (!threadList) {
+        return;
+      }
+
+      threadList.scrollTop = threadList.scrollHeight;
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [room?.id]);
 
   const roomDraft = room ? draftsByRoomId[room.id] ?? "" : "";
   const isRunning = room ? isRoomRunning(room.id) : false;
@@ -481,8 +499,6 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
         </div>
       </section>
 
-      <RoomCronPanel room={room} />
-
       <div className="detail-grid page-enter page-enter-delay-1">
         <section className="surface-panel thread-panel">
           <div className="thread-panel-header">
@@ -504,7 +520,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
             </div>
           ) : null}
 
-          <div className="thread-list">
+          <div ref={threadListRef} className="thread-list">
             {room.roomMessages.length === 0 ? (
               <div className="empty-panel thread-empty rich-empty-state">
                 <div className="empty-orbit" aria-hidden="true">
@@ -851,6 +867,8 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                   </button>
                 </div>
               </section>
+
+              <RoomCronPanel room={room} className="subtle-panel" />
 
               <section className="subtle-panel">
                 <div className="section-heading-row compact-align">

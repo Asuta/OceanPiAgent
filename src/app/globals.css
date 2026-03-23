@@ -575,6 +575,12 @@ p {
   gap: 18px;
 }
 
+.thread-panel {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  max-height: min(78vh, 920px);
+  min-height: 620px;
+}
+
 .thread-panel-copy {
   margin-top: 6px;
   color: var(--ink-soft);
@@ -585,7 +591,32 @@ p {
   position: relative;
   display: grid;
   gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-color: rgba(15, 135, 115, 0.48) rgba(24, 53, 49, 0.06);
   padding-left: 10px;
+  padding-right: 10px;
+}
+
+.thread-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.thread-list::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: rgba(24, 53, 49, 0.06);
+}
+
+.thread-list::-webkit-scrollbar-thumb {
+  border: 2px solid rgba(255, 252, 247, 0.72);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(15, 135, 115, 0.5), rgba(24, 53, 49, 0.24));
+}
+
+.thread-list::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(15, 135, 115, 0.68), rgba(24, 53, 49, 0.36));
 }
 
 .thread-list::before {
@@ -1319,11 +1350,20 @@ p {
   }
 
   .thread-list {
+    max-height: none;
+    overflow: visible;
     padding-left: 0;
+    padding-right: 0;
   }
 
   .thread-list::before {
     display: none;
+  }
+
+  .thread-panel {
+    grid-template-rows: none;
+    max-height: none;
+    min-height: auto;
   }
 
   .thread-message-card {

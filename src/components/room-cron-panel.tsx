@@ -5,6 +5,7 @@ import type { CronDeliveryPolicy, RoomAgentId, RoomCronJob, RoomCronRunRecord, R
 
 type Props = {
   room: RoomSession;
+  className?: string;
 };
 
 type CronResponse = {
@@ -61,7 +62,7 @@ function defaultOnceValue(): string {
   return toDatetimeLocalValue(nextHour.toISOString());
 }
 
-export function RoomCronPanel({ room }: Props) {
+export function RoomCronPanel({ room, className }: Props) {
   const roomAgentIds = useMemo<RoomAgentId[]>(
     () =>
       room.participants
@@ -84,6 +85,7 @@ export function RoomCronPanel({ room }: Props) {
   const [weeklyTime, setWeeklyTime] = useState("09:00");
   const [deliveryPolicy, setDeliveryPolicy] = useState<CronDeliveryPolicy>("only_on_result");
   const selectedAgentId = roomAgentIds.includes(agentId) ? agentId : (roomAgentIds[0] ?? "concierge");
+  const panelClassName = className ?? "surface-panel page-enter page-enter-delay-1";
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -184,7 +186,7 @@ export function RoomCronPanel({ room }: Props) {
   };
 
   return (
-    <section className="surface-panel page-enter page-enter-delay-1">
+    <section className={panelClassName}>
       <div className="thread-panel-header">
         <div>
           <p className="section-label">Room Cron</p>
