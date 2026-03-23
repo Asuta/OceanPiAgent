@@ -24,37 +24,37 @@ export const TOOL_CATALOG = [
   {
     name: "workspace_list",
     title: "Workspace List",
-    description: "列出当前房间里这个 Agent 独立 workspace 的文件和目录，默认只允许访问自己的目录。",
+    description: "列出当前 Agent 独立 workspace 里的文件和目录，默认只允许访问自己的目录。",
   },
   {
     name: "workspace_read",
     title: "Workspace Read",
-    description: "读取当前房间里这个 Agent 独立 workspace 的文本文件，可按行切片查看。",
+    description: "读取当前 Agent 独立 workspace 里的文本文件，可按行切片查看。",
   },
   {
     name: "workspace_write",
     title: "Workspace Write",
-    description: "在当前房间里这个 Agent 独立 workspace 中创建或覆盖文本文件，自动补齐父目录。",
+    description: "在当前 Agent 独立 workspace 中创建或覆盖文本文件，自动补齐父目录。",
   },
   {
     name: "workspace_delete",
     title: "Workspace Delete",
-    description: "删除当前房间里这个 Agent 独立 workspace 中的文件或目录，目录删除可递归执行。",
+    description: "删除当前 Agent 独立 workspace 中的文件或目录，目录删除可递归执行。",
   },
   {
     name: "workspace_append",
     title: "Workspace Append",
-    description: "向当前房间里这个 Agent 独立 workspace 中的文本文件追加内容，不存在时自动创建。",
+    description: "向当前 Agent 独立 workspace 中的文本文件追加内容，不存在时自动创建。",
   },
   {
     name: "workspace_move",
     title: "Workspace Move",
-    description: "在当前房间里这个 Agent 独立 workspace 内重命名或移动文件、目录。",
+    description: "在当前 Agent 独立 workspace 内重命名或移动文件、目录。",
   },
   {
     name: "workspace_mkdir",
     title: "Workspace Mkdir",
-    description: "在当前房间里这个 Agent 独立 workspace 中创建目录，用于显式整理工作结构。",
+    description: "在当前 Agent 独立 workspace 中创建目录，用于显式整理工作结构。",
   },
 ] as const;
 
@@ -118,5 +118,5 @@ export const ROOM_BRIDGE_RULES = [
   "read_no_reply 和当前 room 的可见房间消息在同一轮里应该互斥，不要同时作为同一条消息的最终房间结果出现。",
   "群组管理工具可以列出当前已加入 rooms、查看 agent 电话本、创建新群、拉 agent 进群、退群、踢人，以及回看已加入群的可见历史。",
   "human 始终保留任意 room 的可见权和插话权；成员列表只决定哪些参与者被视为当前群成员与自动轮询对象。",
-  "每个房间里的 Agent 都有自己独立的 workspace，可通过 workspace_* 工具读写当前房间对应的目录。",
+  "每个 Agent 种类都有一份独立但跨房间共享的 workspace，可通过 workspace_* 工具读写自己的目录。",
 ] as const;

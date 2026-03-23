@@ -89,24 +89,16 @@ function getWorkspaceRootPath(): string {
   return WORKSPACE_ROOT;
 }
 
-function encodeWorkspaceScopeSegment(value: string): string {
-  return encodeURIComponent(value.trim()).replace(/%/g, "_");
-}
-
-export function getAgentWorkspaceDir(agentId: RoomAgentId, roomId?: string): string {
-  if (!roomId?.trim()) {
-    return path.join(getWorkspaceRootPath(), agentId);
-  }
-
-  return path.join(getWorkspaceRootPath(), agentId, encodeWorkspaceScopeSegment(roomId));
+export function getAgentWorkspaceDir(agentId: RoomAgentId): string {
+  return path.join(getWorkspaceRootPath(), agentId);
 }
 
 export function isAgentWorkspaceOutsideAccessEnabled(): boolean {
   return isTruthyEnv(process.env[ALLOW_OUTSIDE_WORKSPACE_ENV]);
 }
 
-async function ensureWorkspaceDir(agentId: RoomAgentId, roomId?: string): Promise<string> {
-  const dirPath = getAgentWorkspaceDir(agentId, roomId);
+async function ensureWorkspaceDir(agentId: RoomAgentId): Promise<string> {
+  const dirPath = getAgentWorkspaceDir(agentId);
   await mkdir(dirPath, { recursive: true });
   return dirPath;
 }
@@ -122,11 +114,10 @@ function toDisplayPath(workspaceRoot: string, absolutePath: string): string {
 
 async function resolveWorkspacePath(args: {
   agentId: RoomAgentId;
-  roomId?: string;
   inputPath?: string;
   allowWorkspaceRoot?: boolean;
 }): Promise<{ workspaceRoot: string; resolvedPath: string; displayPath: string }> {
-  const workspaceRoot = await ensureWorkspaceDir(args.agentId, args.roomId);
+  const workspaceRoot = await ensureWorkspaceDir(args.agentId);
   const rawPath = (args.inputPath || "").trim();
   if (!rawPath) {
     if (args.allowWorkspaceRoot) {
@@ -176,14 +167,12 @@ function clampLineWindow(lineCount: number, fromLine?: number, lineCountLimit?: 
 
 export async function listAgentWorkspace(args: {
   agentId: RoomAgentId;
-  roomId?: string;
   path?: string;
   recursive?: boolean;
   limit?: number;
 }): Promise<AgentWorkspaceListResult> {
   const target = await resolveWorkspacePath({
     agentId: args.agentId,
-    roomId: args.roomId,
     inputPath: args.path,
     allowWorkspaceRoot: true,
   });
@@ -241,14 +230,12 @@ export async function listAgentWorkspace(args: {
 
 export async function readAgentWorkspaceFile(args: {
   agentId: RoomAgentId;
-  roomId?: string;
   path: string;
   fromLine?: number;
   lineCount?: number;
 }): Promise<AgentWorkspaceReadResult> {
   const target = await resolveWorkspacePath({
     agentId: args.agentId,
-    roomId: args.roomId,
     inputPath: args.path,
   });
   const targetStats = await stat(target.resolvedPath).catch(() => null);
@@ -272,13 +259,11 @@ export async function readAgentWorkspaceFile(args: {
 
 export async function writeAgentWorkspaceFile(args: {
   agentId: RoomAgentId;
-  roomId?: string;
   path: string;
   content: string;
 }): Promise<AgentWorkspaceWriteResult> {
   const target = await resolveWorkspacePath({
     agentId: args.agentId,
-    roomId: args.roomId,
     inputPath: args.path,
   });
 
@@ -296,13 +281,11 @@ export async function writeAgentWorkspaceFile(args: {
 
 export async function appendAgentWorkspaceFile(args: {
   agentId: RoomAgentId;
-  roomId?: string;
   path: string;
   content: string;
 }): Promise<AgentWorkspaceAppendResult> {
   const target = await resolveWorkspacePath({
     agentId: args.agentId,
-    roomId: args.roomId,
     inputPath: args.path,
   });
 
@@ -325,18 +308,15 @@ export async function appendAgentWorkspaceFile(args: {
 
 export async function moveAgentWorkspaceEntry(args: {
   agentId: RoomAgentId;
-  roomId?: string;
   fromPath: string;
   toPath: string;
 }): Promise<AgentWorkspaceMoveResult> {
   const source = await resolveWorkspacePath({
     agentId: args.agentId,
-    roomId: args.roomId,
     inputPath: args.fromPath,
   });
   const destination = await resolveWorkspacePath({
     agentId: args.agentId,
-    roomId: args.roomId,
     inputPath: args.toPath,
   });
 
@@ -373,13 +353,11 @@ export async function moveAgentWorkspaceEntry(args: {
 
 export async function mkdirAgentWorkspace(args: {
   agentId: RoomAgentId;
-  roomId?: string;
   path: string;
   recursive?: boolean;
 }): Promise<AgentWorkspaceMkdirResult> {
   const target = await resolveWorkspacePath({
     agentId: args.agentId,
-    roomId: args.roomId,
     inputPath: args.path,
   });
 
@@ -410,13 +388,11 @@ export async function mkdirAgentWorkspace(args: {
 
 export async function deleteAgentWorkspaceEntry(args: {
   agentId: RoomAgentId;
-  roomId?: string;
   path: string;
   recursive?: boolean;
 }): Promise<AgentWorkspaceDeleteResult> {
   const target = await resolveWorkspacePath({
     agentId: args.agentId,
-    roomId: args.roomId,
     inputPath: args.path,
   });
   if (normalizeForComparison(target.resolvedPath) === normalizeForComparison(target.workspaceRoot)) {
