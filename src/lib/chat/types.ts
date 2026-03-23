@@ -1,0 +1,453 @@
+export type ChatRole = "user" | "assistant";
+
+export type ApiFormat = "chat_completions" | "responses";
+
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+export type ProviderKey = "openai" | "right_codes" | "generic";
+
+export type ProviderMode = "auto" | ProviderKey;
+
+export type ToolScope = "default" | "room";
+
+export const DEFAULT_MAX_TOOL_LOOP_STEPS = 6;
+
+export const MIN_MAX_TOOL_LOOP_STEPS = 1;
+
+export const MAX_MAX_TOOL_LOOP_STEPS = 24;
+
+export type ChatCompletionsToolStyle = "tools" | "functions";
+
+export type ResponsesContinuation = "previous_response_id" | "replay";
+
+export type ResponsesPayloadMode = "json" | "sse" | "auto";
+
+export type ToolExecutionStatus = "success" | "error";
+
+export type RoomAgentId = "concierge" | "researcher" | "operator";
+
+export type RoomMembershipRole = "owner" | "member";
+
+export interface ProviderCompatibility {
+  providerKey: ProviderKey;
+  providerLabel: string;
+  baseUrl: string;
+  chatCompletionsToolStyle: ChatCompletionsToolStyle;
+  responsesContinuation: ResponsesContinuation;
+  responsesPayloadMode: ResponsesPayloadMode;
+  notes: string[];
+}
+
+export type RoomMessageRole = "user" | "assistant" | "system";
+
+export type RoomMessageSource = "user" | "agent_emit" | "system";
+
+export type RoomMessageKind =
+  | "user_input"
+  | "answer"
+  | "progress"
+  | "warning"
+  | "error"
+  | "clarification"
+  | "system";
+
+export type RoomMessageStatus = "pending" | "streaming" | "completed" | "failed";
+
+export type RoomMessageReceiptStatus = "none" | "read_no_reply";
+
+export interface RoomMessageReceipt {
+  participantId: string;
+  participantName: string;
+  agentId?: RoomAgentId;
+  type: "read_no_reply";
+  createdAt: string;
+}
+
+export type RoomSenderRole = "participant" | "system";
+
+export type RoomParticipantRuntimeKind = "human" | "agent";
+
+export interface RoomSender {
+  id: string;
+  name: string;
+  role: RoomSenderRole;
+}
+
+export interface RoomParticipant {
+  id: string;
+  name: string;
+  senderRole: RoomSenderRole;
+  runtimeKind: RoomParticipantRuntimeKind;
+  enabled: boolean;
+  order: number;
+  agentId?: RoomAgentId;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentInfoCard {
+  agentId: RoomAgentId;
+  label: string;
+  summary: string;
+  skills: string[];
+  workingStyle: string;
+}
+
+export interface RoomParticipantSnapshot {
+  participantId: string;
+  name: string;
+  runtimeKind: RoomParticipantRuntimeKind;
+  membershipRole: RoomMembershipRole;
+  enabled: boolean;
+  agentId?: RoomAgentId;
+}
+
+export interface AttachedRoomDefinition {
+  id: string;
+  title: string;
+  archived: boolean;
+  ownerParticipantId: string | null;
+  ownerName: string | null;
+  currentAgentMembershipRole: RoomMembershipRole | null;
+  currentAgentIsOwner: boolean;
+  participants: RoomParticipantSnapshot[];
+  messageCount: number;
+  latestMessageAt: string | null;
+}
+
+export interface RoomHistoryMessageSummary {
+  messageId: string;
+  seq: number;
+  senderId: string;
+  senderName: string;
+  senderRole: RoomSenderRole;
+  role: RoomMessageRole;
+  source: RoomMessageSource;
+  kind: RoomMessageKind;
+  status: RoomMessageStatus;
+  final: boolean;
+  createdAt: string;
+  content: string;
+  receipts: RoomMessageReceipt[];
+}
+
+export interface RoomToolContext {
+  currentAgentId?: RoomAgentId;
+  currentRoomId?: string;
+  attachedRooms: AttachedRoomDefinition[];
+  knownAgents: AgentInfoCard[];
+  roomHistoryById: Record<string, RoomHistoryMessageSummary[]>;
+}
+
+export interface RoomSchedulerState {
+  status: "idle" | "running";
+  nextAgentParticipantId: string | null;
+  activeParticipantId: string | null;
+  roundCount: number;
+  agentCursorByParticipantId: Record<string, number>;
+  agentReceiptRevisionByParticipantId: Record<string, number>;
+}
+
+export type AgentVisibleRoomMessageKind = Exclude<RoomMessageKind, "user_input" | "system">;
+
+export interface RoomToolAction {
+  type: "read_no_reply";
+  roomId: string;
+  messageId: string;
+}
+
+export interface CreateRoomToolAction {
+  type: "create_room";
+  roomId: string;
+  title: string;
+  agentIds: RoomAgentId[];
+}
+
+export interface AddAgentsToRoomToolAction {
+  type: "add_agents_to_room";
+  roomId: string;
+  agentIds: RoomAgentId[];
+}
+
+export interface LeaveRoomToolAction {
+  type: "leave_room";
+  roomId: string;
+}
+
+export interface RemoveRoomParticipantToolAction {
+  type: "remove_room_participant";
+  roomId: string;
+  participantId: string;
+}
+
+export type RoomManagementToolAction =
+  | CreateRoomToolAction
+  | AddAgentsToRoomToolAction
+  | LeaveRoomToolAction
+  | RemoveRoomParticipantToolAction;
+
+export type RoomToolActionUnion = RoomToolAction | RoomManagementToolAction;
+
+export interface RoomMessageEmission {
+  roomId: string;
+  content: string;
+  kind: AgentVisibleRoomMessageKind;
+  status: RoomMessageStatus;
+  final: boolean;
+}
+
+export interface RoomMessage {
+  id: string;
+  roomId: string;
+  seq: number;
+  role: RoomMessageRole;
+  sender: RoomSender;
+  content: string;
+  source: RoomMessageSource;
+  kind: RoomMessageKind;
+  status: RoomMessageStatus;
+  final: boolean;
+  createdAt: string;
+  receipts: RoomMessageReceipt[];
+  receiptStatus: RoomMessageReceiptStatus;
+  receiptUpdatedAt: string | null;
+}
+
+export interface RoomMessageReceiptUpdate {
+  roomId: string;
+  messageId: string;
+  receipt: RoomMessageReceipt;
+  receiptStatus: RoomMessageReceiptStatus;
+  receiptUpdatedAt: string | null;
+}
+
+export interface RoomAgentSnapshot {
+  id: RoomAgentId;
+  label: string;
+}
+
+export interface RoomAgentDefinition extends RoomAgentSnapshot {
+  summary: string;
+  skills: string[];
+  workingStyle: string;
+  instruction: string;
+}
+
+export interface AgentSharedState {
+  settings: ChatSettings;
+  agentTurns: AgentRoomTurn[];
+  resolvedModel: string;
+  compatibility: ProviderCompatibility | null;
+  updatedAt: string;
+}
+
+export interface ToolExecution {
+  id: string;
+  sequence: number;
+  toolName: string;
+  displayName: string;
+  inputSummary: string;
+  inputText: string;
+  resultPreview: string;
+  outputText: string;
+  status: ToolExecutionStatus;
+  durationMs: number;
+  roomMessage?: RoomMessageEmission;
+  roomAction?: RoomToolActionUnion;
+}
+
+export interface EmptyCompletionDiagnostic {
+  createdAt: string;
+  apiFormat: ApiFormat;
+  providerKey: ProviderKey;
+  providerLabel: string;
+  requestedModel: string;
+  resolvedModel: string;
+  baseUrl: string;
+  textDeltaLength: number;
+  finalTextLength: number;
+  toolCallCount: number;
+  toolEventCount: number;
+  payloadMode?: ResponsesPayloadMode;
+  finishReason?: string | null;
+  responseId?: string;
+  assistantContentShape?: string;
+  outputItemTypes?: string[];
+  chunkCount?: number;
+  sawDoneEvent?: boolean;
+  chunkPreviews?: string[];
+}
+
+export interface RecoveryAttemptDiagnostic {
+  attempt: number;
+  strategy: "retry_no_output" | "resume_after_tools";
+  trigger: "finish_reason_error";
+  delayMs: number;
+  toolEventCount: number;
+  finishReason?: string | null;
+  chunkCount?: number;
+  sawDoneEvent?: boolean;
+  chunkPreviews?: string[];
+}
+
+export interface RecoveryDiagnostic {
+  attempts: RecoveryAttemptDiagnostic[];
+}
+
+export interface AssistantMessageMeta {
+  apiFormat: ApiFormat;
+  compatibility: ProviderCompatibility;
+  emptyCompletion?: EmptyCompletionDiagnostic;
+  recovery?: RecoveryDiagnostic;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: ChatRole;
+  content: string;
+  tools?: ToolExecution[];
+  meta?: AssistantMessageMeta;
+}
+
+export interface ChatSettings {
+  apiFormat: ApiFormat;
+  model: string;
+  systemPrompt: string;
+  providerMode: ProviderMode;
+  maxToolLoopSteps: number;
+  thinkingLevel: ThinkingLevel;
+  enabledSkillIds: string[];
+}
+
+export interface ChatRequestBody {
+  messages: ChatMessage[];
+  settings: ChatSettings;
+  stream?: boolean;
+}
+
+export type AgentTurnStatus = "running" | "continued" | "completed" | "error";
+
+export interface AgentRoomTurn {
+  id: string;
+  agent: RoomAgentSnapshot;
+  userMessage: RoomMessage;
+  assistantContent: string;
+  tools: ToolExecution[];
+  emittedMessages: RoomMessage[];
+  status: AgentTurnStatus;
+  meta?: AssistantMessageMeta;
+  resolvedModel?: string;
+  error?: string;
+}
+
+export interface RoomSession {
+  id: string;
+  title: string;
+  agentId: RoomAgentId;
+  archivedAt: string | null;
+  ownerParticipantId: string | null;
+  receiptRevision: number;
+  participants: RoomParticipant[];
+  scheduler: RoomSchedulerState;
+  roomMessages: RoomMessage[];
+  agentTurns: AgentRoomTurn[];
+  error: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RoomWorkspaceState {
+  rooms: RoomSession[];
+  agentStates: Record<RoomAgentId, AgentSharedState>;
+  activeRoomId: string;
+  selectedConsoleAgentId?: RoomAgentId;
+}
+
+export interface RoomChatResponseBody {
+  turn: AgentRoomTurn;
+  resolvedModel: string;
+  compatibility: ProviderCompatibility;
+  emittedMessages: RoomMessage[];
+  receiptUpdates: RoomMessageReceiptUpdate[];
+}
+
+export interface ChatResponseBody {
+  message: ChatMessage;
+  resolvedModel: string;
+  compatibility: ProviderCompatibility;
+}
+
+export type ChatStreamEvent =
+  | {
+      type: "text-delta";
+      delta: string;
+    }
+  | {
+      type: "tool";
+      tool: ToolExecution;
+    }
+  | {
+      type: "done";
+      message: ChatMessage;
+      resolvedModel: string;
+      compatibility: ProviderCompatibility;
+    }
+  | {
+      type: "error";
+      error: string;
+      meta?: AssistantMessageMeta;
+    };
+
+export type RoomChatStreamEvent =
+  | {
+      type: "agent-text-delta";
+      delta: string;
+    }
+  | {
+      type: "tool";
+      tool: ToolExecution;
+    }
+  | {
+      type: "room-message";
+      message: RoomMessage;
+    }
+  | {
+      type: "message-receipt";
+      update: RoomMessageReceiptUpdate;
+    }
+  | {
+      type: "done";
+      turn: AgentRoomTurn;
+      resolvedModel: string;
+      compatibility: ProviderCompatibility;
+    }
+  | {
+      type: "error";
+      error: string;
+      meta?: AssistantMessageMeta;
+    };
+
+export function coerceMaxToolLoopSteps(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_MAX_TOOL_LOOP_STEPS;
+  }
+
+  const rounded = Math.round(value);
+  return Math.min(MAX_MAX_TOOL_LOOP_STEPS, Math.max(MIN_MAX_TOOL_LOOP_STEPS, rounded));
+}
+
+export function coerceThinkingLevel(value: unknown): ThinkingLevel {
+  return typeof value === "string" && THINKING_LEVELS.includes(value as ThinkingLevel)
+    ? (value as ThinkingLevel)
+    : "off";
+}
+
+export function coerceSkillIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))].slice(0, 24);
+}
