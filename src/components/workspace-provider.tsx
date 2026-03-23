@@ -1692,6 +1692,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [agentStates, setAgentStates] = useState<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates());
   const [activeRoomId, setActiveRoomId] = useState("");
   const [selectedConsoleAgentId, setSelectedConsoleAgentId] = useState<RoomAgentId | null>(null);
+  const [workspaceVersion, setWorkspaceVersion] = useState(0);
   const [selectedSenderByRoomId, setSelectedSenderByRoomId] = useState<Record<string, string>>({});
   const [draftsByRoomId, setDraftsByRoomId] = useState<Record<string, string>>({});
   const [runningAgentRequestIds, setRunningAgentRequestIds] = useState<Record<string, string>>({});
@@ -1702,69 +1703,123 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const activeSchedulerRunsRef = useRef<Record<string, ActiveSchedulerRun>>({});
   const roomsRef = useRef<RoomSession[]>([]);
   const agentStatesRef = useRef<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates());
+  const workspaceVersionRef = useRef(0);
+  const skipNextServerPersistRef = useRef(false);
   const runRoomSchedulerRef = useRef<(roomId: string) => Promise<void>>(async () => undefined);
 
+  const applyWorkspaceSnapshot = useCallback(
+    (
+      snapshot: RoomWorkspaceState,
+      version: number,
+      options?: {
+        skipServerPersist?: boolean;
+      },
+    ) => {
+      if (options?.skipServerPersist) {
+        skipNextServerPersistRef.current = true;
+      }
+      const nextRooms = snapshot.rooms.length > 0 ? snapshot.rooms : [createRoomSession(1)];
+      const nextAgentStates = snapshot.agentStates;
+      const nextActiveRoomId =
+        snapshot.activeRoomId && nextRooms.some((room) => room.id === snapshot.activeRoomId)
+          ? snapshot.activeRoomId
+          : nextRooms[0]?.id ?? "";
+      const nextSelectedConsoleAgentId = snapshot.selectedConsoleAgentId ?? getPrimaryRoomAgentId(nextRooms[0]);
+
+      roomsRef.current = nextRooms;
+      agentStatesRef.current = nextAgentStates;
+      workspaceVersionRef.current = version;
+      setRooms(nextRooms);
+      setAgentStates(nextAgentStates);
+      setActiveRoomId(nextActiveRoomId);
+      setSelectedConsoleAgentId(nextSelectedConsoleAgentId);
+      setWorkspaceVersion(version);
+      setHydrated(true);
+    },
+    [],
+  );
+
   useEffect(() => {
-    try {
-      const persisted = localStorage.getItem(STORAGE_KEY);
-      const parsedWorkspace = persisted ? parseWorkspaceState(persisted) : null;
+    let cancelled = false;
 
-      if (parsedWorkspace) {
-        roomsRef.current = parsedWorkspace.rooms;
-        agentStatesRef.current = parsedWorkspace.agentStates;
-        setRooms(parsedWorkspace.rooms);
-        setAgentStates(parsedWorkspace.agentStates);
-        setActiveRoomId(parsedWorkspace.activeRoomId);
-        setSelectedConsoleAgentId(parsedWorkspace.selectedConsoleAgentId ?? getPrimaryRoomAgentId(parsedWorkspace.rooms[0]));
-        setHydrated(true);
-        return;
-      }
+    const loadLocalWorkspace = (): RoomWorkspaceState | null => {
+      try {
+        const persisted = localStorage.getItem(STORAGE_KEY);
+        const parsedWorkspace = persisted ? parseWorkspaceState(persisted) : null;
+        if (parsedWorkspace) {
+          return parsedWorkspace;
+        }
 
-      const previousPersisted = localStorage.getItem(PREVIOUS_STORAGE_KEY);
-      const previousWorkspace = previousPersisted ? parseWorkspaceState(previousPersisted) : null;
-      if (previousWorkspace) {
-        roomsRef.current = previousWorkspace.rooms;
-        agentStatesRef.current = previousWorkspace.agentStates;
-        setRooms(previousWorkspace.rooms);
-        setAgentStates(previousWorkspace.agentStates);
-        setActiveRoomId(previousWorkspace.activeRoomId);
-        setSelectedConsoleAgentId(previousWorkspace.selectedConsoleAgentId ?? getPrimaryRoomAgentId(previousWorkspace.rooms[0]));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(previousWorkspace));
+        const previousPersisted = localStorage.getItem(PREVIOUS_STORAGE_KEY);
+        const previousWorkspace = previousPersisted ? parseWorkspaceState(previousPersisted) : null;
+        if (previousWorkspace) {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(previousWorkspace));
+          localStorage.removeItem(PREVIOUS_STORAGE_KEY);
+          return previousWorkspace;
+        }
+
+        const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+        const migratedWorkspace = legacy ? migrateLegacyWorkspaceState(legacy) : null;
+        if (migratedWorkspace) {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(migratedWorkspace));
+          localStorage.removeItem(LEGACY_STORAGE_KEY);
+          return migratedWorkspace;
+        }
+      } catch {
+        localStorage.removeItem(STORAGE_KEY);
         localStorage.removeItem(PREVIOUS_STORAGE_KEY);
-        setHydrated(true);
-        return;
-      }
-
-      const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
-      const migratedWorkspace = legacy ? migrateLegacyWorkspaceState(legacy) : null;
-      if (migratedWorkspace) {
-        roomsRef.current = migratedWorkspace.rooms;
-        agentStatesRef.current = migratedWorkspace.agentStates;
-        setRooms(migratedWorkspace.rooms);
-        setAgentStates(migratedWorkspace.agentStates);
-        setActiveRoomId(migratedWorkspace.activeRoomId);
-        setSelectedConsoleAgentId(migratedWorkspace.selectedConsoleAgentId ?? getPrimaryRoomAgentId(migratedWorkspace.rooms[0]));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(migratedWorkspace));
         localStorage.removeItem(LEGACY_STORAGE_KEY);
-        setHydrated(true);
+      }
+
+      return null;
+    };
+
+    void (async () => {
+      const response = await fetch("/api/workspace", { cache: "no-store" }).catch(() => null);
+      const serverEnvelope = response?.ok
+        ? ((await response.json().catch(() => null)) as { version?: number; state?: RoomWorkspaceState } | null)
+        : null;
+      const serverVersion = typeof serverEnvelope?.version === "number" ? serverEnvelope.version : 0;
+      const serverState = serverEnvelope?.state ?? null;
+      const localWorkspace = loadLocalWorkspace();
+
+      if (cancelled) {
         return;
       }
-    } catch {
-      localStorage.removeItem(STORAGE_KEY);
-      localStorage.removeItem(PREVIOUS_STORAGE_KEY);
-      localStorage.removeItem(LEGACY_STORAGE_KEY);
-    }
 
-    const initialRoom = createRoomSession(1);
-    roomsRef.current = [initialRoom];
-    const initialAgentStates = createInitialAgentStates();
-    agentStatesRef.current = initialAgentStates;
-    setRooms([initialRoom]);
-    setAgentStates(initialAgentStates);
-    setActiveRoomId(initialRoom.id);
-    setSelectedConsoleAgentId(initialRoom.agentId);
-    setHydrated(true);
-  }, []);
+      if (serverState && serverVersion > 0) {
+        applyWorkspaceSnapshot(serverState, serverVersion, { skipServerPersist: true });
+        return;
+      }
+
+      if (localWorkspace) {
+        applyWorkspaceSnapshot(localWorkspace, serverVersion, { skipServerPersist: false });
+        return;
+      }
+
+      if (serverState) {
+        applyWorkspaceSnapshot(serverState, serverVersion, { skipServerPersist: true });
+        return;
+      }
+
+      const initialRoom = createRoomSession(1);
+      const initialAgentStates = createInitialAgentStates();
+      applyWorkspaceSnapshot(
+        {
+          rooms: [initialRoom],
+          agentStates: initialAgentStates,
+          activeRoomId: initialRoom.id,
+          selectedConsoleAgentId: initialRoom.agentId,
+        },
+        0,
+        { skipServerPersist: false },
+      );
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyWorkspaceSnapshot]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -1802,6 +1857,107 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       } satisfies RoomWorkspaceState),
     );
   }, [activeRoomId, agentStates, hydrated, rooms, selectedConsoleAgentId]);
+
+  useEffect(() => {
+    workspaceVersionRef.current = workspaceVersion;
+  }, [workspaceVersion]);
+
+  useEffect(() => {
+    if (!hydrated || rooms.length === 0 || !activeRoomId) {
+      return;
+    }
+
+    if (skipNextServerPersistRef.current) {
+      skipNextServerPersistRef.current = false;
+      return;
+    }
+
+    const payload = {
+      rooms,
+      agentStates,
+      activeRoomId,
+      selectedConsoleAgentId: selectedConsoleAgentId ?? undefined,
+    } satisfies RoomWorkspaceState;
+
+    const timer = setTimeout(() => {
+      void (async () => {
+        const response = await fetch("/api/workspace", {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            expectedVersion: workspaceVersionRef.current,
+            state: payload,
+          }),
+        }).catch(() => null);
+
+        if (!response) {
+          return;
+        }
+
+        if (response.ok) {
+          const nextEnvelope = (await response.json().catch(() => null)) as { version?: number } | null;
+          if (typeof nextEnvelope?.version === "number") {
+            workspaceVersionRef.current = nextEnvelope.version;
+            setWorkspaceVersion(nextEnvelope.version);
+          }
+          return;
+        }
+
+        if (response.status === 409) {
+          const conflictPayload = (await response.json().catch(() => null)) as {
+            envelope?: { version?: number; state?: RoomWorkspaceState };
+          } | null;
+          if (
+            typeof conflictPayload?.envelope?.version === "number"
+            && conflictPayload.envelope.state
+            && Object.keys(activeRunsRef.current).length === 0
+          ) {
+            applyWorkspaceSnapshot(conflictPayload.envelope.state, conflictPayload.envelope.version, {
+              skipServerPersist: true,
+            });
+          }
+        }
+      })();
+    }, 400);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [activeRoomId, agentStates, applyWorkspaceSnapshot, hydrated, rooms, selectedConsoleAgentId]);
+
+  useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      if (Object.keys(activeRunsRef.current).length > 0) {
+        return;
+      }
+
+      void (async () => {
+        const response = await fetch("/api/workspace", { cache: "no-store" }).catch(() => null);
+        if (!response?.ok) {
+          return;
+        }
+
+        const payload = (await response.json().catch(() => null)) as { version?: number; state?: RoomWorkspaceState } | null;
+        if (
+          typeof payload?.version === "number"
+          && payload.version > workspaceVersionRef.current
+          && payload.state
+        ) {
+          applyWorkspaceSnapshot(payload.state, payload.version, { skipServerPersist: true });
+        }
+      })();
+    }, 15_000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [applyWorkspaceSnapshot, hydrated]);
 
   useEffect(
     () => () => {

@@ -17,6 +17,7 @@ import {
   getToolStats,
   useWorkspace,
 } from "@/components/workspace-provider";
+import { RoomCronPanel } from "@/components/room-cron-panel";
 import type { AgentRoomTurn, RoomAgentId, RoomMessage, RoomParticipant } from "@/lib/chat/types";
 
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
@@ -480,6 +481,8 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
         </div>
       </section>
 
+      <RoomCronPanel room={room} />
+
       <div className="detail-grid page-enter page-enter-delay-1">
         <section className="surface-panel thread-panel">
           <div className="thread-panel-header">
@@ -635,7 +638,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                   ? "当前 Agent 正在处理中；发送新消息会接管当前轮询。"
                   : localParticipantMissing
                     ? "你当前不在成员列表里；发送消息会自动重新加入。"
-                    : "房间、轨迹和设置仍然保存在浏览器本地。"}
+                    : "房间状态现在会同步到服务端；本地仍保留一份缓存副本。"}
               </span>
               <button type="submit" className="primary-button" disabled={!canSend}>
                 发送消息

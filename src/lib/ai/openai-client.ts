@@ -4,6 +4,7 @@ import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { resolvePiModel } from "@/lib/ai/pi-model-resolver";
 import { getPiAgentTools, type PiToolResultDetails } from "@/lib/ai/pi-agent-tools";
 import { runBeforeModelResolveHooks, runBeforePromptBuildHooks } from "@/lib/ai/runtime-hooks";
+import { ensureGlobalProxyDispatcherInstalled } from "@/lib/server/proxy-fetch";
 import type {
   ApiFormat,
   AssistantMessageMeta,
@@ -162,6 +163,67 @@ function createConversationError(message: string, apiFormat: ApiFormat, compatib
   });
 }
 
+function readErrorCode(error: unknown, depth = 0): string | undefined {
+  if (depth > 5 || !error || typeof error !== "object") {
+    return undefined;
+  }
+
+  if ("code" in error && typeof error.code === "string") {
+    return error.code;
+  }
+
+  if ("cause" in error) {
+    return readErrorCode(error.cause, depth + 1);
+  }
+
+  return undefined;
+}
+
+function collectErrorMessages(error: unknown, depth = 0): string[] {
+  if (depth > 5 || !error) {
+    return [];
+  }
+
+  if (typeof error === "string") {
+    return [error];
+  }
+
+  if (!(error instanceof Error)) {
+    if (typeof error === "object" && "cause" in error) {
+      return collectErrorMessages(error.cause, depth + 1);
+    }
+
+    return [];
+  }
+
+  const messages = error.message ? [error.message] : [];
+  return messages.concat(collectErrorMessages(error.cause, depth + 1));
+}
+
+function normalizeConversationFailure(error: unknown, fallback: string): string {
+  const code = readErrorCode(error);
+  const combinedMessages = collectErrorMessages(error)
+    .join("\n")
+    .toUpperCase();
+
+  if (code === "UND_ERR_CONNECT_TIMEOUT" || combinedMessages.includes("UND_ERR_CONNECT_TIMEOUT")) {
+    return "Timed out while connecting to the model endpoint. This machine may need `HTTPS_PROXY` or `HTTP_PROXY` configured.";
+  }
+
+  if (
+    code === "ECONNREFUSED"
+    || code === "ENETUNREACH"
+    || code === "EHOSTUNREACH"
+    || combinedMessages.includes("ECONNREFUSED")
+    || combinedMessages.includes("ENETUNREACH")
+    || combinedMessages.includes("EHOSTUNREACH")
+  ) {
+    return "The upstream model endpoint is unreachable from this machine. Check network access, proxy settings, and the configured base URL.";
+  }
+
+  return fallback;
+}
+
 function getGeneratedAssistantMessages(messages: Message[]): AssistantMessage[] {
   return messages.filter(isAssistantMessage);
 }
@@ -173,6 +235,7 @@ async function executeConversation(
   options?: ConversationOptions,
 ): Promise<RunConversationResult> {
   throwIfAborted(options?.signal);
+  ensureGlobalProxyDispatcherInstalled();
 
   const resolvedOptions = resolveConversationOptions({
     ...options,
@@ -253,6 +316,12 @@ async function executeConversation(
 
   try {
     await agent.continue();
+  } catch (error) {
+    throw createConversationError(
+      normalizeConversationFailure(error, error instanceof Error ? error.message : "The model request failed."),
+      resolvedModel.actualApiFormat,
+      resolvedModel.compatibility,
+    );
   } finally {
     unsubscribe();
     resolvedOptions.signal?.removeEventListener("abort", abortListener);
@@ -274,7 +343,7 @@ async function executeConversation(
 
   if (finalAssistantMessage?.stopReason === "error" || finalAssistantMessage?.stopReason === "aborted") {
     throw createConversationError(
-      finalAssistantMessage.errorMessage || "The model request failed.",
+      normalizeConversationFailure(finalAssistantMessage.errorMessage, finalAssistantMessage.errorMessage || "The model request failed."),
       resolvedModel.actualApiFormat,
       resolvedModel.compatibility,
     );

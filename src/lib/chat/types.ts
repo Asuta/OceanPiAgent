@@ -365,6 +365,57 @@ export interface RoomWorkspaceState {
   selectedConsoleAgentId?: RoomAgentId;
 }
 
+export type CronDeliveryPolicy = "silent" | "only_on_result" | "always_post_summary";
+
+export type RoomCronSchedule =
+  | {
+      type: "once";
+      at: string;
+    }
+  | {
+      type: "daily";
+      time: string;
+    }
+  | {
+      type: "weekly";
+      dayOfWeek: number;
+      time: string;
+    };
+
+export type RoomCronJobStatus = "idle" | "queued" | "running" | "error";
+
+export interface RoomCronJob {
+  id: string;
+  agentId: RoomAgentId;
+  targetRoomId: string;
+  title: string;
+  prompt: string;
+  schedule: RoomCronSchedule;
+  deliveryPolicy: CronDeliveryPolicy;
+  enabled: boolean;
+  status: RoomCronJobStatus;
+  lastRunAt: string | null;
+  nextRunAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type RoomCronRunStatus = "running" | "completed" | "failed";
+
+export interface RoomCronRunRecord {
+  id: string;
+  jobId: string;
+  agentId: RoomAgentId;
+  targetRoomId: string;
+  scheduledFor: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: RoomCronRunStatus;
+  summary: string;
+  error: string | null;
+}
+
 export interface RoomChatResponseBody {
   turn: AgentRoomTurn;
   resolvedModel: string;

@@ -1,4 +1,4 @@
-import { ProxyAgent, type Dispatcher } from "undici";
+import { ProxyAgent, getGlobalDispatcher, setGlobalDispatcher, type Dispatcher } from "undici";
 
 type FetchOptions = RequestInit & {
   dispatcher?: Dispatcher;
@@ -16,6 +16,7 @@ const PROXY_ENV_KEYS = [
 const NO_PROXY_ENV_KEYS = ["NO_PROXY", "no_proxy"] as const;
 
 const dispatcherCache = new Map<string, Dispatcher>();
+let installedGlobalProxyUrl: string | null = null;
 
 function readProxyUrl(): string | undefined {
   for (const key of PROXY_ENV_KEYS) {
@@ -74,6 +75,21 @@ function getProxyDispatcher(proxyUrl: string): Dispatcher {
   const dispatcher = new ProxyAgent(proxyUrl);
   dispatcherCache.set(proxyUrl, dispatcher);
   return dispatcher;
+}
+
+export function ensureGlobalProxyDispatcherInstalled(): void {
+  const proxyUrl = readProxyUrl();
+  if (!proxyUrl || installedGlobalProxyUrl === proxyUrl) {
+    return;
+  }
+
+  const currentDispatcher = getGlobalDispatcher();
+  const nextDispatcher = getProxyDispatcher(proxyUrl);
+  if (currentDispatcher !== nextDispatcher) {
+    setGlobalDispatcher(nextDispatcher);
+  }
+
+  installedGlobalProxyUrl = proxyUrl;
 }
 
 export async function proxyAwareFetch(input: string | URL, init?: RequestInit): Promise<Response> {

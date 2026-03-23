@@ -357,6 +357,10 @@ export function isCurrentAgentRun(agentId: RoomAgentId, requestId: string): bool
   return getOrCreateSession(agentId).activeRun?.requestId === requestId;
 }
 
+export function hasActiveAgentRoomRun(agentId: RoomAgentId): boolean {
+  return Boolean(getOrCreateSession(agentId).activeRun);
+}
+
 export function recordAgentTextDelta(agentId: RoomAgentId, requestId: string, delta: string): void {
   const run = getOrCreateSession(agentId).activeRun;
   if (!run || run.requestId !== requestId) {
