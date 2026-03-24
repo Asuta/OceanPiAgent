@@ -1381,43 +1381,6 @@ function updateTurn(
   return turns.map((turn) => (turn.id === turnId ? updater(turn) : turn));
 }
 
-function buildTurnContinuationSnapshot(turn: AgentRoomTurn, roomTitle: string): string {
-  const sections = [
-    "[Continuation snapshot from an unfinished shared agent run]",
-    `Current room context: ${roomTitle} (${turn.userMessage.roomId})`,
-    `Original user message id: ${turn.userMessage.id}`,
-    `Original sender: ${turn.userMessage.sender.name} (${turn.userMessage.sender.id}, ${turn.userMessage.sender.role})`,
-    `Original room message:\n${turn.userMessage.content}`,
-  ];
-
-  if (turn.emittedMessages.length > 0) {
-    sections.push(
-      [
-        "Room-visible deliveries already sent:",
-        ...turn.emittedMessages.slice(-8).map(
-          (message) =>
-            `- to room ${message.roomId}: [${message.kind} / ${message.status}${message.final ? " / final" : ""}] ${message.content}`,
-        ),
-      ].join("\n"),
-    );
-  }
-
-  if (turn.tools.length > 0) {
-    sections.push(
-      [
-        "Completed tool work so far:",
-        ...turn.tools.slice(-8).map((tool) => `- ${tool.displayName}: ${tool.resultPreview}`),
-      ].join("\n"),
-    );
-  }
-
-  if (turn.assistantContent.trim()) {
-    sections.push(`Partial internal draft (incomplete; use only as context):\n${turn.assistantContent.trim()}`);
-  }
-
-  return sections.join("\n\n");
-}
-
 function updateRoomMessage(
   messages: RoomMessage[],
   messageId: string,
@@ -2634,13 +2597,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const roomTitle = roomSnapshot.title;
       const agent = getRoomAgent(args.agentId);
       const previousActiveRun = getActiveAgentRun(agent.id);
-      const previousTurn = previousActiveRun
-        ? (agentStatesRef.current[agent.id]?.agentTurns.find((turn) => turn.id === previousActiveRun.turnId) ?? null)
-        : null;
-      const previousRoomTitle = previousTurn
-        ? (roomsRef.current.find((room) => room.id === previousTurn.userMessage.roomId)?.title ?? previousTurn.userMessage.roomId)
-        : "";
-      const continuationSnapshot = previousTurn ? buildTurnContinuationSnapshot(previousTurn, previousRoomTitle) : undefined;
       const pendingTurn = {
         id: crypto.randomUUID(),
         agent: {
@@ -2648,11 +2604,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           label: agent.label,
         },
         userMessage: args.inputMessage,
-        ...(continuationSnapshot
-          ? {
-              continuationSnapshot,
-            }
-          : {}),
         assistantContent: "",
         tools: [],
         emittedMessages: [],

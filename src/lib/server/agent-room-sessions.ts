@@ -292,12 +292,13 @@ export async function startAgentRoomRun(args: {
 }) {
   const session = await hydrateSession(args.agentId);
   const previousRun = session.activeRun;
+  const continuationSnapshot = previousRun ? buildContinuationSnapshot(previousRun) : undefined;
 
   if (previousRun) {
     session.history.push({
       id: crypto.randomUUID(),
       role: "assistant",
-      content: buildContinuationSnapshot(previousRun),
+      content: continuationSnapshot,
       createdAt: createTimestamp(),
     });
     session.updatedAt = createTimestamp();
@@ -356,6 +357,7 @@ export async function startAgentRoomRun(args: {
     history: toVisibleHistory(session.history),
     compatibility: session.compatibility,
     resolvedModel: session.resolvedModel,
+    continuationSnapshot,
   };
 }
 

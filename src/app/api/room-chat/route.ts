@@ -262,6 +262,7 @@ function createTurn(
   meta: AgentRoomTurn["meta"],
   resolvedModel: string,
   status: AgentRoomTurn["status"],
+  continuationSnapshot?: string,
   error?: string,
 ): AgentRoomTurn {
   return {
@@ -282,6 +283,11 @@ function createTurn(
     status,
     meta,
     resolvedModel,
+    ...(continuationSnapshot
+      ? {
+          continuationSnapshot,
+        }
+      : {}),
     ...(error
       ? {
           error,
@@ -446,6 +452,7 @@ export async function POST(request: Request) {
           },
           result.resolvedModel,
           "completed",
+          runContext.continuationSnapshot,
         ),
         resolvedModel: result.resolvedModel,
         compatibility: result.compatibility,
@@ -581,6 +588,7 @@ export async function POST(request: Request) {
                   },
                   result.resolvedModel,
                   "completed",
+                  runContext.continuationSnapshot,
                 ),
                 resolvedModel: result.resolvedModel,
                 compatibility: result.compatibility,

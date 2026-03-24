@@ -139,6 +139,7 @@ function createTurn(
   meta: AgentRoomTurn["meta"],
   resolvedModel: string,
   status: AgentRoomTurn["status"],
+  continuationSnapshot?: string,
   error?: string,
 ): AgentRoomTurn {
   return {
@@ -159,6 +160,7 @@ function createTurn(
     status,
     meta,
     resolvedModel,
+    ...(continuationSnapshot ? { continuationSnapshot } : {}),
     ...(error ? { error } : {}),
   };
 }
@@ -347,6 +349,7 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
       },
       result.resolvedModel,
       "completed",
+      runContext.continuationSnapshot,
     );
 
     return {
@@ -378,6 +381,7 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
         meta,
         runContext.resolvedModel,
         "error",
+        runContext.continuationSnapshot,
         message,
       ),
       resolvedModel: runContext.resolvedModel,
