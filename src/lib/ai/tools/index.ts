@@ -11,9 +11,24 @@ import {
   writeAgentWorkspaceFile,
 } from "@/lib/server/agent-workspace-store";
 import { readAgentMemoryFile, searchAgentMemory } from "@/lib/server/agent-memory-store";
+import {
+  createManagedCronJob,
+  deleteManagedCronJob,
+  getCronJobDetails,
+  listCronJobs,
+  listCronRuns,
+  pauseManagedCronJob,
+  previewCronSchedule,
+  resumeManagedCronJob,
+  runManagedCronJobNow,
+  updateManagedCronJob,
+} from "@/lib/server/cron-service";
 import type {
   AgentInfoCard,
   AttachedRoomDefinition,
+  RoomCronJob,
+  RoomCronRunRecord,
+  RoomCronSchedule,
   RoomAgentId,
   RoomHistoryMessageSummary,
   RoomManagementToolAction,
@@ -38,6 +53,16 @@ type ToolName =
   | "leave_room"
   | "remove_room_participant"
   | "get_room_history"
+  | "list_cron_jobs"
+  | "get_cron_job"
+  | "create_cron_job"
+  | "update_cron_job"
+  | "pause_cron_job"
+  | "resume_cron_job"
+  | "delete_cron_job"
+  | "run_cron_job_now"
+  | "list_cron_runs"
+  | "preview_cron_schedule"
   | "memory_search"
   | "memory_get"
   | "workspace_list"
@@ -224,6 +249,121 @@ const workspaceMkdirArgsSchema = z
   })
   .strict();
 
+const cronScheduleTypeSchema = z.enum(["once", "daily", "weekly"]);
+const cronDeliveryPolicySchema = z.enum(["silent", "only_on_result", "always_post_summary"]);
+const cronJobStatusSchema = z.enum(["idle", "queued", "running", "error"]);
+const cronRunStatusSchema = z.enum(["running", "completed", "failed"]);
+
+const cronCreateArgsSchema = z
+  .object({
+    targetRoomId: optionalTrimmedString(120),
+    title: z.string().trim().min(1).max(120),
+    prompt: z.string().trim().min(1).max(4_000),
+    scheduleType: cronScheduleTypeSchema,
+    onceAt: optionalTrimmedString(120),
+    time: optionalTrimmedString(5),
+    dayOfWeek: z.number().int().min(0).max(6).optional(),
+    deliveryPolicy: cronDeliveryPolicySchema.optional().default("only_on_result"),
+    enabled: z.boolean().optional().default(true),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.scheduleType === "once" && !value.onceAt) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["onceAt"], message: "onceAt is required for once schedules." });
+    }
+    if ((value.scheduleType === "daily" || value.scheduleType === "weekly") && !value.time) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["time"], message: "time is required for daily and weekly schedules." });
+    }
+    if (value.scheduleType === "weekly" && typeof value.dayOfWeek !== "number") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["dayOfWeek"], message: "dayOfWeek is required for weekly schedules." });
+    }
+  });
+
+const cronUpdateArgsSchema = z
+  .object({
+    jobId: z.string().trim().min(1).max(120),
+    targetRoomId: optionalTrimmedString(120),
+    title: optionalTrimmedString(120),
+    prompt: optionalTrimmedString(4_000),
+    scheduleType: cronScheduleTypeSchema.optional(),
+    onceAt: optionalTrimmedString(120),
+    time: optionalTrimmedString(5),
+    dayOfWeek: z.number().int().min(0).max(6).optional(),
+    deliveryPolicy: cronDeliveryPolicySchema.optional(),
+    enabled: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const hasScheduleField = typeof value.scheduleType !== "undefined" || typeof value.onceAt !== "undefined" || typeof value.time !== "undefined" || typeof value.dayOfWeek !== "undefined";
+    if (!hasScheduleField && typeof value.targetRoomId === "undefined" && typeof value.title === "undefined" && typeof value.prompt === "undefined" && typeof value.deliveryPolicy === "undefined" && typeof value.enabled === "undefined") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Provide at least one field to update." });
+    }
+    if (hasScheduleField && !value.scheduleType) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["scheduleType"], message: "scheduleType is required when updating schedule fields." });
+    }
+    if (value.scheduleType === "once" && !value.onceAt) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["onceAt"], message: "onceAt is required for once schedules." });
+    }
+    if ((value.scheduleType === "daily" || value.scheduleType === "weekly") && !value.time) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["time"], message: "time is required for daily and weekly schedules." });
+    }
+    if (value.scheduleType === "weekly" && typeof value.dayOfWeek !== "number") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["dayOfWeek"], message: "dayOfWeek is required for weekly schedules." });
+    }
+  });
+
+const cronListJobsArgsSchema = z
+  .object({
+    targetRoomId: optionalTrimmedString(120),
+    status: cronJobStatusSchema.optional(),
+    enabled: z.boolean().optional(),
+    limit: z.number().int().min(1).max(100).optional().default(25),
+  })
+  .strict();
+
+const cronGetJobArgsSchema = z
+  .object({
+    jobId: z.string().trim().min(1).max(120),
+    includeRuns: z.boolean().optional().default(true),
+    runLimit: z.number().int().min(1).max(50).optional().default(5),
+  })
+  .strict();
+
+const cronJobActionArgsSchema = z
+  .object({
+    jobId: z.string().trim().min(1).max(120),
+  })
+  .strict();
+
+const cronListRunsArgsSchema = z
+  .object({
+    jobId: optionalTrimmedString(120),
+    targetRoomId: optionalTrimmedString(120),
+    status: cronRunStatusSchema.optional(),
+    limit: z.number().int().min(1).max(100).optional().default(10),
+  })
+  .strict();
+
+const cronPreviewArgsSchema = z
+  .object({
+    scheduleType: cronScheduleTypeSchema,
+    onceAt: optionalTrimmedString(120),
+    time: optionalTrimmedString(5),
+    dayOfWeek: z.number().int().min(0).max(6).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.scheduleType === "once" && !value.onceAt) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["onceAt"], message: "onceAt is required for once schedules." });
+    }
+    if ((value.scheduleType === "daily" || value.scheduleType === "weekly") && !value.time) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["time"], message: "time is required for daily and weekly schedules." });
+    }
+    if (value.scheduleType === "weekly" && typeof value.dayOfWeek !== "number") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["dayOfWeek"], message: "dayOfWeek is required for weekly schedules." });
+    }
+  });
+
 function getRoomToolContext(context?: ToolExecutionContext): RoomToolContext {
   if (!context?.room) {
     throw new Error("This tool requires room context, but no room context was supplied.");
@@ -285,6 +425,92 @@ function assertRoomOwner(context: RoomToolContext, room: AttachedRoomDefinition)
   if (room.ownerParticipantId !== context.currentAgentId) {
     throw new Error(`Only the room owner can modify membership in room ${room.id}.`);
   }
+}
+
+function buildCronSchedule(args: {
+  scheduleType: z.infer<typeof cronScheduleTypeSchema>;
+  onceAt?: string;
+  time?: string;
+  dayOfWeek?: number;
+}): RoomCronSchedule {
+  if (args.scheduleType === "once") {
+    return {
+      type: "once",
+      at: new Date(args.onceAt as string).toISOString(),
+    };
+  }
+  if (args.scheduleType === "daily") {
+    return {
+      type: "daily",
+      time: args.time as string,
+    };
+  }
+  return {
+    type: "weekly",
+    dayOfWeek: args.dayOfWeek as number,
+    time: args.time as string,
+  };
+}
+
+function getCronScope(context?: ToolExecutionContext): { agentId: RoomAgentId; roomContext: RoomToolContext; targetRoomIds: string[] } {
+  const roomContext = getRoomToolContext(context);
+  return {
+    agentId: getCurrentAgentId(context),
+    roomContext,
+    targetRoomIds: roomContext.attachedRooms.map((room) => room.id),
+  };
+}
+
+function resolveCronTargetRoomId(roomContext: RoomToolContext, targetRoomId?: string): string {
+  const resolvedRoomId = targetRoomId ?? roomContext.currentRoomId;
+  if (!resolvedRoomId) {
+    throw new Error("No target roomId was provided and there is no current room in context.");
+  }
+  const room = getAttachedRoom(roomContext, resolvedRoomId);
+  assertWritableRoom(room);
+  return room.id;
+}
+
+function buildCronRoomTitleMap(roomContext: RoomToolContext): Map<string, string> {
+  return new Map(roomContext.attachedRooms.map((room) => [room.id, room.title]));
+}
+
+function formatCronJobOutput(job: RoomCronJob, roomTitleById: Map<string, string>) {
+  return {
+    jobId: job.id,
+    agentId: job.agentId,
+    targetRoomId: job.targetRoomId,
+    targetRoomTitle: roomTitleById.get(job.targetRoomId) ?? null,
+    title: job.title,
+    prompt: job.prompt,
+    schedule: job.schedule,
+    scheduleDescription: previewCronSchedule(job.schedule).description,
+    deliveryPolicy: job.deliveryPolicy,
+    enabled: job.enabled,
+    status: job.status,
+    nextRunAt: job.nextRunAt,
+    lastRunAt: job.lastRunAt,
+    lastError: job.lastError,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  };
+}
+
+function formatCronRunOutput(run: RoomCronRunRecord, roomTitleById: Map<string, string>, jobTitleById: Map<string, string>) {
+  return {
+    runId: run.id,
+    jobId: run.jobId,
+    jobTitle: jobTitleById.get(run.jobId) ?? null,
+    agentId: run.agentId,
+    targetRoomId: run.targetRoomId,
+    targetRoomTitle: roomTitleById.get(run.targetRoomId) ?? null,
+    scheduledFor: run.scheduledFor,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    status: run.status,
+    summary: run.summary,
+    error: run.error,
+  };
 }
 
 function formatJsonOutput(value: unknown): string {
@@ -967,6 +1193,477 @@ const roomOnlyTools: Record<Exclude<ToolName, "web_fetch" | "custom_command">, T
         returnedCount: messages.length,
         messages,
       });
+    },
+  },
+  list_cron_jobs: {
+    name: "list_cron_jobs",
+    displayName: "List Cron Jobs",
+    description:
+      "List scheduled tasks owned by the current agent across its attached rooms. You can optionally filter by targetRoomId, status, enabled state, and limit.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        targetRoomId: {
+          type: "string",
+          description: "Optional attached room id to filter scheduled tasks.",
+        },
+        status: {
+          type: "string",
+          enum: ["idle", "queued", "running", "error"],
+          description: "Optional cron job status filter.",
+        },
+        enabled: {
+          type: "boolean",
+          description: "Optional enabled-state filter.",
+        },
+        limit: {
+          type: "number",
+          description: "Optional maximum number of jobs to return. Defaults to 25.",
+        },
+      },
+    },
+    validate: (value) => cronListJobsArgsSchema.parse(value),
+    execute: async (value, _signal, context) => {
+      const args = value as z.infer<typeof cronListJobsArgsSchema>;
+      const { agentId, roomContext, targetRoomIds } = getCronScope(context);
+      if (args.targetRoomId) {
+        getAttachedRoom(roomContext, args.targetRoomId);
+      }
+      const jobs = await listCronJobs({
+        agentId,
+        targetRoomIds,
+        roomId: args.targetRoomId,
+        status: args.status,
+        enabled: args.enabled,
+        limit: args.limit,
+      });
+      const roomTitleById = buildCronRoomTitleMap(roomContext);
+      return createStructuredOutput({
+        totalCount: jobs.length,
+        jobs: jobs.map((job) => formatCronJobOutput(job, roomTitleById)),
+      });
+    },
+  },
+  get_cron_job: {
+    name: "get_cron_job",
+    displayName: "Get Cron Job",
+    description:
+      "Read one scheduled task owned by the current agent, plus optional recent run history, as long as the target room is attached to the current agent.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        jobId: {
+          type: "string",
+          description: "The cron job id to inspect.",
+        },
+        includeRuns: {
+          type: "boolean",
+          description: "Whether to include recent runs. Defaults to true.",
+        },
+        runLimit: {
+          type: "number",
+          description: "How many recent runs to include when includeRuns is true. Defaults to 5.",
+        },
+      },
+      required: ["jobId"],
+    },
+    validate: (value) => cronGetJobArgsSchema.parse(value),
+    execute: async (value, _signal, context) => {
+      const args = value as z.infer<typeof cronGetJobArgsSchema>;
+      const { agentId, roomContext, targetRoomIds } = getCronScope(context);
+      const details = await getCronJobDetails(args.jobId, {
+        agentId,
+        targetRoomIds,
+        runLimit: args.includeRuns ? args.runLimit : 1,
+      });
+      const roomTitleById = buildCronRoomTitleMap(roomContext);
+      const jobTitleById = new Map([[details.job.id, details.job.title]]);
+      return createStructuredOutput({
+        job: formatCronJobOutput(details.job, roomTitleById),
+        recentRuns: args.includeRuns ? details.runs.map((run) => formatCronRunOutput(run, roomTitleById, jobTitleById)) : [],
+      });
+    },
+  },
+  create_cron_job: {
+    name: "create_cron_job",
+    displayName: "Create Cron Job",
+    description:
+      "Create a scheduled task for the current agent in the current room or another attached room. The current agent is always the executor; you cannot create cron jobs for a different agent.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        targetRoomId: {
+          type: "string",
+          description: "Optional attached room id. Defaults to the current room.",
+        },
+        title: {
+          type: "string",
+          description: "Human-readable cron job title.",
+        },
+        prompt: {
+          type: "string",
+          description: "Operator instruction that should run when the cron job triggers.",
+        },
+        scheduleType: {
+          type: "string",
+          enum: ["once", "daily", "weekly"],
+          description: "The schedule type.",
+        },
+        onceAt: {
+          type: "string",
+          description: "Required when scheduleType=once. Use an ISO timestamp or a datetime string the server can parse.",
+        },
+        time: {
+          type: "string",
+          description: "Required when scheduleType is daily or weekly. Use HH:mm.",
+        },
+        dayOfWeek: {
+          type: "number",
+          description: "Required when scheduleType=weekly. 0=Sunday through 6=Saturday.",
+        },
+        deliveryPolicy: {
+          type: "string",
+          enum: ["silent", "only_on_result", "always_post_summary"],
+          description: "How the run may emit visible room messages.",
+        },
+        enabled: {
+          type: "boolean",
+          description: "Whether the job starts enabled. Defaults to true.",
+        },
+      },
+      required: ["title", "prompt", "scheduleType"],
+    },
+    validate: (value) => cronCreateArgsSchema.parse(value),
+    execute: async (value, _signal, context) => {
+      const args = value as z.infer<typeof cronCreateArgsSchema>;
+      const { agentId, roomContext, targetRoomIds } = getCronScope(context);
+      const targetRoomId = resolveCronTargetRoomId(roomContext, args.targetRoomId);
+      const schedule = buildCronSchedule(args);
+      const job = await createManagedCronJob(
+        {
+          agentId,
+          targetRoomId,
+          title: args.title,
+          prompt: args.prompt,
+          schedule,
+          deliveryPolicy: args.deliveryPolicy,
+          enabled: args.enabled,
+        },
+        {
+          agentId,
+          targetRoomIds,
+        },
+      );
+      const roomTitleById = buildCronRoomTitleMap(roomContext);
+      return createStructuredOutput({
+        created: true,
+        job: formatCronJobOutput(job, roomTitleById),
+        schedulePreview: previewCronSchedule(schedule),
+      });
+    },
+  },
+  update_cron_job: {
+    name: "update_cron_job",
+    displayName: "Update Cron Job",
+    description:
+      "Update a scheduled task owned by the current agent. To change schedule fields, provide scheduleType together with the fields required for that schedule shape.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        jobId: {
+          type: "string",
+          description: "The cron job id to update.",
+        },
+        targetRoomId: {
+          type: "string",
+          description: "Optional attached room id to move the job to.",
+        },
+        title: {
+          type: "string",
+          description: "Optional new title.",
+        },
+        prompt: {
+          type: "string",
+          description: "Optional new prompt.",
+        },
+        scheduleType: {
+          type: "string",
+          enum: ["once", "daily", "weekly"],
+          description: "Required when updating schedule fields.",
+        },
+        onceAt: {
+          type: "string",
+          description: "Required when scheduleType=once.",
+        },
+        time: {
+          type: "string",
+          description: "Required when scheduleType is daily or weekly. Use HH:mm.",
+        },
+        dayOfWeek: {
+          type: "number",
+          description: "Required when scheduleType=weekly. 0=Sunday through 6=Saturday.",
+        },
+        deliveryPolicy: {
+          type: "string",
+          enum: ["silent", "only_on_result", "always_post_summary"],
+          description: "Optional new delivery policy.",
+        },
+        enabled: {
+          type: "boolean",
+          description: "Optional enabled-state update.",
+        },
+      },
+      required: ["jobId"],
+    },
+    validate: (value) => cronUpdateArgsSchema.parse(value),
+    execute: async (value, _signal, context) => {
+      const args = value as z.infer<typeof cronUpdateArgsSchema>;
+      const { agentId, roomContext, targetRoomIds } = getCronScope(context);
+      const patch = {
+        ...(args.targetRoomId ? { targetRoomId: resolveCronTargetRoomId(roomContext, args.targetRoomId) } : {}),
+        ...(args.title ? { title: args.title } : {}),
+        ...(args.prompt ? { prompt: args.prompt } : {}),
+        ...(typeof args.deliveryPolicy !== "undefined" ? { deliveryPolicy: args.deliveryPolicy } : {}),
+        ...(typeof args.enabled !== "undefined" ? { enabled: args.enabled } : {}),
+        ...(args.scheduleType
+          ? {
+              schedule: buildCronSchedule({
+                scheduleType: args.scheduleType,
+                onceAt: args.onceAt,
+                time: args.time,
+                dayOfWeek: args.dayOfWeek,
+              }),
+            }
+          : {}),
+      };
+      const job = await updateManagedCronJob(args.jobId, patch, {
+        agentId,
+        targetRoomIds,
+      });
+      const roomTitleById = buildCronRoomTitleMap(roomContext);
+      return createStructuredOutput({
+        updated: true,
+        job: formatCronJobOutput(job, roomTitleById),
+      });
+    },
+  },
+  pause_cron_job: {
+    name: "pause_cron_job",
+    displayName: "Pause Cron Job",
+    description: "Disable one scheduled task owned by the current agent without deleting it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        jobId: {
+          type: "string",
+          description: "The cron job id to pause.",
+        },
+      },
+      required: ["jobId"],
+    },
+    validate: (value) => cronJobActionArgsSchema.parse(value),
+    execute: async (value, _signal, context) => {
+      const args = value as z.infer<typeof cronJobActionArgsSchema>;
+      const { agentId, roomContext, targetRoomIds } = getCronScope(context);
+      const job = await pauseManagedCronJob(args.jobId, {
+        agentId,
+        targetRoomIds,
+      });
+      const roomTitleById = buildCronRoomTitleMap(roomContext);
+      return createStructuredOutput({
+        paused: true,
+        job: formatCronJobOutput(job, roomTitleById),
+      });
+    },
+  },
+  resume_cron_job: {
+    name: "resume_cron_job",
+    displayName: "Resume Cron Job",
+    description: "Re-enable one paused scheduled task owned by the current agent and recompute its next run time.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        jobId: {
+          type: "string",
+          description: "The cron job id to resume.",
+        },
+      },
+      required: ["jobId"],
+    },
+    validate: (value) => cronJobActionArgsSchema.parse(value),
+    execute: async (value, _signal, context) => {
+      const args = value as z.infer<typeof cronJobActionArgsSchema>;
+      const { agentId, roomContext, targetRoomIds } = getCronScope(context);
+      const job = await resumeManagedCronJob(args.jobId, {
+        agentId,
+        targetRoomIds,
+      });
+      const roomTitleById = buildCronRoomTitleMap(roomContext);
+      return createStructuredOutput({
+        resumed: true,
+        job: formatCronJobOutput(job, roomTitleById),
+      });
+    },
+  },
+  delete_cron_job: {
+    name: "delete_cron_job",
+    displayName: "Delete Cron Job",
+    description: "Delete one scheduled task owned by the current agent.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        jobId: {
+          type: "string",
+          description: "The cron job id to delete.",
+        },
+      },
+      required: ["jobId"],
+    },
+    validate: (value) => cronJobActionArgsSchema.parse(value),
+    execute: async (value, _signal, context) => {
+      const args = value as z.infer<typeof cronJobActionArgsSchema>;
+      const { agentId, roomContext, targetRoomIds } = getCronScope(context);
+      const details = await getCronJobDetails(args.jobId, {
+        agentId,
+        targetRoomIds,
+        runLimit: 1,
+      });
+      await deleteManagedCronJob(args.jobId, {
+        agentId,
+        targetRoomIds,
+      });
+      const roomTitleById = buildCronRoomTitleMap(roomContext);
+      return createStructuredOutput({
+        deleted: true,
+        job: formatCronJobOutput(details.job, roomTitleById),
+      });
+    },
+  },
+  run_cron_job_now: {
+    name: "run_cron_job_now",
+    displayName: "Run Cron Job Now",
+    description: "Queue one scheduled task owned by the current agent for immediate execution without changing its future schedule.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        jobId: {
+          type: "string",
+          description: "The cron job id to queue immediately.",
+        },
+      },
+      required: ["jobId"],
+    },
+    validate: (value) => cronJobActionArgsSchema.parse(value),
+    execute: async (value, _signal, context) => {
+      const args = value as z.infer<typeof cronJobActionArgsSchema>;
+      const { agentId, roomContext, targetRoomIds } = getCronScope(context);
+      const job = await runManagedCronJobNow(args.jobId, {
+        agentId,
+        targetRoomIds,
+      });
+      const roomTitleById = buildCronRoomTitleMap(roomContext);
+      return createStructuredOutput({
+        queuedNow: true,
+        job: formatCronJobOutput(job, roomTitleById),
+      });
+    },
+  },
+  list_cron_runs: {
+    name: "list_cron_runs",
+    displayName: "List Cron Runs",
+    description:
+      "List recent execution records for scheduled tasks owned by the current agent across attached rooms. You can filter by jobId, targetRoomId, status, and limit.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        jobId: {
+          type: "string",
+          description: "Optional cron job id filter.",
+        },
+        targetRoomId: {
+          type: "string",
+          description: "Optional attached room id filter.",
+        },
+        status: {
+          type: "string",
+          enum: ["running", "completed", "failed"],
+          description: "Optional run status filter.",
+        },
+        limit: {
+          type: "number",
+          description: "Optional maximum number of run records to return. Defaults to 10.",
+        },
+      },
+    },
+    validate: (value) => cronListRunsArgsSchema.parse(value),
+    execute: async (value, _signal, context) => {
+      const args = value as z.infer<typeof cronListRunsArgsSchema>;
+      const { agentId, roomContext, targetRoomIds } = getCronScope(context);
+      if (args.targetRoomId) {
+        getAttachedRoom(roomContext, args.targetRoomId);
+      }
+      const runs = await listCronRuns({
+        agentId,
+        targetRoomIds,
+        jobId: args.jobId,
+        roomId: args.targetRoomId,
+        status: args.status,
+        limit: args.limit,
+      });
+      const jobs = await listCronJobs({
+        agentId,
+        targetRoomIds,
+      });
+      const roomTitleById = buildCronRoomTitleMap(roomContext);
+      const jobTitleById = new Map(jobs.map((job) => [job.id, job.title]));
+      return createStructuredOutput({
+        totalCount: runs.length,
+        runs: runs.map((run) => formatCronRunOutput(run, roomTitleById, jobTitleById)),
+      });
+    },
+  },
+  preview_cron_schedule: {
+    name: "preview_cron_schedule",
+    displayName: "Preview Cron Schedule",
+    description: "Preview how a proposed schedule will be interpreted, including the next and following trigger times.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        scheduleType: {
+          type: "string",
+          enum: ["once", "daily", "weekly"],
+          description: "The schedule type to preview.",
+        },
+        onceAt: {
+          type: "string",
+          description: "Required when scheduleType=once.",
+        },
+        time: {
+          type: "string",
+          description: "Required when scheduleType is daily or weekly. Use HH:mm.",
+        },
+        dayOfWeek: {
+          type: "number",
+          description: "Required when scheduleType=weekly. 0=Sunday through 6=Saturday.",
+        },
+      },
+      required: ["scheduleType"],
+    },
+    validate: (value) => cronPreviewArgsSchema.parse(value),
+    execute: async (value) => {
+      const args = value as z.infer<typeof cronPreviewArgsSchema>;
+      const schedule = buildCronSchedule(args);
+      return createStructuredOutput(previewCronSchedule(schedule));
     },
   },
   memory_search: {

@@ -13,13 +13,16 @@ import { applyCronTurnToWorkspace, createAgentSharedState, createTimestamp } fro
 type QueuedCronJob = {
   jobId: string;
   scheduledFor: string;
+  force?: boolean;
 };
 
 const CRON_TICK_MS = 15_000;
 const AGENT_QUEUE_RETRY_MS = 2_000;
+const CRON_DISPATCHER_VERSION = 2;
 
 declare global {
   var __oceankingCronDispatcherStarted: boolean | undefined;
+  var __oceankingCronDispatcherVersion: number | undefined;
   var __oceankingCronInterval: NodeJS.Timeout | undefined;
   var __oceankingCronQueues: Map<string, QueuedCronJob[]> | undefined;
   var __oceankingCronProcessingAgents: Set<string> | undefined;
@@ -85,19 +88,25 @@ function enqueueJob(agentId: string, item: QueuedCronJob): void {
   cronQueues.set(agentId, [...currentQueue, item]);
 }
 
-async function markJobQueued(job: RoomCronJob, scheduledFor: string): Promise<void> {
+async function markJobQueued(job: RoomCronJob, scheduledFor: string, options?: { force?: boolean }): Promise<void> {
   await mutateCronStore((store) => ({
     ...store,
     jobs: store.jobs.map((entry) => {
-      if (entry.id !== job.id || !entry.enabled) {
+      if (entry.id !== job.id || (!entry.enabled && !options?.force)) {
         return entry;
+      }
+      if (options?.force) {
+        return {
+          ...entry,
+          status: "queued",
+          updatedAt: createTimestamp(),
+        } satisfies RoomCronJob;
       }
       const nextRunAt = computeFollowingRunAt(entry.schedule, scheduledFor);
       return {
         ...entry,
         status: "queued",
         nextRunAt,
-        ...(entry.schedule.type === "once" && !nextRunAt ? { enabled: false } : {}),
         updatedAt: createTimestamp(),
       } satisfies RoomCronJob;
     }),
@@ -131,10 +140,42 @@ async function finalizeRun(args: {
             status: args.status === "completed" ? "idle" : "error",
             lastRunAt: createTimestamp(),
             lastError: args.error,
+            ...(job.schedule.type === "once"
+              ? {
+                  enabled: false,
+                  nextRunAt: null,
+                }
+              : {}),
             updatedAt: createTimestamp(),
           }
         : job,
     ),
+  }));
+}
+
+async function repairLegacyQueuedOnceJobs(): Promise<void> {
+  const store = await loadCronStore();
+  const needsRepair = store.jobs.some(
+    (job) => job.schedule.type === "once" && job.status === "queued" && !job.enabled && !job.lastRunAt && !job.nextRunAt,
+  );
+  if (!needsRepair) {
+    return;
+  }
+
+  await mutateCronStore((snapshot) => ({
+    ...snapshot,
+    jobs: snapshot.jobs.map((job) => {
+      if (job.schedule.type !== "once" || job.status !== "queued" || job.enabled || job.lastRunAt || job.nextRunAt) {
+        return job;
+      }
+      return {
+        ...job,
+        enabled: true,
+        status: "idle",
+        nextRunAt: job.schedule.at,
+        updatedAt: createTimestamp(),
+      } satisfies RoomCronJob;
+    }),
   }));
 }
 
@@ -159,7 +200,7 @@ async function startRunRecord(job: RoomCronJob, scheduledFor: string): Promise<R
 
 async function runQueuedJob(item: QueuedCronJob): Promise<void> {
   const store = await loadCronStore();
-  const job = store.jobs.find((entry) => entry.id === item.jobId && entry.enabled);
+  const job = store.jobs.find((entry) => entry.id === item.jobId && (entry.enabled || item.force));
   if (!job) {
     return;
   }
@@ -274,6 +315,7 @@ async function processAgentQueue(agentId: string): Promise<void> {
 }
 
 async function tickCronJobs(): Promise<void> {
+  await repairLegacyQueuedOnceJobs();
   const store = await loadCronStore();
   const now = Date.now();
   const dueJobs = store.jobs.filter(
@@ -294,17 +336,26 @@ export async function enqueueCronJobNow(jobId: string): Promise<void> {
   if (!job) {
     throw new Error("Cron job not found.");
   }
+  if (job.status === "queued" || job.status === "running") {
+    throw new Error("Cron job is already queued or running.");
+  }
   const scheduledFor = createTimestamp();
-  await markJobQueued(job, scheduledFor);
-  enqueueJob(job.agentId, { jobId: job.id, scheduledFor });
+  await markJobQueued(job, scheduledFor, { force: true });
+  enqueueJob(job.agentId, { jobId: job.id, scheduledFor, force: true });
   void processAgentQueue(job.agentId);
 }
 
 export function ensureCronDispatcherStarted(): void {
-  if (globalThis.__oceankingCronDispatcherStarted) {
+  if (globalThis.__oceankingCronDispatcherStarted && globalThis.__oceankingCronDispatcherVersion === CRON_DISPATCHER_VERSION) {
     return;
   }
+
+  if (globalThis.__oceankingCronInterval) {
+    clearInterval(globalThis.__oceankingCronInterval);
+  }
+
   globalThis.__oceankingCronDispatcherStarted = true;
+  globalThis.__oceankingCronDispatcherVersion = CRON_DISPATCHER_VERSION;
   globalThis.__oceankingCronInterval = setInterval(() => {
     void tickCronJobs();
   }, CRON_TICK_MS);

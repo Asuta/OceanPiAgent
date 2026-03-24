@@ -178,7 +178,7 @@ export function createCronJob(input: Omit<RoomCronJob, "id" | "status" | "lastRu
     id: crypto.randomUUID(),
     status: "idle",
     lastRunAt: null,
-    nextRunAt: computeNextRunAt(input.schedule),
+    nextRunAt: input.enabled ? computeNextRunAt(input.schedule) : null,
     lastError: null,
     createdAt: timestamp,
     updatedAt: timestamp,
