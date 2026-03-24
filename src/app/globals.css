@@ -401,7 +401,7 @@ p {
 }
 
 .detail-grid {
-  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.86fr);
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
   align-items: start;
 }
 
@@ -571,12 +571,18 @@ p {
 .thread-panel,
 .inspector-panel,
 .settings-card {
-  display: grid;
   gap: 18px;
 }
 
+.section-panel,
+.inspector-panel,
+.settings-card {
+  display: grid;
+}
+
 .thread-panel {
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   max-height: min(78vh, 920px);
   min-height: 620px;
 }
@@ -588,16 +594,26 @@ p {
 }
 
 .thread-list {
+  flex: 1 1 auto;
   position: relative;
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   gap: 14px;
-  min-height: 0;
+  width: 100%;
+  min-height: 280px;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   scrollbar-color: rgba(15, 135, 115, 0.48) rgba(24, 53, 49, 0.06);
-  padding-left: 10px;
-  padding-right: 10px;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+.thread-list > * {
+  align-self: stretch;
+  min-width: 0;
+  width: 100%;
 }
 
 .thread-list::-webkit-scrollbar {
@@ -624,12 +640,13 @@ p {
   position: absolute;
   top: 8px;
   bottom: 8px;
-  left: 24px;
+  left: 20px;
   width: 1px;
   background: linear-gradient(180deg, rgba(15, 135, 115, 0.14), rgba(24, 53, 49, 0.04));
 }
 
 .thread-live-banner {
+  flex-shrink: 0;
   position: relative;
   display: flex;
   align-items: center;
@@ -656,6 +673,8 @@ p {
   z-index: 1;
   display: grid;
   gap: 4px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .thread-live-copy p {
@@ -783,14 +802,39 @@ p {
 
 .thread-message-card {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr);
   gap: 12px;
-  padding: 18px;
+  width: 100%;
+  padding: 18px 20px;
   border-radius: 20px;
   border: 1px solid var(--line);
   background: rgba(255, 252, 247, 0.76);
   animation: messageIn 420ms ease both;
   transform-origin: top left;
+}
+
+.thread-message-card.is-streaming {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  border-color: rgba(15, 135, 115, 0.22);
+  background: linear-gradient(135deg, rgba(15, 135, 115, 0.12), rgba(255, 252, 247, 0.9));
+  box-shadow: 0 16px 34px rgba(15, 135, 115, 0.08);
+}
+
+.thread-message-card.is-streaming .message-avatar {
+  display: none;
+}
+
+.thread-message-card.is-streaming::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.28), transparent);
+  transform: translateX(-100%);
+  animation: sheen 3.2s ease-in-out infinite;
+  pointer-events: none;
 }
 
 .thread-message-card.is-latest {
@@ -852,6 +896,8 @@ p {
 }
 
 .thread-message-content {
+  position: relative;
+  z-index: 1;
   display: grid;
   gap: 10px;
   min-width: 0;
@@ -881,6 +927,14 @@ p {
   word-break: break-word;
   color: var(--ink);
   line-height: 1.72;
+}
+
+.thread-message-card.is-streaming .thread-message-body {
+  min-height: 6rem;
+}
+
+.composer-card {
+  flex-shrink: 0;
 }
 
 .message-receipt-note {

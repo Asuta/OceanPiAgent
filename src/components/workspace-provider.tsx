@@ -1705,6 +1705,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const agentStatesRef = useRef<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates());
   const workspaceVersionRef = useRef(0);
   const skipNextServerPersistRef = useRef(false);
+  const workspacePersistTimerRef = useRef<number | null>(null);
+  const pendingWorkspacePersistRef = useRef<RoomWorkspaceState | null>(null);
+  const workspacePersistInFlightRef = useRef(false);
+  const workspacePersistNonceRef = useRef(0);
   const runRoomSchedulerRef = useRef<(roomId: string) => Promise<void>>(async () => undefined);
 
   const applyWorkspaceSnapshot = useCallback(
@@ -1862,6 +1866,81 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     workspaceVersionRef.current = workspaceVersion;
   }, [workspaceVersion]);
 
+  const persistWorkspaceSnapshot = useCallback(async () => {
+    if (workspacePersistInFlightRef.current) {
+      return;
+    }
+
+    workspacePersistInFlightRef.current = true;
+    let scheduledDelayedRetry = false;
+    try {
+      while (pendingWorkspacePersistRef.current) {
+        const payload = pendingWorkspacePersistRef.current;
+        const requestNonce = workspacePersistNonceRef.current;
+        pendingWorkspacePersistRef.current = null;
+
+        const response = await fetch("/api/workspace", {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            expectedVersion: workspaceVersionRef.current,
+            state: payload,
+          }),
+        }).catch(() => null);
+
+        if (!response) {
+          pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? payload;
+          window.setTimeout(() => {
+            void persistWorkspaceSnapshot();
+          }, 1000);
+          scheduledDelayedRetry = true;
+          break;
+        }
+
+        if (response.ok) {
+          const nextEnvelope = (await response.json().catch(() => null)) as { version?: number } | null;
+          if (typeof nextEnvelope?.version === "number") {
+            workspaceVersionRef.current = nextEnvelope.version;
+            setWorkspaceVersion(nextEnvelope.version);
+          }
+          continue;
+        }
+
+        if (response.status !== 409) {
+          continue;
+        }
+
+        const conflictPayload = (await response.json().catch(() => null)) as {
+          envelope?: { version?: number; state?: RoomWorkspaceState };
+        } | null;
+        const conflictVersion = conflictPayload?.envelope?.version;
+        const conflictState = conflictPayload?.envelope?.state;
+
+        if (typeof conflictVersion === "number") {
+          workspaceVersionRef.current = conflictVersion;
+          setWorkspaceVersion(conflictVersion);
+        }
+
+        const requestIsLatest = requestNonce === workspacePersistNonceRef.current && pendingWorkspacePersistRef.current === null;
+        if (requestIsLatest && typeof conflictVersion === "number" && conflictState && Object.keys(activeRunsRef.current).length === 0) {
+          applyWorkspaceSnapshot(conflictState, conflictVersion, {
+            skipServerPersist: true,
+          });
+          break;
+        }
+
+        pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? payload;
+      }
+    } finally {
+      workspacePersistInFlightRef.current = false;
+      if (pendingWorkspacePersistRef.current && !scheduledDelayedRetry) {
+        void persistWorkspaceSnapshot();
+      }
+    }
+  }, [applyWorkspaceSnapshot]);
+
   useEffect(() => {
     if (!hydrated || rooms.length === 0 || !activeRoomId) {
       return;
@@ -1879,53 +1958,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       selectedConsoleAgentId: selectedConsoleAgentId ?? undefined,
     } satisfies RoomWorkspaceState;
 
-    const timer = setTimeout(() => {
-      void (async () => {
-        const response = await fetch("/api/workspace", {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            expectedVersion: workspaceVersionRef.current,
-            state: payload,
-          }),
-        }).catch(() => null);
-
-        if (!response) {
-          return;
-        }
-
-        if (response.ok) {
-          const nextEnvelope = (await response.json().catch(() => null)) as { version?: number } | null;
-          if (typeof nextEnvelope?.version === "number") {
-            workspaceVersionRef.current = nextEnvelope.version;
-            setWorkspaceVersion(nextEnvelope.version);
-          }
-          return;
-        }
-
-        if (response.status === 409) {
-          const conflictPayload = (await response.json().catch(() => null)) as {
-            envelope?: { version?: number; state?: RoomWorkspaceState };
-          } | null;
-          if (
-            typeof conflictPayload?.envelope?.version === "number"
-            && conflictPayload.envelope.state
-            && Object.keys(activeRunsRef.current).length === 0
-          ) {
-            applyWorkspaceSnapshot(conflictPayload.envelope.state, conflictPayload.envelope.version, {
-              skipServerPersist: true,
-            });
-          }
-        }
-      })();
+    const timer = window.setTimeout(() => {
+      workspacePersistNonceRef.current += 1;
+      pendingWorkspacePersistRef.current = payload;
+      void persistWorkspaceSnapshot();
     }, 400);
+    workspacePersistTimerRef.current = timer;
 
     return () => {
-      clearTimeout(timer);
+      window.clearTimeout(timer);
+      if (workspacePersistTimerRef.current === timer) {
+        workspacePersistTimerRef.current = null;
+      }
     };
-  }, [activeRoomId, agentStates, applyWorkspaceSnapshot, hydrated, rooms, selectedConsoleAgentId]);
+  }, [activeRoomId, agentStates, hydrated, persistWorkspaceSnapshot, rooms, selectedConsoleAgentId]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -1980,6 +2026,40 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     roomsRef.current = nextRooms;
     setRooms(nextRooms);
   }, []);
+
+  useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+
+    const staleRunningRoomIds = roomsRef.current
+      .filter((room) => room.scheduler.status === "running" && !activeSchedulerRunsRef.current[room.id])
+      .map((room) => room.id);
+
+    if (staleRunningRoomIds.length === 0) {
+      return;
+    }
+
+    const staleRunningRoomIdSet = new Set(staleRunningRoomIds);
+    replaceRooms(
+      sortRoomsByUpdatedAt(
+        roomsRef.current.map((room) =>
+          staleRunningRoomIdSet.has(room.id)
+            ? {
+                ...room,
+                scheduler: {
+                  ...room.scheduler,
+                  status: "idle",
+                  activeParticipantId: null,
+                  roundCount: 0,
+                },
+                updatedAt: createTimestamp(),
+              }
+            : room,
+        ),
+      ),
+    );
+  }, [hydrated, replaceRooms, rooms]);
 
   const updateRoomState = useCallback(
     (roomId: string, updater: (room: RoomSession) => RoomSession) => {

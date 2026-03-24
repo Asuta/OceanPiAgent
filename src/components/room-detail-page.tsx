@@ -208,6 +208,9 @@ function getMessageCardClass(message: RoomMessage) {
   if (message.kind !== "answer" && message.kind !== "user_input") {
     parts.push(`kind-${message.kind}`);
   }
+  if (message.role === "assistant" && message.status !== "completed") {
+    parts.push("is-streaming");
+  }
   return parts.join(" ");
 }
 
@@ -248,6 +251,8 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const [newParticipantName, setNewParticipantName] = useState("");
   const [titleDraftByRoomId, setTitleDraftByRoomId] = useState<Record<string, string>>({});
   const threadListRef = useRef<HTMLDivElement | null>(null);
+  const stickThreadToBottomRef = useRef(true);
+  const lastThreadRoomIdRef = useRef<string | null>(null);
 
   const room = getRoomById(roomId);
 
@@ -269,21 +274,48 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   }, [activeRooms, hydrated, room, router]);
 
   useEffect(() => {
-    if (!room) {
+    const threadList = threadListRef.current;
+    if (!threadList) {
       return;
     }
 
+    const updateStickState = () => {
+      const distanceFromBottom = threadList.scrollHeight - threadList.scrollTop - threadList.clientHeight;
+      stickThreadToBottomRef.current = distanceFromBottom <= 32;
+    };
+
+    updateStickState();
+    threadList.addEventListener("scroll", updateStickState, { passive: true });
+    return () => threadList.removeEventListener("scroll", updateStickState);
+  }, [room?.id]);
+
+  const latestMessage = room?.roomMessages.at(-1) ?? null;
+  const threadScrollKey = room
+    ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}`
+    : "";
+
+  useEffect(() => {
+    if (!room) {
+      lastThreadRoomIdRef.current = null;
+      return;
+    }
+
+    const roomChanged = lastThreadRoomIdRef.current !== room.id;
+    const shouldStick = roomChanged || stickThreadToBottomRef.current;
     const frameId = window.requestAnimationFrame(() => {
       const threadList = threadListRef.current;
-      if (!threadList) {
+      if (!threadList || !shouldStick) {
         return;
       }
 
       threadList.scrollTop = threadList.scrollHeight;
+      stickThreadToBottomRef.current = true;
     });
 
+    lastThreadRoomIdRef.current = room.id;
+
     return () => window.cancelAnimationFrame(frameId);
-  }, [room?.id]);
+  }, [room, threadScrollKey]);
 
   const roomDraft = room ? draftsByRoomId[room.id] ?? "" : "";
   const isRunning = room ? isRoomRunning(room.id) : false;
