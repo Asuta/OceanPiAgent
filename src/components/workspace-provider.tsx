@@ -1485,21 +1485,11 @@ function buildSchedulerPacketContent(
   return [
     "[Room scheduler sync packet]",
     `Target participant: ${participant.name} (${participant.id})`,
-    "This packet contains the room messages you have not consumed yet.",
-    "Important: this scheduler packet is a system transport note. If you use room tools, target the participant message ids listed below, not this packet id.",
-    options?.hasNewDelta
-      ? "Use the current receipt markers to understand which participants already chose read_no_reply."
-      : "No new room message seq arrived since your last turn.",
+    `Room: ${room.title} (roomId: ${room.id})`,
+    options?.hasNewDelta ? "Update type: new visible room activity" : "Update type: scheduler replay / no new seq",
     latestParticipantMessage
-      ? `Latest unseen participant message: seq ${latestParticipantMessage.seq}, messageId ${latestParticipantMessage.id}, from ${latestParticipantMessage.sender.name} (${latestParticipantMessage.sender.id})`
-      : "Latest unseen participant message: none",
-    "If the latest unseen participant message is clearly asking for your input, naming you, or continuing a live multi-agent exchange, prefer a visible room message instead of read_no_reply.",
-    "Only use read_no_reply when the newest unseen participant message truly needs no visible response.",
-    "Messages:",
-    ...messages.map((message) => {
-      const receiptSummary = formatReceiptSummary(message.receipts);
-      return `- seq ${message.seq} | messageId ${message.id} | ${message.sender.name} (${message.sender.id}, ${message.sender.role}) | ${message.kind}/${message.status}${receiptSummary ? ` | receipts: ${receiptSummary}` : ""}: ${message.content}`;
-    }),
+      ? `Latest message: seq ${latestParticipantMessage.seq} | messageId ${latestParticipantMessage.id} | from ${latestParticipantMessage.sender.name} (${latestParticipantMessage.sender.id}, ${latestParticipantMessage.sender.role}) | ${latestParticipantMessage.kind}/${latestParticipantMessage.status}: ${latestParticipantMessage.content}`
+      : "Latest message: none",
   ].join("\n");
 }
 
@@ -2884,19 +2874,27 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             activeParticipantId: visibleTargetMessages.length > 0 ? nextParticipant.id : null,
             nextAgentParticipantId: nextAfterParticipant?.id ?? nextParticipant.id,
             roundCount: dispatchedRounds,
-            agentCursorByParticipantId: {
-              ...room.scheduler.agentCursorByParticipantId,
-              [nextParticipant.id]: cutoffSeq,
-            },
-            agentReceiptRevisionByParticipantId: {
-              ...room.scheduler.agentReceiptRevisionByParticipantId,
-              [nextParticipant.id]: roomSnapshot.receiptRevision,
-            },
           },
           updatedAt: createTimestamp(),
         }));
 
         if (visibleTargetMessages.length === 0) {
+          updateRoomState(roomId, (room) => ({
+            ...room,
+            scheduler: {
+              ...room.scheduler,
+              agentCursorByParticipantId: {
+                ...room.scheduler.agentCursorByParticipantId,
+                [nextParticipant.id]: cutoffSeq,
+              },
+              agentReceiptRevisionByParticipantId: {
+                ...room.scheduler.agentReceiptRevisionByParticipantId,
+                [nextParticipant.id]: room.receiptRevision,
+              },
+            },
+            updatedAt: createTimestamp(),
+          }));
+
           idlePassCount += 1;
           if (idlePassCount >= enabledAgents.length) {
             updateRoomState(roomId, (room) => ({
@@ -2992,6 +2990,22 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         if (latestSchedulerRun?.cycleId !== cycleId) {
           return;
         }
+
+        updateRoomState(roomId, (room) => ({
+          ...room,
+          scheduler: {
+            ...room.scheduler,
+            agentCursorByParticipantId: {
+              ...room.scheduler.agentCursorByParticipantId,
+              [nextParticipant.id]: Math.max(room.scheduler.agentCursorByParticipantId[nextParticipant.id] ?? 0, cutoffSeq),
+            },
+            agentReceiptRevisionByParticipantId: {
+              ...room.scheduler.agentReceiptRevisionByParticipantId,
+              [nextParticipant.id]: room.receiptRevision,
+            },
+          },
+          updatedAt: createTimestamp(),
+        }));
       }
     },
     [executeAgentTurn, interruptRoomScheduler, updateRoomState],

@@ -433,6 +433,85 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
       scope,
       roomToolContext,
     }),
+    createPiTool({
+      name: "shared_workspace_list",
+      label: "Shared Workspace List",
+      description: "List files and directories in the shared workspace available to every agent.",
+      parameters: Type.Object({
+        path: Type.Optional(Type.String({ description: "Optional relative directory path inside the shared workspace." })),
+        recursive: Type.Optional(Type.Boolean({ description: "Whether to include nested entries recursively." })),
+        limit: Type.Optional(Type.Integer({ description: "Optional maximum number of returned entries." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "shared_workspace_read",
+      label: "Shared Workspace Read",
+      description: "Read a text file from the shared workspace used for cross-agent collaboration.",
+      parameters: Type.Object({
+        path: Type.String({ description: "Relative file path inside the shared workspace." }),
+        fromLine: Type.Optional(Type.Integer({ description: "Optional 1-based starting line number." })),
+        lineCount: Type.Optional(Type.Integer({ description: "Optional number of lines to read." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "shared_workspace_write",
+      label: "Shared Workspace Write",
+      description: "Create or overwrite a text file in the shared workspace used for cross-agent collaboration.",
+      parameters: Type.Object({
+        path: Type.String({ description: "Relative file path inside the shared workspace." }),
+        content: Type.String({ description: "Full file content to write." }),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "shared_workspace_delete",
+      label: "Shared Workspace Delete",
+      description: "Delete a file or directory in the shared workspace. Use recursive=true for non-empty directories.",
+      parameters: Type.Object({
+        path: Type.String({ description: "Relative path inside the shared workspace." }),
+        recursive: Type.Optional(Type.Boolean({ description: "Whether to delete directories recursively." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "shared_workspace_append",
+      label: "Shared Workspace Append",
+      description: "Append text to the end of a file in the shared workspace, creating the file if needed.",
+      parameters: Type.Object({
+        path: Type.String({ description: "Relative file path inside the shared workspace." }),
+        content: Type.String({ description: "Text content to append." }),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "shared_workspace_move",
+      label: "Shared Workspace Move",
+      description: "Rename or move a file or directory within the shared workspace.",
+      parameters: Type.Object({
+        fromPath: Type.String({ description: "Existing relative source path inside the shared workspace." }),
+        toPath: Type.String({ description: "Relative destination path inside the shared workspace." }),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "shared_workspace_mkdir",
+      label: "Shared Workspace Mkdir",
+      description: "Create a directory in the shared workspace, with recursive parent creation by default.",
+      parameters: Type.Object({
+        path: Type.String({ description: "Relative directory path inside the shared workspace." }),
+        recursive: Type.Optional(Type.Boolean({ description: "Whether to create missing parent directories automatically." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
   ];
 }
 

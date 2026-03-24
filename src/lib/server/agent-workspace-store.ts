@@ -64,11 +64,18 @@ export interface AgentWorkspaceDeleteResult {
 }
 
 const WORKSPACE_ROOT = path.join(process.cwd(), ".oceanking", "workspaces");
+const SHARED_WORKSPACE_DIR = path.join(WORKSPACE_ROOT, "_shared");
 const DEFAULT_READ_LINE_COUNT = 200;
 const MAX_READ_LINE_COUNT = 400;
 const DEFAULT_LIST_LIMIT = 200;
 const MAX_LIST_LIMIT = 500;
 const ALLOW_OUTSIDE_WORKSPACE_ENV = "OCEANKING_AGENT_WORKSPACE_ALLOW_OUTSIDE";
+
+interface ResolvedWorkspacePath {
+  workspaceRoot: string;
+  resolvedPath: string;
+  displayPath: string;
+}
 
 function isTruthyEnv(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test((value || "").trim());
@@ -93,14 +100,25 @@ export function getAgentWorkspaceDir(agentId: RoomAgentId): string {
   return path.join(getWorkspaceRootPath(), agentId);
 }
 
+export function getSharedWorkspaceDir(): string {
+  return SHARED_WORKSPACE_DIR;
+}
+
 export function isAgentWorkspaceOutsideAccessEnabled(): boolean {
   return isTruthyEnv(process.env[ALLOW_OUTSIDE_WORKSPACE_ENV]);
 }
 
-async function ensureWorkspaceDir(agentId: RoomAgentId): Promise<string> {
-  const dirPath = getAgentWorkspaceDir(agentId);
+async function ensureDir(dirPath: string): Promise<string> {
   await mkdir(dirPath, { recursive: true });
   return dirPath;
+}
+
+async function ensureWorkspaceDir(agentId: RoomAgentId): Promise<string> {
+  return ensureDir(getAgentWorkspaceDir(agentId));
+}
+
+async function ensureSharedWorkspaceDir(): Promise<string> {
+  return ensureDir(getSharedWorkspaceDir());
 }
 
 function toDisplayPath(workspaceRoot: string, absolutePath: string): string {
@@ -112,12 +130,12 @@ function toDisplayPath(workspaceRoot: string, absolutePath: string): string {
   return relativePath || ".";
 }
 
-async function resolveWorkspacePath(args: {
-  agentId: RoomAgentId;
+async function resolveWorkspacePathForRoot(args: {
+  workspaceRoot: string;
   inputPath?: string;
   allowWorkspaceRoot?: boolean;
-}): Promise<{ workspaceRoot: string; resolvedPath: string; displayPath: string }> {
-  const workspaceRoot = await ensureWorkspaceDir(args.agentId);
+}): Promise<ResolvedWorkspacePath> {
+  const workspaceRoot = args.workspaceRoot;
   const rawPath = (args.inputPath || "").trim();
   if (!rawPath) {
     if (args.allowWorkspaceRoot) {
@@ -147,6 +165,29 @@ async function resolveWorkspacePath(args: {
   };
 }
 
+async function resolveWorkspacePath(args: {
+  agentId: RoomAgentId;
+  inputPath?: string;
+  allowWorkspaceRoot?: boolean;
+}): Promise<ResolvedWorkspacePath> {
+  return resolveWorkspacePathForRoot({
+    workspaceRoot: await ensureWorkspaceDir(args.agentId),
+    inputPath: args.inputPath,
+    allowWorkspaceRoot: args.allowWorkspaceRoot,
+  });
+}
+
+async function resolveSharedWorkspacePath(args: {
+  inputPath?: string;
+  allowWorkspaceRoot?: boolean;
+}): Promise<ResolvedWorkspacePath> {
+  return resolveWorkspacePathForRoot({
+    workspaceRoot: await ensureSharedWorkspaceDir(),
+    inputPath: args.inputPath,
+    allowWorkspaceRoot: args.allowWorkspaceRoot,
+  });
+}
+
 function createUpdatedAt(value: { mtime: Date }): string {
   return value.mtime.toISOString();
 }
@@ -165,25 +206,15 @@ function clampLineWindow(lineCount: number, fromLine?: number, lineCountLimit?: 
   return { start, end };
 }
 
-export async function listAgentWorkspace(args: {
-  agentId: RoomAgentId;
-  path?: string;
-  recursive?: boolean;
-  limit?: number;
-}): Promise<AgentWorkspaceListResult> {
-  const target = await resolveWorkspacePath({
-    agentId: args.agentId,
-    inputPath: args.path,
-    allowWorkspaceRoot: true,
-  });
+async function listWorkspace(target: ResolvedWorkspacePath, recursive = false, requestedLimit?: number): Promise<AgentWorkspaceListResult> {
   const targetStats = await stat(target.resolvedPath).catch(() => null);
   if (!targetStats?.isDirectory()) {
     throw new Error(`Workspace directory not found: ${target.displayPath}`);
   }
 
-  const recursive = Boolean(args.recursive);
-  const limit = typeof args.limit === "number" && Number.isFinite(args.limit)
-    ? Math.max(1, Math.min(MAX_LIST_LIMIT, Math.round(args.limit)))
+  const safeRecursive = Boolean(recursive);
+  const limit = typeof requestedLimit === "number" && Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(MAX_LIST_LIMIT, Math.round(requestedLimit)))
     : DEFAULT_LIST_LIMIT;
   const entries: AgentWorkspaceEntry[] = [];
   let truncated = false;
@@ -208,7 +239,7 @@ export async function listAgentWorkspace(args: {
         updatedAt: createUpdatedAt(entryStats),
       });
 
-      if (recursive && entry.isDirectory()) {
+      if (safeRecursive && entry.isDirectory()) {
         await walkDirectory(absoluteEntryPath);
         if (truncated) {
           return;
@@ -222,22 +253,45 @@ export async function listAgentWorkspace(args: {
   return {
     workspaceRoot: target.workspaceRoot,
     targetPath: target.displayPath,
-    recursive,
+    recursive: safeRecursive,
     truncated,
     entries,
   };
 }
 
-export async function readAgentWorkspaceFile(args: {
+export async function listAgentWorkspace(args: {
   agentId: RoomAgentId;
-  path: string;
-  fromLine?: number;
-  lineCount?: number;
-}): Promise<AgentWorkspaceReadResult> {
-  const target = await resolveWorkspacePath({
-    agentId: args.agentId,
-    inputPath: args.path,
-  });
+  path?: string;
+  recursive?: boolean;
+  limit?: number;
+}): Promise<AgentWorkspaceListResult> {
+  return listWorkspace(
+    await resolveWorkspacePath({
+      agentId: args.agentId,
+      inputPath: args.path,
+      allowWorkspaceRoot: true,
+    }),
+    args.recursive,
+    args.limit,
+  );
+}
+
+export async function listSharedWorkspace(args: {
+  path?: string;
+  recursive?: boolean;
+  limit?: number;
+}): Promise<AgentWorkspaceListResult> {
+  return listWorkspace(
+    await resolveSharedWorkspacePath({
+      inputPath: args.path,
+      allowWorkspaceRoot: true,
+    }),
+    args.recursive,
+    args.limit,
+  );
+}
+
+async function readWorkspaceFile(target: ResolvedWorkspacePath, fromLine?: number, lineCount?: number): Promise<AgentWorkspaceReadResult> {
   const targetStats = await stat(target.resolvedPath).catch(() => null);
   if (!targetStats?.isFile()) {
     throw new Error(`Workspace file not found: ${target.displayPath}`);
@@ -245,7 +299,7 @@ export async function readAgentWorkspaceFile(args: {
 
   const text = await readFile(target.resolvedPath, "utf8");
   const allLines = text.split(/\r?\n/g);
-  const { start, end } = clampLineWindow(allLines.length, args.fromLine, args.lineCount);
+  const { start, end } = clampLineWindow(allLines.length, fromLine, lineCount);
 
   return {
     workspaceRoot: target.workspaceRoot,
@@ -257,24 +311,89 @@ export async function readAgentWorkspaceFile(args: {
   };
 }
 
-export async function writeAgentWorkspaceFile(args: {
+export async function readAgentWorkspaceFile(args: {
   agentId: RoomAgentId;
   path: string;
-  content: string;
-}): Promise<AgentWorkspaceWriteResult> {
-  const target = await resolveWorkspacePath({
-    agentId: args.agentId,
-    inputPath: args.path,
-  });
+  fromLine?: number;
+  lineCount?: number;
+}): Promise<AgentWorkspaceReadResult> {
+  return readWorkspaceFile(
+    await resolveWorkspacePath({
+      agentId: args.agentId,
+      inputPath: args.path,
+    }),
+    args.fromLine,
+    args.lineCount,
+  );
+}
 
+export async function readSharedWorkspaceFile(args: {
+  path: string;
+  fromLine?: number;
+  lineCount?: number;
+}): Promise<AgentWorkspaceReadResult> {
+  return readWorkspaceFile(
+    await resolveSharedWorkspacePath({
+      inputPath: args.path,
+    }),
+    args.fromLine,
+    args.lineCount,
+  );
+}
+
+async function writeWorkspaceFile(target: ResolvedWorkspacePath, content: string): Promise<AgentWorkspaceWriteResult> {
   await mkdir(path.dirname(target.resolvedPath), { recursive: true });
-  await writeFile(target.resolvedPath, args.content, "utf8");
+  await writeFile(target.resolvedPath, content, "utf8");
   const targetStats = await stat(target.resolvedPath);
 
   return {
     workspaceRoot: target.workspaceRoot,
     path: target.displayPath,
-    bytesWritten: Buffer.byteLength(args.content, "utf8"),
+    bytesWritten: Buffer.byteLength(content, "utf8"),
+    updatedAt: createUpdatedAt(targetStats),
+  };
+}
+
+export async function writeAgentWorkspaceFile(args: {
+  agentId: RoomAgentId;
+  path: string;
+  content: string;
+}): Promise<AgentWorkspaceWriteResult> {
+  return writeWorkspaceFile(
+    await resolveWorkspacePath({
+      agentId: args.agentId,
+      inputPath: args.path,
+    }),
+    args.content,
+  );
+}
+
+export async function writeSharedWorkspaceFile(args: {
+  path: string;
+  content: string;
+}): Promise<AgentWorkspaceWriteResult> {
+  return writeWorkspaceFile(
+    await resolveSharedWorkspacePath({
+      inputPath: args.path,
+    }),
+    args.content,
+  );
+}
+
+async function appendWorkspaceFile(target: ResolvedWorkspacePath, content: string): Promise<AgentWorkspaceAppendResult> {
+  const existingStats = await stat(target.resolvedPath).catch(() => null);
+  if (existingStats && !existingStats.isFile()) {
+    throw new Error(`Workspace path is not a file: ${target.displayPath}`);
+  }
+
+  await mkdir(path.dirname(target.resolvedPath), { recursive: true });
+  await appendFile(target.resolvedPath, content, "utf8");
+  const targetStats = await stat(target.resolvedPath);
+
+  return {
+    workspaceRoot: target.workspaceRoot,
+    path: target.displayPath,
+    bytesAppended: Buffer.byteLength(content, "utf8"),
     updatedAt: createUpdatedAt(targetStats),
   };
 }
@@ -284,42 +403,28 @@ export async function appendAgentWorkspaceFile(args: {
   path: string;
   content: string;
 }): Promise<AgentWorkspaceAppendResult> {
-  const target = await resolveWorkspacePath({
-    agentId: args.agentId,
-    inputPath: args.path,
-  });
-
-  const existingStats = await stat(target.resolvedPath).catch(() => null);
-  if (existingStats && !existingStats.isFile()) {
-    throw new Error(`Workspace path is not a file: ${target.displayPath}`);
-  }
-
-  await mkdir(path.dirname(target.resolvedPath), { recursive: true });
-  await appendFile(target.resolvedPath, args.content, "utf8");
-  const targetStats = await stat(target.resolvedPath);
-
-  return {
-    workspaceRoot: target.workspaceRoot,
-    path: target.displayPath,
-    bytesAppended: Buffer.byteLength(args.content, "utf8"),
-    updatedAt: createUpdatedAt(targetStats),
-  };
+  return appendWorkspaceFile(
+    await resolveWorkspacePath({
+      agentId: args.agentId,
+      inputPath: args.path,
+    }),
+    args.content,
+  );
 }
 
-export async function moveAgentWorkspaceEntry(args: {
-  agentId: RoomAgentId;
-  fromPath: string;
-  toPath: string;
-}): Promise<AgentWorkspaceMoveResult> {
-  const source = await resolveWorkspacePath({
-    agentId: args.agentId,
-    inputPath: args.fromPath,
-  });
-  const destination = await resolveWorkspacePath({
-    agentId: args.agentId,
-    inputPath: args.toPath,
-  });
+export async function appendSharedWorkspaceFile(args: {
+  path: string;
+  content: string;
+}): Promise<AgentWorkspaceAppendResult> {
+  return appendWorkspaceFile(
+    await resolveSharedWorkspacePath({
+      inputPath: args.path,
+    }),
+    args.content,
+  );
+}
 
+async function moveWorkspaceEntry(source: ResolvedWorkspacePath, destination: ResolvedWorkspacePath): Promise<AgentWorkspaceMoveResult> {
   if (normalizeForComparison(source.resolvedPath) === normalizeForComparison(source.workspaceRoot)) {
     throw new Error("Moving the workspace root directly is not allowed.");
   }
@@ -351,16 +456,38 @@ export async function moveAgentWorkspaceEntry(args: {
   };
 }
 
-export async function mkdirAgentWorkspace(args: {
+export async function moveAgentWorkspaceEntry(args: {
   agentId: RoomAgentId;
-  path: string;
-  recursive?: boolean;
-}): Promise<AgentWorkspaceMkdirResult> {
-  const target = await resolveWorkspacePath({
-    agentId: args.agentId,
-    inputPath: args.path,
-  });
+  fromPath: string;
+  toPath: string;
+}): Promise<AgentWorkspaceMoveResult> {
+  return moveWorkspaceEntry(
+    await resolveWorkspacePath({
+      agentId: args.agentId,
+      inputPath: args.fromPath,
+    }),
+    await resolveWorkspacePath({
+      agentId: args.agentId,
+      inputPath: args.toPath,
+    }),
+  );
+}
 
+export async function moveSharedWorkspaceEntry(args: {
+  fromPath: string;
+  toPath: string;
+}): Promise<AgentWorkspaceMoveResult> {
+  return moveWorkspaceEntry(
+    await resolveSharedWorkspacePath({
+      inputPath: args.fromPath,
+    }),
+    await resolveSharedWorkspacePath({
+      inputPath: args.toPath,
+    }),
+  );
+}
+
+async function mkdirWorkspace(target: ResolvedWorkspacePath, recursive?: boolean): Promise<AgentWorkspaceMkdirResult> {
   const existingStats = await stat(target.resolvedPath).catch(() => null);
   if (existingStats) {
     if (!existingStats.isDirectory()) {
@@ -375,7 +502,7 @@ export async function mkdirAgentWorkspace(args: {
     };
   }
 
-  await mkdir(target.resolvedPath, { recursive: args.recursive ?? true });
+  await mkdir(target.resolvedPath, { recursive: recursive ?? true });
   const targetStats = await stat(target.resolvedPath);
 
   return {
@@ -386,15 +513,33 @@ export async function mkdirAgentWorkspace(args: {
   };
 }
 
-export async function deleteAgentWorkspaceEntry(args: {
+export async function mkdirAgentWorkspace(args: {
   agentId: RoomAgentId;
   path: string;
   recursive?: boolean;
-}): Promise<AgentWorkspaceDeleteResult> {
-  const target = await resolveWorkspacePath({
-    agentId: args.agentId,
-    inputPath: args.path,
-  });
+}): Promise<AgentWorkspaceMkdirResult> {
+  return mkdirWorkspace(
+    await resolveWorkspacePath({
+      agentId: args.agentId,
+      inputPath: args.path,
+    }),
+    args.recursive,
+  );
+}
+
+export async function mkdirSharedWorkspace(args: {
+  path: string;
+  recursive?: boolean;
+}): Promise<AgentWorkspaceMkdirResult> {
+  return mkdirWorkspace(
+    await resolveSharedWorkspacePath({
+      inputPath: args.path,
+    }),
+    args.recursive,
+  );
+}
+
+async function deleteWorkspaceEntry(target: ResolvedWorkspacePath, recursive = false): Promise<AgentWorkspaceDeleteResult> {
   if (normalizeForComparison(target.resolvedPath) === normalizeForComparison(target.workspaceRoot)) {
     throw new Error("Deleting the workspace root directly is not allowed.");
   }
@@ -404,9 +549,9 @@ export async function deleteAgentWorkspaceEntry(args: {
     throw new Error(`Workspace entry not found: ${target.displayPath}`);
   }
 
-  const recursive = Boolean(args.recursive);
+  const safeRecursive = Boolean(recursive);
   await rm(target.resolvedPath, {
-    recursive,
+    recursive: safeRecursive,
     force: false,
   });
 
@@ -414,6 +559,32 @@ export async function deleteAgentWorkspaceEntry(args: {
     workspaceRoot: target.workspaceRoot,
     path: target.displayPath,
     deletedType: targetStats.isDirectory() ? "directory" : "file",
-    recursive,
+    recursive: safeRecursive,
   };
+}
+
+export async function deleteAgentWorkspaceEntry(args: {
+  agentId: RoomAgentId;
+  path: string;
+  recursive?: boolean;
+}): Promise<AgentWorkspaceDeleteResult> {
+  return deleteWorkspaceEntry(
+    await resolveWorkspacePath({
+      agentId: args.agentId,
+      inputPath: args.path,
+    }),
+    args.recursive,
+  );
+}
+
+export async function deleteSharedWorkspaceEntry(args: {
+  path: string;
+  recursive?: boolean;
+}): Promise<AgentWorkspaceDeleteResult> {
+  return deleteWorkspaceEntry(
+    await resolveSharedWorkspacePath({
+      inputPath: args.path,
+    }),
+    args.recursive,
+  );
 }

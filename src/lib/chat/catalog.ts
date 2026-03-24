@@ -106,6 +106,41 @@ export const TOOL_CATALOG = [
     title: "Workspace Mkdir",
     description: "在当前 Agent 独立 workspace 中创建目录，用于显式整理工作结构。",
   },
+  {
+    name: "shared_workspace_list",
+    title: "Shared Workspace List",
+    description: "列出所有 Agent 共享 workspace 里的文件和目录，适合查看跨 Agent 协作产物。",
+  },
+  {
+    name: "shared_workspace_read",
+    title: "Shared Workspace Read",
+    description: "读取共享 workspace 里的文本文件，可按行切片查看。",
+  },
+  {
+    name: "shared_workspace_write",
+    title: "Shared Workspace Write",
+    description: "在共享 workspace 中创建或覆盖文本文件，适合写交接说明、共享计划和共同产出。",
+  },
+  {
+    name: "shared_workspace_delete",
+    title: "Shared Workspace Delete",
+    description: "删除共享 workspace 中的文件或目录，目录删除可递归执行。",
+  },
+  {
+    name: "shared_workspace_append",
+    title: "Shared Workspace Append",
+    description: "向共享 workspace 中的文本文件追加内容，不存在时自动创建。",
+  },
+  {
+    name: "shared_workspace_move",
+    title: "Shared Workspace Move",
+    description: "在共享 workspace 内重命名或移动文件、目录。",
+  },
+  {
+    name: "shared_workspace_mkdir",
+    title: "Shared Workspace Mkdir",
+    description: "在共享 workspace 中创建目录，用于组织跨 Agent 协作资料。",
+  },
 ] as const;
 
 export const CUSTOM_COMMANDS = [
@@ -171,4 +206,5 @@ export const ROOM_BRIDGE_RULES = [
   "cron 工具只允许管理当前 Agent 自己的任务，而且目标 room 必须仍然是这个 Agent 当前已连接的房间。",
   "human 始终保留任意 room 的可见权和插话权；成员列表只决定哪些参与者被视为当前群成员与自动轮询对象。",
   "每个 Agent 种类都有一份独立但跨房间共享的 workspace，可通过 workspace_* 工具读写自己的目录。",
+  "所有 Agent 还共享一份公共 workspace，可通过 shared_workspace_* 工具协作编辑交接文档、共享计划和共用产物。",
 ] as const;

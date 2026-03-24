@@ -146,6 +146,58 @@ test("workspace store shares the same workspace across rooms for the same agent 
   });
 });
 
+test("shared workspace is visible across different agents without merging private workspaces", async () => {
+  await withWorkspaceModule(async (mod, tempDir) => {
+    await mod.writeAgentWorkspaceFile({
+      agentId: "concierge",
+      path: "private/concierge.txt",
+      content: "concierge only",
+    });
+
+    await mod.writeAgentWorkspaceFile({
+      agentId: "researcher",
+      path: "private/researcher.txt",
+      content: "researcher only",
+    });
+
+    const sharedWrite = await mod.writeSharedWorkspaceFile({
+      path: "handoffs/plan.md",
+      content: "step 1",
+    });
+    assert.equal(normalizeWorkspacePath(sharedWrite.path), "handoffs/plan.md");
+    assert.equal(sharedWrite.workspaceRoot, path.join(tempDir, ".oceanking", "workspaces", "_shared"));
+
+    const sharedAppend = await mod.appendSharedWorkspaceFile({
+      path: "handoffs/plan.md",
+      content: "\nstep 2",
+    });
+    assert.equal(sharedAppend.bytesAppended, Buffer.byteLength("\nstep 2", "utf8"));
+
+    const sharedRead = await mod.readSharedWorkspaceFile({
+      path: "handoffs/plan.md",
+    });
+    assert.equal(sharedRead.text, "step 1\nstep 2");
+
+    const sharedList = await mod.listSharedWorkspace({
+      recursive: true,
+    });
+    assert.deepEqual(sharedList.entries.map((entry) => normalizeWorkspacePath(entry.path)), ["handoffs", "handoffs/plan.md"]);
+
+    const conciergeList = await mod.listAgentWorkspace({
+      agentId: "concierge",
+      recursive: true,
+    });
+    const researcherList = await mod.listAgentWorkspace({
+      agentId: "researcher",
+      recursive: true,
+    });
+    assert.deepEqual(conciergeList.entries.map((entry) => normalizeWorkspacePath(entry.path)), ["private", "private/concierge.txt"]);
+    assert.deepEqual(researcherList.entries.map((entry) => normalizeWorkspacePath(entry.path)), ["private", "private/researcher.txt"]);
+
+    assert.equal(mod.getSharedWorkspaceDir(), path.join(tempDir, ".oceanking", "workspaces", "_shared"));
+  });
+});
+
 test("workspace store blocks path traversal outside the agent workspace by default", async () => {
   await withWorkspaceModule(async (mod) => {
     await assert.rejects(

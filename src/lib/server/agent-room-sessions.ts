@@ -201,7 +201,13 @@ function buildContinuationSnapshot(run: AgentRuntimeRun): string {
   }
 
   sections.push(
-    "A newer room message has now arrived. Continue the shared conversation naturally, keep all cross-room context in mind, and remember that these rooms intentionally share memory unless the user explicitly asks for isolation.",
+    [
+      "A newer room message has now arrived.",
+      "You still have an unfinished obligation in this earlier room unless the newer message explicitly canceled it.",
+      "Treat the newer room update as new information, not as automatic permission to abandon this earlier room.",
+      "Before ending the current turn, either complete this earlier room's obligation or send a visible progress update there if work is still ongoing.",
+      "Keep all cross-room context in mind, and remember that these rooms intentionally share memory unless the user explicitly asks for isolation.",
+    ].join(" "),
   );
 
   return sections.join("\n\n");
