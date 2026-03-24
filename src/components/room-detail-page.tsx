@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ROOM_AGENTS,
   formatTimestamp,
@@ -256,6 +256,16 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
 
   const room = getRoomById(roomId);
 
+  const scrollThreadListToBottom = useCallback(() => {
+    const threadList = threadListRef.current;
+    if (!threadList) {
+      return;
+    }
+
+    threadList.scrollTop = threadList.scrollHeight;
+    stickThreadToBottomRef.current = true;
+  }, []);
+
   useEffect(() => {
     if (room) {
       setActiveRoomId(room.id);
@@ -294,7 +304,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}`
     : "";
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!room) {
       lastThreadRoomIdRef.current = null;
       return;
@@ -303,19 +313,27 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     const roomChanged = lastThreadRoomIdRef.current !== room.id;
     const shouldStick = roomChanged || stickThreadToBottomRef.current;
     const frameId = window.requestAnimationFrame(() => {
-      const threadList = threadListRef.current;
-      if (!threadList || !shouldStick) {
+      if (!shouldStick) {
         return;
       }
 
-      threadList.scrollTop = threadList.scrollHeight;
-      stickThreadToBottomRef.current = true;
+      scrollThreadListToBottom();
     });
+    const settleTimer = roomChanged
+      ? window.setTimeout(() => {
+          scrollThreadListToBottom();
+        }, 80)
+      : null;
 
     lastThreadRoomIdRef.current = room.id;
 
-    return () => window.cancelAnimationFrame(frameId);
-  }, [room, threadScrollKey]);
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+    };
+  }, [room, scrollThreadListToBottom, threadScrollKey]);
 
   const roomDraft = room ? draftsByRoomId[room.id] ?? "" : "";
   const isRunning = room ? isRoomRunning(room.id) : false;
