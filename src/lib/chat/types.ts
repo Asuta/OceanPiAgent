@@ -333,6 +333,7 @@ export interface AgentRoomTurn {
   id: string;
   agent: RoomAgentSnapshot;
   userMessage: RoomMessage;
+  continuationSnapshot?: string;
   assistantContent: string;
   tools: ToolExecution[];
   emittedMessages: RoomMessage[];

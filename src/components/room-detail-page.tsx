@@ -44,6 +44,10 @@ function formatRawTurnLog(turn: AgentRoomTurn, roomTitle: string) {
     turn.userMessage.content || "",
   ];
 
+  if (turn.continuationSnapshot) {
+    sections.push("", "[continuation-snapshot]", turn.continuationSnapshot);
+  }
+
   if (turn.userMessage.receiptStatus === "read_no_reply") {
     sections.push("", "[receipts]", getReceiptInlineNote(turn.userMessage.receipts));
   }
@@ -460,6 +464,13 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                 <p>{turn.userMessage.content}</p>
                 {turn.userMessage.receiptStatus === "read_no_reply" ? <small>{getReceiptInlineNote(turn.userMessage.receipts)}</small> : null}
               </section>
+
+              {turn.continuationSnapshot ? (
+                <section className="trace-block">
+                  <span>续跑上下文</span>
+                  <pre>{turn.continuationSnapshot}</pre>
+                </section>
+              ) : null}
 
               <section className="trace-block">
                 <span>内部输出</span>
