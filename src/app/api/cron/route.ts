@@ -2,8 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import type { RoomCronSchedule } from "@/lib/chat/types";
 import { ensureCronDispatcherStarted } from "@/lib/server/cron-dispatcher";
-import { createCronJob, loadCronStore, mutateCronStore } from "@/lib/server/cron-store";
-import { loadWorkspaceEnvelope } from "@/lib/server/workspace-store";
+import { createManagedCronJob, listCronJobs, listCronRuns } from "@/lib/server/cron-service";
 
 export const runtime = "nodejs";
 
@@ -33,41 +32,22 @@ const createSchema = z.object({
   enabled: z.boolean().optional().default(true),
 });
 
-function normalizeResponse(store: Awaited<ReturnType<typeof loadCronStore>>, roomId?: string | null) {
-  return {
-    jobs: roomId ? store.jobs.filter((job) => job.targetRoomId === roomId) : store.jobs,
-    runs: roomId ? store.runs.filter((run) => run.targetRoomId === roomId) : store.runs,
-  };
-}
-
-async function validateJobTarget(agentId: string, targetRoomId: string): Promise<void> {
-  const workspace = await loadWorkspaceEnvelope();
-  const room = workspace.state.rooms.find((entry) => entry.id === targetRoomId);
-  if (!room) {
-    throw new Error(`Room ${targetRoomId} does not exist.`);
-  }
-  const participatesInRoom = room.participants.some(
-    (participant) => participant.runtimeKind === "agent" && participant.agentId === agentId,
-  );
-  if (!participatesInRoom) {
-    throw new Error(`Agent ${agentId} is not attached to room ${targetRoomId}.`);
-  }
-}
-
 export async function GET(request: Request) {
   ensureCronDispatcherStarted();
   const { searchParams } = new URL(request.url);
   const roomId = searchParams.get("roomId");
-  const store = await loadCronStore();
-  return NextResponse.json(normalizeResponse(store, roomId));
+  const [jobs, runs] = await Promise.all([
+    listCronJobs({ roomId: roomId ?? undefined }),
+    listCronRuns({ roomId: roomId ?? undefined }),
+  ]);
+  return NextResponse.json({ jobs, runs });
 }
 
 export async function POST(request: Request) {
   try {
     ensureCronDispatcherStarted();
     const payload = createSchema.parse(await request.json());
-    await validateJobTarget(payload.agentId, payload.targetRoomId);
-    const job = createCronJob({
+    const job = await createManagedCronJob({
       agentId: payload.agentId,
       targetRoomId: payload.targetRoomId,
       title: payload.title,
@@ -76,11 +56,11 @@ export async function POST(request: Request) {
       deliveryPolicy: payload.deliveryPolicy,
       enabled: payload.enabled,
     });
-    const store = await mutateCronStore((current) => ({
-      ...current,
-      jobs: [job, ...current.jobs],
-    }));
-    return NextResponse.json({ ok: true, ...normalizeResponse(store, job.targetRoomId) });
+    const [jobs, runs] = await Promise.all([
+      listCronJobs({ roomId: job.targetRoomId }),
+      listCronRuns({ roomId: job.targetRoomId }),
+    ]);
+    return NextResponse.json({ ok: true, jobs, runs });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown server error.";
     return NextResponse.json({ error: message }, { status: 400 });

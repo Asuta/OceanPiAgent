@@ -2,8 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import type { RoomCronSchedule } from "@/lib/chat/types";
 import { ensureCronDispatcherStarted } from "@/lib/server/cron-dispatcher";
-import { computeNextRunAt, loadCronStore, mutateCronStore } from "@/lib/server/cron-store";
-import { loadWorkspaceEnvelope } from "@/lib/server/workspace-store";
+import { deleteManagedCronJob, listCronJobs, listCronRuns, updateManagedCronJob } from "@/lib/server/cron-service";
 
 export const runtime = "nodejs";
 
@@ -33,71 +32,42 @@ const updateSchema = z.object({
   enabled: z.boolean().optional(),
 });
 
-async function validateJobTarget(agentId: string, targetRoomId: string): Promise<void> {
-  const workspace = await loadWorkspaceEnvelope();
-  const room = workspace.state.rooms.find((entry) => entry.id === targetRoomId);
-  if (!room) {
-    throw new Error(`Room ${targetRoomId} does not exist.`);
-  }
-  const participatesInRoom = room.participants.some(
-    (participant) => participant.runtimeKind === "agent" && participant.agentId === agentId,
-  );
-  if (!participatesInRoom) {
-    throw new Error(`Agent ${agentId} is not attached to room ${targetRoomId}.`);
-  }
-}
-
 export async function PATCH(request: Request, context: { params: Promise<{ jobId: string }> }) {
   try {
     ensureCronDispatcherStarted();
     const { jobId } = await context.params;
     const payload = updateSchema.parse(await request.json());
-    const currentStore = await loadCronStore();
-    const currentJob = currentStore.jobs.find((job) => job.id === jobId);
-    if (!currentJob) {
-      return NextResponse.json({ error: "Cron job not found." }, { status: 404 });
-    }
-
-    const nextAgentId = payload.agentId ?? currentJob.agentId;
-    const nextRoomId = payload.targetRoomId ?? currentJob.targetRoomId;
-    await validateJobTarget(nextAgentId, nextRoomId);
-
-    const store = await mutateCronStore((snapshot) => ({
-      ...snapshot,
-      jobs: snapshot.jobs.map((job) => {
-        if (job.id !== jobId) {
-          return job;
-        }
-        const schedule = (payload.schedule as RoomCronSchedule | undefined) ?? job.schedule;
-        const enabled = payload.enabled ?? job.enabled;
-        return {
-          ...job,
-          agentId: nextAgentId,
-          targetRoomId: nextRoomId,
-          title: payload.title ?? job.title,
-          prompt: payload.prompt ?? job.prompt,
-          schedule,
-          deliveryPolicy: payload.deliveryPolicy ?? job.deliveryPolicy,
-          enabled,
-          nextRunAt: enabled ? computeNextRunAt(schedule) ?? job.nextRunAt : null,
-          updatedAt: new Date().toISOString(),
-        };
-      }),
-    }));
-
-    return NextResponse.json({ ok: true, jobs: store.jobs, runs: store.runs });
+    const job = await updateManagedCronJob(jobId, {
+      agentId: payload.agentId,
+      targetRoomId: payload.targetRoomId,
+      title: payload.title,
+      prompt: payload.prompt,
+      schedule: payload.schedule as RoomCronSchedule | undefined,
+      deliveryPolicy: payload.deliveryPolicy,
+      enabled: payload.enabled,
+    });
+    const [jobs, runs] = await Promise.all([
+      listCronJobs({ roomId: job.targetRoomId }),
+      listCronRuns({ roomId: job.targetRoomId }),
+    ]);
+    return NextResponse.json({ ok: true, jobs, runs });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown server error.";
-    return NextResponse.json({ error: message }, { status: 400 });
+    const status = message === "Cron job not found." ? 404 : 400;
+    return NextResponse.json({ error: message }, { status });
   }
 }
 
 export async function DELETE(_request: Request, context: { params: Promise<{ jobId: string }> }) {
-  ensureCronDispatcherStarted();
-  const { jobId } = await context.params;
-  const store = await mutateCronStore((snapshot) => ({
-    ...snapshot,
-    jobs: snapshot.jobs.filter((job) => job.id !== jobId),
-  }));
-  return NextResponse.json({ ok: true, jobs: store.jobs, runs: store.runs });
+  try {
+    ensureCronDispatcherStarted();
+    const { jobId } = await context.params;
+    await deleteManagedCronJob(jobId);
+    const [jobs, runs] = await Promise.all([listCronJobs(), listCronRuns()]);
+    return NextResponse.json({ ok: true, jobs, runs });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown server error.";
+    const status = message === "Cron job not found." ? 404 : 400;
+    return NextResponse.json({ error: message }, { status });
+  }
 }

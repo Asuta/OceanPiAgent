@@ -7,6 +7,10 @@ import type { RoomToolContext, ToolExecution, ToolScope } from "@/lib/chat/types
 const ROOM_MESSAGE_KIND_ENUM = StringEnum(["answer", "progress", "warning", "error", "clarification"]);
 const ROOM_MESSAGE_STATUS_ENUM = StringEnum(["pending", "streaming", "completed", "failed"]);
 const CUSTOM_COMMAND_ENUM = StringEnum(["list_commands", "project_profile", "current_time", "web_fetch"]);
+const CRON_SCHEDULE_TYPE_ENUM = StringEnum(["once", "daily", "weekly"]);
+const CRON_DELIVERY_POLICY_ENUM = StringEnum(["silent", "only_on_result", "always_post_summary"]);
+const CRON_JOB_STATUS_ENUM = StringEnum(["idle", "queued", "running", "error"]);
+const CRON_RUN_STATUS_ENUM = StringEnum(["running", "completed", "failed"]);
 
 export interface PiToolResultDetails {
   toolEvent: ToolExecution;
@@ -194,6 +198,134 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
       parameters: Type.Object({
         roomId: Type.String({ description: "Attached room id." }),
         limit: Type.Optional(Type.Integer({ description: "How many recent messages to return." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "list_cron_jobs",
+      label: "List Cron Jobs",
+      description: "List scheduled tasks owned by the current agent across its attached rooms.",
+      parameters: Type.Object({
+        targetRoomId: Type.Optional(Type.String({ description: "Optional attached room id filter." })),
+        status: Type.Optional(CRON_JOB_STATUS_ENUM),
+        enabled: Type.Optional(Type.Boolean({ description: "Optional enabled-state filter." })),
+        limit: Type.Optional(Type.Integer({ description: "Optional maximum number of returned jobs." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "get_cron_job",
+      label: "Get Cron Job",
+      description: "Inspect one scheduled task owned by the current agent and optionally include recent runs.",
+      parameters: Type.Object({
+        jobId: Type.String({ description: "Cron job id." }),
+        includeRuns: Type.Optional(Type.Boolean({ description: "Whether to include recent runs." })),
+        runLimit: Type.Optional(Type.Integer({ description: "How many recent runs to include." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "create_cron_job",
+      label: "Create Cron Job",
+      description: "Create a scheduled task for the current agent in the current room or another attached room.",
+      parameters: Type.Object({
+        targetRoomId: Type.Optional(Type.String({ description: "Optional attached room id. Defaults to the current room." })),
+        title: Type.String({ description: "Cron job title." }),
+        prompt: Type.String({ description: "Instruction to run when the job triggers." }),
+        scheduleType: CRON_SCHEDULE_TYPE_ENUM,
+        onceAt: Type.Optional(Type.String({ description: "Required for once schedules." })),
+        time: Type.Optional(Type.String({ description: "Required for daily or weekly schedules. Use HH:mm." })),
+        dayOfWeek: Type.Optional(Type.Integer({ description: "Required for weekly schedules. 0=Sunday through 6=Saturday." })),
+        deliveryPolicy: Type.Optional(CRON_DELIVERY_POLICY_ENUM),
+        enabled: Type.Optional(Type.Boolean({ description: "Whether the new job starts enabled." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "update_cron_job",
+      label: "Update Cron Job",
+      description: "Update a scheduled task owned by the current agent. Provide scheduleType whenever schedule fields change.",
+      parameters: Type.Object({
+        jobId: Type.String({ description: "Cron job id." }),
+        targetRoomId: Type.Optional(Type.String({ description: "Optional attached room id to move the job to." })),
+        title: Type.Optional(Type.String({ description: "Optional new title." })),
+        prompt: Type.Optional(Type.String({ description: "Optional new prompt." })),
+        scheduleType: Type.Optional(CRON_SCHEDULE_TYPE_ENUM),
+        onceAt: Type.Optional(Type.String({ description: "Required when scheduleType=once." })),
+        time: Type.Optional(Type.String({ description: "Required when scheduleType is daily or weekly. Use HH:mm." })),
+        dayOfWeek: Type.Optional(Type.Integer({ description: "Required when scheduleType=weekly." })),
+        deliveryPolicy: Type.Optional(CRON_DELIVERY_POLICY_ENUM),
+        enabled: Type.Optional(Type.Boolean({ description: "Optional enabled-state update." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "pause_cron_job",
+      label: "Pause Cron Job",
+      description: "Disable one scheduled task owned by the current agent without deleting it.",
+      parameters: Type.Object({
+        jobId: Type.String({ description: "Cron job id." }),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "resume_cron_job",
+      label: "Resume Cron Job",
+      description: "Re-enable one paused scheduled task owned by the current agent.",
+      parameters: Type.Object({
+        jobId: Type.String({ description: "Cron job id." }),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "delete_cron_job",
+      label: "Delete Cron Job",
+      description: "Delete one scheduled task owned by the current agent.",
+      parameters: Type.Object({
+        jobId: Type.String({ description: "Cron job id." }),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "run_cron_job_now",
+      label: "Run Cron Job Now",
+      description: "Queue one scheduled task owned by the current agent for immediate execution.",
+      parameters: Type.Object({
+        jobId: Type.String({ description: "Cron job id." }),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "list_cron_runs",
+      label: "List Cron Runs",
+      description: "List recent execution records for scheduled tasks owned by the current agent.",
+      parameters: Type.Object({
+        jobId: Type.Optional(Type.String({ description: "Optional cron job id filter." })),
+        targetRoomId: Type.Optional(Type.String({ description: "Optional attached room id filter." })),
+        status: Type.Optional(CRON_RUN_STATUS_ENUM),
+        limit: Type.Optional(Type.Integer({ description: "Optional maximum number of returned runs." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "preview_cron_schedule",
+      label: "Preview Cron Schedule",
+      description: "Preview the next and following trigger times for a proposed schedule before creating or updating a cron job.",
+      parameters: Type.Object({
+        scheduleType: CRON_SCHEDULE_TYPE_ENUM,
+        onceAt: Type.Optional(Type.String({ description: "Required for once schedules." })),
+        time: Type.Optional(Type.String({ description: "Required for daily or weekly schedules. Use HH:mm." })),
+        dayOfWeek: Type.Optional(Type.Integer({ description: "Required for weekly schedules." })),
       }),
       scope,
       roomToolContext,

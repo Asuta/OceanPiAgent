@@ -17,6 +17,56 @@ export const TOOL_CATALOG = [
     description: "检索持久化 agent memory，用来回忆跨房间的旧结论、工具结果和压缩摘要。",
   },
   {
+    name: "list_cron_jobs",
+    title: "List Cron Jobs",
+    description: "列出当前 Agent 在已连接房间里的定时任务，可按房间、状态、启停状态过滤。",
+  },
+  {
+    name: "get_cron_job",
+    title: "Get Cron Job",
+    description: "查看单个定时任务的完整配置，并可顺带读取最近执行记录。",
+  },
+  {
+    name: "create_cron_job",
+    title: "Create Cron Job",
+    description: "为当前 Agent 创建定时任务，目标房间必须是它当前已连接的 room。",
+  },
+  {
+    name: "update_cron_job",
+    title: "Update Cron Job",
+    description: "修改当前 Agent 已有的定时任务，可更新标题、Prompt、调度方式、投递策略与启停状态。",
+  },
+  {
+    name: "pause_cron_job",
+    title: "Pause Cron Job",
+    description: "暂停一个定时任务但保留配置，适合临时停用。",
+  },
+  {
+    name: "resume_cron_job",
+    title: "Resume Cron Job",
+    description: "恢复一个已暂停的定时任务，并重新计算下一次触发时间。",
+  },
+  {
+    name: "delete_cron_job",
+    title: "Delete Cron Job",
+    description: "删除一个属于当前 Agent 的定时任务。",
+  },
+  {
+    name: "run_cron_job_now",
+    title: "Run Cron Job Now",
+    description: "立即把一个定时任务排队执行一次，不改变它未来的调度计划。",
+  },
+  {
+    name: "list_cron_runs",
+    title: "List Cron Runs",
+    description: "查看最近的定时任务执行记录，可按任务、房间和执行状态过滤。",
+  },
+  {
+    name: "preview_cron_schedule",
+    title: "Preview Cron Schedule",
+    description: "预演某个调度配置将被怎样解释，返回下一次和下下次触发时间。",
+  },
+  {
     name: "memory_get",
     title: "Memory Get",
     description: "按文件和行号读取 memory_search 命中的上下文片段，避免把整份记忆全部塞回 prompt。",
@@ -117,6 +167,8 @@ export const ROOM_BRIDGE_RULES = [
   "如果 Agent 觉得消息没必要发送可见房间消息，可以调用 read_no_reply，并明确指定 roomId + messageId，让对应参与者消息旁出现带 Agent 名字的已读标记。",
   "read_no_reply 和当前 room 的可见房间消息在同一轮里应该互斥，不要同时作为同一条消息的最终房间结果出现。",
   "群组管理工具可以列出当前已加入 rooms、查看 agent 电话本、创建新群、拉 agent 进群、退群、踢人，以及回看已加入群的可见历史。",
+  "现在 room 模式还提供 cron 工具：可查看、创建、修改、暂停、恢复、删除、立即执行定时任务，并查看最近执行记录。",
+  "cron 工具只允许管理当前 Agent 自己的任务，而且目标 room 必须仍然是这个 Agent 当前已连接的房间。",
   "human 始终保留任意 room 的可见权和插话权；成员列表只决定哪些参与者被视为当前群成员与自动轮询对象。",
   "每个 Agent 种类都有一份独立但跨房间共享的 workspace，可通过 workspace_* 工具读写自己的目录。",
 ] as const;
