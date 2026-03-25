@@ -19,8 +19,6 @@ import type {
   ProviderCompatibility,
   RoomHistoryMessageSummary,
   RoomAgentId,
-  RoomChatResponseBody,
-  RoomChatStreamEvent,
   RoomMessage,
   RoomMessageEmission,
   RoomMessageReceipt,
@@ -42,8 +40,6 @@ import {
   MIN_MAX_TOOL_LOOP_STEPS,
 } from "@/lib/chat/types";
 import {
-  appendMessageToRoom,
-  applyMessageReceiptUpdate,
   createKnownAgentCards,
   createAgentParticipant,
   createAgentSharedState,
@@ -51,17 +47,14 @@ import {
   createHumanParticipant,
   createInitialAgentStates,
   createRoomHistorySummary,
-  createRoomMessage,
   createRoomSession,
   createSchedulerState,
-  createSystemRoomEvent,
   createTimestamp,
   getActiveRooms,
   getAgentParticipants,
   getArchivedRooms,
   getEnabledAgentParticipants,
   getHumanParticipants,
-  getNextRoomMessageSeq,
   getPrimaryRoomAgentId,
   getReceiptStatus,
   getReceiptUpdatedAt,
@@ -71,13 +64,29 @@ import {
   reduceRoomManagementActions as reduceSharedRoomManagementActions,
   sortRoomParticipants,
   sortRoomsByUpdatedAt,
-  syncRoomParticipants,
   upsertRoomMessageReceipt,
 } from "@/lib/chat/workspace-domain";
+import {
+  clearPersistedWorkspaceState,
+  fetchWorkspaceEnvelope,
+  loadLocalWorkspaceState,
+  saveWorkspaceEnvelope,
+  saveWorkspaceStateToLocalStorage,
+} from "@/components/workspace/persistence";
+import {
+  addAgentParticipantToRoom,
+  addHumanParticipantToRoom,
+  applyOutgoingUserMessage,
+  moveAgentParticipantInRoom,
+  removeParticipantFromRoom,
+  resolveRoomMessageSender,
+  toggleAgentParticipantInRoom,
+} from "@/components/workspace/room-actions";
+import type { ActiveSchedulerRun } from "@/components/workspace/scheduler";
+import { useRoomExecution } from "@/components/workspace/use-room-execution";
+import type { ActiveRoomRun } from "@/components/workspace/use-room-execution";
+import { useRoomScheduler } from "@/components/workspace/use-room-scheduler";
 
-const STORAGE_KEY = "oceanking.room-shell.v4";
-const PREVIOUS_STORAGE_KEY = "oceanking.room-shell.v3";
-const LEGACY_STORAGE_KEY = "oceanking.room-shell.v1";
 const DEFAULT_AGENT_ID: RoomAgentId = "concierge";
 const ROOM_LOOP_MAX_ROUNDS = 20;
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
@@ -104,12 +113,6 @@ const SYSTEM_SENDER: RoomSender = {
   role: "system",
 };
 
-const ROOM_SCHEDULER_SENDER: RoomSender = {
-  id: "room-scheduler",
-  name: "Room Scheduler",
-  role: "system",
-};
-
 const GENERIC_AGENT_SENDER: RoomSender = {
   id: "room-agent",
   name: "Room Reply",
@@ -129,25 +132,6 @@ const ROOM_MESSAGE_KINDS = [
 const ROOM_VISIBLE_MESSAGE_KINDS = ["answer", "progress", "warning", "error", "clarification"] as const;
 const ROOM_MESSAGE_STATUSES = ["pending", "streaming", "completed", "failed"] as const;
 const AGENT_TURN_STATUSES = ["running", "continued", "completed", "error"] as const;
-
-interface ActiveRoomRun {
-  roomId: string;
-  requestId: string;
-  turnId: string;
-  controller: AbortController;
-}
-
-interface ActiveSchedulerRun {
-  cycleId: string;
-  activeAgentId: RoomAgentId | null;
-  activeRequestId: string | null;
-}
-
-interface ExecuteAgentTurnResult {
-  status: "completed" | "superseded" | "aborted" | "error";
-  emittedMessages: RoomMessage[];
-  receiptUpdates: RoomMessageReceiptUpdate[];
-}
 
 interface SendMessageArgs {
   roomId: string;
@@ -306,14 +290,6 @@ function sortRoomMessageReceipts(receipts: RoomMessageReceipt[]): RoomMessageRec
 
 function createParticipantId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
-}
-
-function getParticipantSender(participant: RoomParticipant): RoomSender {
-  return {
-    id: participant.id,
-    name: participant.name,
-    role: participant.senderRole,
-  };
 }
 
 function getLegacyRoomSender(role: RoomMessage["role"], source: RoomMessage["source"]): RoomSender {
@@ -1161,100 +1137,6 @@ function migrateLegacyWorkspaceState(raw: string): RoomWorkspaceState | null {
   }
 }
 
-function extractNextBlock(buffer: string): { block: string; rest: string } | null {
-  const separatorMatch = buffer.match(/\r?\n\r?\n/);
-  if (!separatorMatch || separatorMatch.index === undefined) {
-    return null;
-  }
-
-  return {
-    block: buffer.slice(0, separatorMatch.index),
-    rest: buffer.slice(separatorMatch.index + separatorMatch[0].length),
-  };
-}
-
-function parseRoomStreamBlock(block: string): RoomChatStreamEvent | null {
-  const dataLines = block
-    .split(/\r?\n/g)
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trimStart());
-
-  if (dataLines.length === 0) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(dataLines.join("\n")) as RoomChatStreamEvent;
-  } catch {
-    return null;
-  }
-}
-
-function updateTurn(
-  turns: AgentRoomTurn[],
-  turnId: string,
-  updater: (turn: AgentRoomTurn) => AgentRoomTurn,
-): AgentRoomTurn[] {
-  return turns.map((turn) => (turn.id === turnId ? updater(turn) : turn));
-}
-
-function updateRoomMessage(
-  messages: RoomMessage[],
-  messageId: string,
-  updater: (message: RoomMessage) => RoomMessage,
-): RoomMessage[] {
-  return messages.map((message) => (message.id === messageId ? updater(message) : message));
-}
-
-function getNextAgentParticipant(room: RoomSession, currentParticipantId?: string | null): RoomParticipant | null {
-  const enabledAgents = getEnabledAgentParticipants(room);
-  if (enabledAgents.length === 0) {
-    return null;
-  }
-
-  if (currentParticipantId) {
-    const currentIndex = enabledAgents.findIndex((participant) => participant.id === currentParticipantId);
-    if (currentIndex >= 0) {
-      return enabledAgents[(currentIndex + 1) % enabledAgents.length];
-    }
-  }
-
-  if (room.scheduler.nextAgentParticipantId) {
-    const scheduled = enabledAgents.find((participant) => participant.id === room.scheduler.nextAgentParticipantId);
-    if (scheduled) {
-      return scheduled;
-    }
-  }
-
-  return enabledAgents[0];
-}
-
-function getSchedulerVisibleTargetMessages(messages: RoomMessage[], participant: RoomParticipant): RoomMessage[] {
-  return messages.filter((message) => message.sender.role === "participant" && message.sender.id !== participant.id);
-}
-
-function buildSchedulerPacketContent(
-  room: RoomSession,
-  participant: RoomParticipant,
-  messages: RoomMessage[],
-  options?: {
-    hasNewDelta?: boolean;
-  },
-): string {
-  const visibleTargetMessages = getSchedulerVisibleTargetMessages(messages, participant);
-  const latestParticipantMessage = visibleTargetMessages[visibleTargetMessages.length - 1] ?? null;
-
-  return [
-    "[Room scheduler sync packet]",
-    `Target participant: ${participant.name} (${participant.id})`,
-    `Room: ${room.title} (roomId: ${room.id})`,
-    options?.hasNewDelta ? "Update type: new visible room activity" : "Update type: scheduler replay / no new seq",
-    latestParticipantMessage
-      ? `Latest message: seq ${latestParticipantMessage.seq} | messageId ${latestParticipantMessage.id} | from ${latestParticipantMessage.sender.name} (${latestParticipantMessage.sender.id}, ${latestParticipantMessage.sender.role}) | ${latestParticipantMessage.kind}/${latestParticipantMessage.status}: ${latestParticipantMessage.content}`
-      : "Latest message: none",
-  ].join("\n");
-}
-
 function getNextRoomIndex(rooms: RoomSession[]): number {
   return rooms.length + 1;
 }
@@ -1326,7 +1208,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const pendingWorkspacePersistRef = useRef<RoomWorkspaceState | null>(null);
   const workspacePersistInFlightRef = useRef(false);
   const workspacePersistNonceRef = useRef(0);
-  const runRoomSchedulerRef = useRef<(roomId: string) => Promise<void>>(async () => undefined);
+  const maybeStartSchedulerForRoomMessageRef = useRef<(roomId: string, message: RoomMessage) => void>(() => undefined);
 
   const applyWorkspaceSnapshot = useCallback(
     (
@@ -1363,46 +1245,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
 
-    const loadLocalWorkspace = (): RoomWorkspaceState | null => {
-      try {
-        const persisted = localStorage.getItem(STORAGE_KEY);
-        const parsedWorkspace = persisted ? parseWorkspaceState(persisted) : null;
-        if (parsedWorkspace) {
-          return parsedWorkspace;
-        }
-
-        const previousPersisted = localStorage.getItem(PREVIOUS_STORAGE_KEY);
-        const previousWorkspace = previousPersisted ? parseWorkspaceState(previousPersisted) : null;
-        if (previousWorkspace) {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(previousWorkspace));
-          localStorage.removeItem(PREVIOUS_STORAGE_KEY);
-          return previousWorkspace;
-        }
-
-        const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
-        const migratedWorkspace = legacy ? migrateLegacyWorkspaceState(legacy) : null;
-        if (migratedWorkspace) {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(migratedWorkspace));
-          localStorage.removeItem(LEGACY_STORAGE_KEY);
-          return migratedWorkspace;
-        }
-      } catch {
-        localStorage.removeItem(STORAGE_KEY);
-        localStorage.removeItem(PREVIOUS_STORAGE_KEY);
-        localStorage.removeItem(LEGACY_STORAGE_KEY);
-      }
-
-      return null;
-    };
-
     void (async () => {
-      const response = await fetch("/api/workspace", { cache: "no-store" }).catch(() => null);
-      const serverEnvelope = response?.ok
-        ? ((await response.json().catch(() => null)) as { version?: number; state?: RoomWorkspaceState } | null)
-        : null;
+      const serverEnvelope = await fetchWorkspaceEnvelope();
       const serverVersion = typeof serverEnvelope?.version === "number" ? serverEnvelope.version : 0;
       const serverState = serverEnvelope?.state ?? null;
-      const localWorkspace = loadLocalWorkspace();
+      const localWorkspace = loadLocalWorkspaceState({
+        parseWorkspaceState,
+        migrateLegacyWorkspaceState,
+      });
 
       if (cancelled) {
         return;
@@ -1468,15 +1318,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        rooms,
-        agentStates,
-        activeRoomId,
-        selectedConsoleAgentId: selectedConsoleAgentId ?? undefined,
-      } satisfies RoomWorkspaceState),
-    );
+    saveWorkspaceStateToLocalStorage({
+      rooms,
+      agentStates,
+      activeRoomId,
+      selectedConsoleAgentId: selectedConsoleAgentId ?? undefined,
+    } satisfies RoomWorkspaceState);
   }, [activeRoomId, agentStates, hydrated, rooms, selectedConsoleAgentId]);
 
   useEffect(() => {
@@ -1496,16 +1343,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         const requestNonce = workspacePersistNonceRef.current;
         pendingWorkspacePersistRef.current = null;
 
-        const response = await fetch("/api/workspace", {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            expectedVersion: workspaceVersionRef.current,
-            state: payload,
-          }),
-        }).catch(() => null);
+        const response = await saveWorkspaceEnvelope({
+          expectedVersion: workspaceVersionRef.current,
+          state: payload,
+        });
 
         if (!response) {
           pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? payload;
@@ -1601,12 +1442,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
 
       void (async () => {
-        const response = await fetch("/api/workspace", { cache: "no-store" }).catch(() => null);
-        if (!response?.ok) {
-          return;
-        }
-
-        const payload = (await response.json().catch(() => null)) as { version?: number; state?: RoomWorkspaceState } | null;
+        const payload = await fetchWorkspaceEnvelope();
         if (
           typeof payload?.version === "number"
           && payload.version > workspaceVersionRef.current
@@ -1785,111 +1621,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [reduceRoomManagementActions, replaceRooms],
   );
 
-  const applyRoomToolAction = useCallback(
-    (action: RoomToolActionUnion, actorAgentId: RoomAgentId) => {
-      applyRoomToolActions([action], actorAgentId);
-    },
-    [applyRoomToolActions],
-  );
-
-  const getActiveAgentRun = useCallback((agentId: RoomAgentId): ActiveRoomRun | null => {
-    return activeRunsRef.current[agentId] ?? null;
-  }, []);
-
-  const isCurrentAgentRun = useCallback((agentId: RoomAgentId, requestId: string): boolean => {
-    return activeRunsRef.current[agentId]?.requestId === requestId;
-  }, []);
-
-  const startAgentRun = useCallback((agentId: RoomAgentId, run: ActiveRoomRun) => {
-    activeRunsRef.current[agentId] = run;
-    setRunningAgentRequestIds((current) => ({
-      ...current,
-      [agentId]: run.requestId,
-    }));
-  }, []);
-
-  const finishAgentRun = useCallback(
-    (agentId: RoomAgentId, requestId: string) => {
-      if (!isCurrentAgentRun(agentId, requestId)) {
-        return;
-      }
-
-      delete activeRunsRef.current[agentId];
-      setRunningAgentRequestIds((current) => {
-        const nextState = { ...current };
-        delete nextState[agentId];
-        return nextState;
-      });
-    },
-    [isCurrentAgentRun],
-  );
-
-  const roomHasRunningAgent = useCallback((room: RoomSession): boolean => {
-    return room.scheduler.status === "running" || Boolean(activeSchedulerRunsRef.current[room.id]?.activeAgentId);
-  }, []);
-
-  const shouldAutoRestartSchedulerForMessage = useCallback(
-    (room: RoomSession, message: RoomMessage): boolean => {
-      if (room.archivedAt) {
-        return false;
-      }
-
-      if (room.scheduler.status === "running" || activeSchedulerRunsRef.current[room.id]?.activeAgentId) {
-        return false;
-      }
-
-      if (message.sender.role !== "participant") {
-        return false;
-      }
-
-      return getEnabledAgentParticipants(room).some((participant) => participant.id !== message.sender.id);
-    },
-    [],
-  );
-
-  const interruptRoomScheduler = useCallback(
-    (roomId: string) => {
-      const activeSchedulerRun = activeSchedulerRunsRef.current[roomId];
-      if (activeSchedulerRun?.activeAgentId && activeSchedulerRun.activeRequestId) {
-        const activeRun = activeRunsRef.current[activeSchedulerRun.activeAgentId];
-        if (activeRun && activeRun.requestId === activeSchedulerRun.activeRequestId) {
-          activeRun.controller.abort(new Error("Superseded by a newer room message."));
-        }
-      }
-
-      activeSchedulerRunsRef.current[roomId] = {
-        cycleId: crypto.randomUUID(),
-        activeAgentId: null,
-        activeRequestId: null,
-      };
-
-      updateRoomState(roomId, (room) => ({
-        ...room,
-        scheduler: {
-          ...room.scheduler,
-          status: "idle",
-          activeParticipantId: null,
-          roundCount: 0,
-        },
-        error: "",
-        updatedAt: createTimestamp(),
-      }));
-    },
-    [updateRoomState],
-  );
-
-  const maybeStartSchedulerForRoomMessage = useCallback(
-    (roomId: string, message: RoomMessage) => {
-      const room = roomsRef.current.find((candidate) => candidate.id === roomId);
-      if (!room || !shouldAutoRestartSchedulerForMessage(room, message)) {
-        return;
-      }
-
-      void runRoomSchedulerRef.current(roomId);
-    },
-    [shouldAutoRestartSchedulerForMessage],
-  );
-
   const getAttachedRoomsForAgent = useCallback((agentId: RoomAgentId, currentRoomId: string, currentRoomTitle: string) => {
     return getActiveRooms(roomsRef.current)
       .filter((room) => room.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === agentId))
@@ -1916,656 +1647,44 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
-  const readRoomStream = useCallback(
-    async (
-      response: Response,
-      initiatingRoomId: string,
-      agentId: RoomAgentId,
-      turnId: string,
-      requestId: string,
-    ): Promise<{
-      emittedMessages: RoomMessage[];
-      receiptUpdates: RoomMessageReceiptUpdate[];
-    }> => {
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("The room stream did not contain a readable body.");
-      }
+  const { executeAgentTurn, clearAllActiveRuns } = useRoomExecution({
+    roomsRef,
+    agentStatesRef,
+    activeRunsRef,
+    activeSchedulerRunsRef,
+    setRunningAgentRequestIds,
+    updateAgentTurns,
+    updateRoomState,
+    updateAgentState,
+    applyReceiptUpdateToAllAgentConsoles,
+    applyRoomToolActions,
+    getAttachedRoomsForAgent,
+    getKnownAgentsForToolContext,
+    getRoomHistoryByIdForAgent,
+    maybeStartSchedulerForRoomMessage: (roomId, message) => maybeStartSchedulerForRoomMessageRef.current(roomId, message),
+    mergeAgentTurns,
+    normalizeAssistantMeta,
+  });
 
-      const decoder = new TextDecoder();
-      let buffer = "";
-      const emittedMessages: RoomMessage[] = [];
-      const receiptUpdates: RoomMessageReceiptUpdate[] = [];
-
-      while (true) {
-        const { value, done } = await reader.read();
-
-        if (!isCurrentAgentRun(agentId, requestId)) {
-          await reader.cancel().catch(() => undefined);
-          return {
-            emittedMessages,
-            receiptUpdates,
-          };
-        }
-
-        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-
-        while (true) {
-          const nextBlock = extractNextBlock(buffer);
-          if (!nextBlock) {
-            break;
-          }
-
-          buffer = nextBlock.rest;
-          const event = parseRoomStreamBlock(nextBlock.block);
-          if (!event) {
-            continue;
-          }
-
-          if (!isCurrentAgentRun(agentId, requestId)) {
-            await reader.cancel().catch(() => undefined);
-            return {
-              emittedMessages,
-              receiptUpdates,
-            };
-          }
-
-          if (event.type === "agent-text-delta") {
-            updateAgentTurns(agentId, (turns) =>
-              updateTurn(turns, turnId, (turn) => ({
-                ...turn,
-                assistantContent: `${turn.assistantContent}${event.delta}`,
-              })),
-            );
-            continue;
-          }
-
-          if (event.type === "tool") {
-            updateAgentTurns(agentId, (turns) =>
-              updateTurn(turns, turnId, (turn) => ({
-                ...turn,
-                tools: [...turn.tools, event.tool],
-              })),
-            );
-            if (event.tool.roomAction && event.tool.roomAction.type !== "read_no_reply") {
-              applyRoomToolAction(event.tool.roomAction, agentId);
-            }
-            continue;
-          }
-
-          if (event.type === "room-message") {
-            emittedMessages.push(event.message);
-            updateRoomState(event.message.roomId, (room) => appendMessageToRoom(room, event.message));
-            maybeStartSchedulerForRoomMessage(event.message.roomId, event.message);
-
-            updateAgentTurns(agentId, (turns) =>
-              updateTurn(turns, turnId, (turn) => ({
-                ...turn,
-                emittedMessages: [...turn.emittedMessages, event.message],
-              })),
-            );
-            continue;
-          }
-
-          if (event.type === "message-receipt") {
-            receiptUpdates.push(event.update);
-            updateRoomState(event.update.roomId, (room) => {
-              const nextMessages = applyMessageReceiptUpdate(room.roomMessages, event.update);
-              if (nextMessages === room.roomMessages) {
-                return room;
-              }
-
-              return {
-                ...room,
-                roomMessages: nextMessages,
-                receiptRevision: room.receiptRevision + 1,
-                updatedAt: createTimestamp(),
-              };
-            });
-            applyReceiptUpdateToAllAgentConsoles(event.update);
-            continue;
-          }
-
-          if (event.type === "done") {
-            updateRoomState(initiatingRoomId, (room) => ({
-              ...room,
-              roomMessages: updateRoomMessage(room.roomMessages, event.turn.userMessage.id, () => event.turn.userMessage),
-              error: "",
-              updatedAt: createTimestamp(),
-            }));
-
-            updateAgentTurns(agentId, (turns) =>
-              updateTurn(turns, turnId, (turn) => ({
-                ...event.turn,
-                id: turnId,
-                ...(turn.continuationSnapshot
-                  ? {
-                      continuationSnapshot: turn.continuationSnapshot,
-                    }
-                  : {}),
-              })),
-            );
-
-            updateAgentState(agentId, (state) => ({
-              ...state,
-              resolvedModel: event.resolvedModel,
-              compatibility: event.compatibility,
-              updatedAt: createTimestamp(),
-            }));
-            continue;
-          }
-
-          if (event.type === "error") {
-            if (event.meta) {
-              const normalizedMeta = normalizeAssistantMeta(event.meta);
-              if (normalizedMeta) {
-                updateAgentTurns(agentId, (turns) =>
-                  updateTurn(turns, turnId, (turn) => ({
-                    ...turn,
-                    meta: normalizedMeta,
-                  })),
-                );
-              }
-            }
-            throw new Error(event.error);
-          }
-        }
-
-        if (done) {
-          break;
-        }
-      }
-
-      if (!isCurrentAgentRun(agentId, requestId)) {
-        return {
-          emittedMessages,
-          receiptUpdates,
-        };
-      }
-
-      const trailingEvent = parseRoomStreamBlock(buffer);
-      if (trailingEvent?.type === "error") {
-        if (trailingEvent.meta) {
-          const normalizedMeta = normalizeAssistantMeta(trailingEvent.meta);
-          if (normalizedMeta) {
-            updateAgentTurns(agentId, (turns) =>
-              updateTurn(turns, turnId, (turn) => ({
-                ...turn,
-                meta: normalizedMeta,
-              })),
-            );
-          }
-        }
-        throw new Error(trailingEvent.error);
-      }
-
-      return {
-        emittedMessages,
-        receiptUpdates,
-      };
-    },
-    [
-      applyReceiptUpdateToAllAgentConsoles,
-      applyRoomToolAction,
-      isCurrentAgentRun,
-      maybeStartSchedulerForRoomMessage,
-      updateAgentState,
-      updateAgentTurns,
-      updateRoomState,
-    ],
-  );
-
-  const executeAgentTurn = useCallback(
-    async (args: {
-      roomId: string;
-      agentId: RoomAgentId;
-      inputMessage: RoomMessage;
-      runRequestId?: string;
-    }): Promise<ExecuteAgentTurnResult> => {
-      const roomSnapshot = roomsRef.current.find((room) => room.id === args.roomId);
-      if (!roomSnapshot) {
-        return {
-          status: "aborted",
-          emittedMessages: [],
-          receiptUpdates: [],
-        };
-      }
-
-      const roomTitle = roomSnapshot.title;
-      const agent = getRoomAgent(args.agentId);
-      const previousActiveRun = getActiveAgentRun(agent.id);
-      const pendingTurn = {
-        id: crypto.randomUUID(),
-        agent: {
-          id: agent.id,
-          label: agent.label,
-        },
-        userMessage: args.inputMessage,
-        assistantContent: "",
-        tools: [],
-        emittedMessages: [],
-        status: "running" as const,
-      };
-      const requestId = args.runRequestId ?? crypto.randomUUID();
-      const controller = new AbortController();
-      let emittedMessages: RoomMessage[] = [];
-      let receiptUpdates: RoomMessageReceiptUpdate[] = [];
-
-      if (previousActiveRun) {
-        updateAgentTurns(agent.id, (turns) =>
-          updateTurn(turns, previousActiveRun.turnId, (turn) =>
-            turn.status === "running"
-              ? {
-                  ...turn,
-                  status: "continued",
-                }
-              : turn,
-          ),
-        );
-      }
-
-      updateAgentTurns(agent.id, (turns) => mergeAgentTurns(turns, [pendingTurn]));
-      startAgentRun(agent.id, {
-        roomId: args.roomId,
-        requestId,
-        turnId: pendingTurn.id,
-        controller,
-      });
-      previousActiveRun?.controller.abort();
-
-      try {
-        const response = await fetch("/api/room-chat", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          signal: controller.signal,
-          body: JSON.stringify({
-            message: {
-              id: args.inputMessage.id,
-              content: args.inputMessage.content,
-              sender: args.inputMessage.sender,
-            },
-          settings: (agentStatesRef.current[agent.id] ?? createAgentSharedState()).settings,
-          room: {
-            id: args.roomId,
-            title: roomTitle,
-          },
-          attachedRooms: getAttachedRoomsForAgent(agent.id, args.roomId, roomTitle),
-          knownAgents: getKnownAgentsForToolContext(),
-          roomHistoryById: getRoomHistoryByIdForAgent(agent.id),
-          agent: {
-            id: agent.id,
-            label: agent.label,
-            instruction: agent.instruction,
-            },
-            stream: true,
-          }),
-        });
-
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(payload?.error || "The server returned an unknown room error.");
-        }
-
-        if (!isCurrentAgentRun(agent.id, requestId)) {
-          return {
-            status: "superseded",
-            emittedMessages,
-            receiptUpdates,
-          };
-        }
-
-        const contentType = response.headers.get("content-type") || "";
-        if (contentType.includes("application/json")) {
-          const payload = (await response.json()) as RoomChatResponseBody;
-          if (!isCurrentAgentRun(agent.id, requestId)) {
-            return {
-              status: "superseded",
-              emittedMessages,
-              receiptUpdates,
-            };
-          }
-
-          emittedMessages = payload.emittedMessages;
-          receiptUpdates = payload.receiptUpdates ?? [];
-          applyRoomToolActions(
-            payload.turn.tools.flatMap((tool) => (tool.roomAction && tool.roomAction.type !== "read_no_reply" ? [tool.roomAction] : [])),
-            agent.id,
-          );
-
-          updateRoomState(args.roomId, (room) => {
-            let nextRoom = {
-              ...room,
-              roomMessages: updateRoomMessage(room.roomMessages, payload.turn.userMessage.id, () => ({
-                ...payload.turn.userMessage,
-                seq: room.roomMessages.find((message) => message.id === payload.turn.userMessage.id)?.seq ?? payload.turn.userMessage.seq,
-              })),
-              error: "",
-              updatedAt: createTimestamp(),
-            };
-
-            for (const receiptUpdate of receiptUpdates) {
-              const nextMessages = applyMessageReceiptUpdate(nextRoom.roomMessages, receiptUpdate);
-              if (nextMessages !== nextRoom.roomMessages) {
-                nextRoom = {
-                  ...nextRoom,
-                  roomMessages: nextMessages,
-                  receiptRevision: nextRoom.receiptRevision + 1,
-                };
-              }
-            }
-
-            for (const emittedMessage of emittedMessages) {
-              nextRoom = appendMessageToRoom(nextRoom, emittedMessage);
-            }
-
-            return nextRoom;
-          });
-          for (const emittedMessage of emittedMessages) {
-            maybeStartSchedulerForRoomMessage(emittedMessage.roomId, emittedMessage);
-          }
-          for (const receiptUpdate of receiptUpdates) {
-            applyReceiptUpdateToAllAgentConsoles(receiptUpdate);
-          }
-
-          updateAgentTurns(agent.id, (turns) =>
-            updateTurn(turns, pendingTurn.id, (turn) => ({
-              ...payload.turn,
-              id: pendingTurn.id,
-              ...(turn.continuationSnapshot
-                ? {
-                    continuationSnapshot: turn.continuationSnapshot,
-                  }
-                : {}),
-            })),
-          );
-
-          updateAgentState(agent.id, (state) => ({
-            ...state,
-            resolvedModel: payload.resolvedModel,
-            compatibility: payload.compatibility,
-            updatedAt: createTimestamp(),
-          }));
-        } else {
-          const streamResult = await readRoomStream(response, args.roomId, agent.id, pendingTurn.id, requestId);
-          emittedMessages = streamResult.emittedMessages;
-          receiptUpdates = streamResult.receiptUpdates;
-          if (!isCurrentAgentRun(agent.id, requestId)) {
-            return {
-              status: "superseded",
-              emittedMessages,
-              receiptUpdates,
-            };
-          }
-        }
-
-        return {
-          status: "completed",
-          emittedMessages,
-          receiptUpdates,
-        };
-      } catch (caughtError) {
-        if (!isCurrentAgentRun(agent.id, requestId)) {
-          return {
-            status: "superseded",
-            emittedMessages,
-            receiptUpdates,
-          };
-        }
-
-        if (controller.signal.aborted) {
-          return {
-            status: "aborted",
-            emittedMessages,
-            receiptUpdates,
-          };
-        }
-
-        const message = caughtError instanceof Error ? caughtError.message : "Unknown request failure.";
-        updateRoomState(args.roomId, (room) => ({
-          ...room,
-          error: message,
-          updatedAt: createTimestamp(),
-        }));
-        updateAgentTurns(agent.id, (turns) =>
-          updateTurn(turns, pendingTurn.id, (turn) => ({
-            ...turn,
-            status: "error",
-            error: message,
-          })),
-        );
-        return {
-          status: "error",
-          emittedMessages,
-          receiptUpdates,
-        };
-      } finally {
-        finishAgentRun(agent.id, requestId);
-        const schedulerRun = activeSchedulerRunsRef.current[args.roomId];
-        if (schedulerRun?.activeRequestId === requestId) {
-          activeSchedulerRunsRef.current[args.roomId] = {
-            ...schedulerRun,
-            activeAgentId: null,
-            activeRequestId: null,
-          };
-        }
-      }
-    },
-    [
-      applyReceiptUpdateToAllAgentConsoles,
-      applyRoomToolActions,
-      finishAgentRun,
-      getActiveAgentRun,
-      getAttachedRoomsForAgent,
-      getKnownAgentsForToolContext,
-      getRoomHistoryByIdForAgent,
-      isCurrentAgentRun,
-      maybeStartSchedulerForRoomMessage,
-      readRoomStream,
-      startAgentRun,
-      updateAgentState,
-      updateAgentTurns,
-      updateRoomState,
-    ],
-  );
-
-  const runRoomScheduler = useCallback(
-    async (roomId: string) => {
-      const cycleId = crypto.randomUUID();
-      interruptRoomScheduler(roomId);
-      activeSchedulerRunsRef.current[roomId] = {
-        cycleId,
-        activeAgentId: null,
-        activeRequestId: null,
-      };
-
-      let idlePassCount = 0;
-      let dispatchedRounds = 0;
-
-      while (true) {
-        if (activeSchedulerRunsRef.current[roomId]?.cycleId !== cycleId) {
-          return;
-        }
-
-        const roomSnapshot = roomsRef.current.find((room) => room.id === roomId);
-        if (!roomSnapshot) {
-          return;
-        }
-
-        const nextParticipant = getNextAgentParticipant(roomSnapshot);
-        const enabledAgents = getEnabledAgentParticipants(roomSnapshot);
-        if (!nextParticipant || enabledAgents.length === 0) {
-          updateRoomState(roomId, (room) => ({
-            ...room,
-            scheduler: {
-              ...room.scheduler,
-              status: "idle",
-              activeParticipantId: null,
-              roundCount: 0,
-            },
-          }));
-          return;
-        }
-
-        const nextAfterParticipant = getNextAgentParticipant(roomSnapshot, nextParticipant.id);
-        const cutoffSeq = roomSnapshot.roomMessages[roomSnapshot.roomMessages.length - 1]?.seq ?? 0;
-        const lastCursor = roomSnapshot.scheduler.agentCursorByParticipantId[nextParticipant.id] ?? 0;
-        const unseenMessages = roomSnapshot.roomMessages.filter(
-          (message) => message.seq > lastCursor && message.seq <= cutoffSeq && message.sender.id !== nextParticipant.id,
-        );
-        const messagesForTurn = unseenMessages;
-        const visibleTargetMessages = getSchedulerVisibleTargetMessages(messagesForTurn, nextParticipant);
-
-        updateRoomState(roomId, (room) => ({
-          ...room,
-          agentId: getPrimaryRoomAgentId(room),
-          scheduler: {
-            ...room.scheduler,
-            status: "running",
-            activeParticipantId: visibleTargetMessages.length > 0 ? nextParticipant.id : null,
-            nextAgentParticipantId: nextAfterParticipant?.id ?? nextParticipant.id,
-            roundCount: dispatchedRounds,
-          },
-          updatedAt: createTimestamp(),
-        }));
-
-        if (visibleTargetMessages.length === 0) {
-          updateRoomState(roomId, (room) => ({
-            ...room,
-            scheduler: {
-              ...room.scheduler,
-              agentCursorByParticipantId: {
-                ...room.scheduler.agentCursorByParticipantId,
-                [nextParticipant.id]: cutoffSeq,
-              },
-              agentReceiptRevisionByParticipantId: {
-                ...room.scheduler.agentReceiptRevisionByParticipantId,
-                [nextParticipant.id]: room.receiptRevision,
-              },
-            },
-            updatedAt: createTimestamp(),
-          }));
-
-          idlePassCount += 1;
-          if (idlePassCount >= enabledAgents.length) {
-            updateRoomState(roomId, (room) => ({
-              ...room,
-              scheduler: {
-                ...room.scheduler,
-                status: "idle",
-                activeParticipantId: null,
-                roundCount: 0,
-              },
-              updatedAt: createTimestamp(),
-            }));
-            return;
-          }
-          continue;
-        }
-
-        idlePassCount = 0;
-        dispatchedRounds += 1;
-        if (dispatchedRounds > ROOM_LOOP_MAX_ROUNDS) {
-          updateRoomState(roomId, (room) => ({
-            ...room,
-            error: `Room scheduler stopped after ${ROOM_LOOP_MAX_ROUNDS} agent rounds.`,
-            scheduler: {
-              ...room.scheduler,
-              status: "idle",
-              activeParticipantId: null,
-              roundCount: 0,
-            },
-            updatedAt: createTimestamp(),
-          }));
-          return;
-        }
-
-        updateRoomState(roomId, (room) => ({
-          ...room,
-          scheduler: {
-            ...room.scheduler,
-            roundCount: dispatchedRounds,
-          },
-        }));
-
-        const requestId = crypto.randomUUID();
-        activeSchedulerRunsRef.current[roomId] = {
-          ...(activeSchedulerRunsRef.current[roomId] ?? {
-            cycleId,
-            activeAgentId: null,
-            activeRequestId: null,
-          }),
-          cycleId,
-          activeAgentId: nextParticipant.agentId ?? null,
-          activeRequestId: requestId,
-        };
-
-        const schedulerPacket = createRoomMessage(
-          roomId,
-          "system",
-          buildSchedulerPacketContent(roomSnapshot, nextParticipant, messagesForTurn, {
-            hasNewDelta: unseenMessages.length > 0,
-          }),
-          "system",
-          {
-            sender: ROOM_SCHEDULER_SENDER,
-            kind: "system",
-            status: "completed",
-            final: true,
-          },
-        );
-        schedulerPacket.id = requestId;
-
-        const result = await executeAgentTurn({
-          roomId,
-          agentId: nextParticipant.agentId ?? DEFAULT_AGENT_ID,
-          inputMessage: schedulerPacket,
-          runRequestId: requestId,
-        });
-
-        if (result.status !== "completed") {
-          updateRoomState(roomId, (room) => ({
-            ...room,
-            scheduler: {
-              ...room.scheduler,
-              status: "idle",
-              activeParticipantId: null,
-              roundCount: 0,
-            },
-            updatedAt: createTimestamp(),
-          }));
-          return;
-        }
-
-        const latestSchedulerRun = activeSchedulerRunsRef.current[roomId];
-        if (latestSchedulerRun?.cycleId !== cycleId) {
-          return;
-        }
-
-        updateRoomState(roomId, (room) => ({
-          ...room,
-          scheduler: {
-            ...room.scheduler,
-            agentCursorByParticipantId: {
-              ...room.scheduler.agentCursorByParticipantId,
-              [nextParticipant.id]: Math.max(room.scheduler.agentCursorByParticipantId[nextParticipant.id] ?? 0, cutoffSeq),
-            },
-            agentReceiptRevisionByParticipantId: {
-              ...room.scheduler.agentReceiptRevisionByParticipantId,
-              [nextParticipant.id]: room.receiptRevision,
-            },
-          },
-          updatedAt: createTimestamp(),
-        }));
-      }
-    },
-    [executeAgentTurn, interruptRoomScheduler, updateRoomState],
-  );
+  const {
+    interruptRoomScheduler,
+    maybeStartSchedulerForRoomMessage,
+    roomHasRunningAgent,
+    runRoomScheduler,
+    clearAllSchedulerRuns,
+  } = useRoomScheduler({
+    roomsRef,
+    activeRunsRef,
+    activeSchedulerRunsRef,
+    updateRoomState,
+    executeAgentTurn,
+    defaultAgentId: DEFAULT_AGENT_ID,
+    maxRounds: ROOM_LOOP_MAX_ROUNDS,
+  });
 
   useEffect(() => {
-    runRoomSchedulerRef.current = runRoomScheduler;
-  }, [runRoomScheduler]);
+    maybeStartSchedulerForRoomMessageRef.current = maybeStartSchedulerForRoomMessage;
+  }, [maybeStartSchedulerForRoomMessage]);
 
   const activeRooms = useMemo(() => getActiveRooms(rooms), [rooms]);
   const archivedRooms = useMemo(() => getArchivedRooms(rooms), [rooms]);
@@ -2744,12 +1863,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
 
       updateRoomState(roomId, (currentRoom) => {
-        let nextRoom = syncRoomParticipants(currentRoom, [
-          ...currentRoom.participants,
-          createHumanParticipant(normalizedName, createParticipantId("human")),
-        ]);
-        nextRoom = appendMessageToRoom(nextRoom, createSystemRoomEvent(nextRoom, `You added ${normalizedName} to the room.`));
-        return nextRoom;
+        return addHumanParticipantToRoom({
+          room: currentRoom,
+          name: normalizedName,
+          createParticipantId,
+        });
       });
     },
     [roomHasRunningAgent, updateRoomState],
@@ -2763,16 +1881,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
 
       updateRoomState(roomId, (currentRoom) => {
-        if (currentRoom.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === agentId)) {
-          return currentRoom;
-        }
-
-        let nextRoom = syncRoomParticipants(currentRoom, [
-          ...currentRoom.participants,
-          createAgentParticipant(agentId, getAgentParticipants(currentRoom).length + 1),
-        ]);
-        nextRoom = appendMessageToRoom(nextRoom, createSystemRoomEvent(nextRoom, `You added ${getRoomAgent(agentId).label} to the room.`));
-        return nextRoom;
+        return addAgentParticipantToRoom({ room: currentRoom, agentId });
       });
     },
     [roomHasRunningAgent, updateRoomState],
@@ -2785,20 +1894,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      updateRoomState(roomId, (currentRoom) => {
-        const removedParticipant = currentRoom.participants.find((participant) => participant.id === participantId);
-        const nextParticipants = currentRoom.participants.filter((participant) => participant.id !== participantId);
-        if (nextParticipants.length === currentRoom.participants.length) {
-          return currentRoom;
-        }
-
-        let nextRoom = syncRoomParticipants(currentRoom, nextParticipants);
-        nextRoom = appendMessageToRoom(
-          nextRoom,
-          createSystemRoomEvent(nextRoom, `You removed ${removedParticipant?.name || participantId} from the room.`),
-        );
-        return nextRoom;
-      });
+      updateRoomState(roomId, (currentRoom) => removeParticipantFromRoom({ room: currentRoom, participantId }));
     },
     [roomHasRunningAgent, updateRoomState],
   );
@@ -2810,20 +1906,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      updateRoomState(roomId, (currentRoom) =>
-        syncRoomParticipants(
-          currentRoom,
-          currentRoom.participants.map((participant) =>
-            participant.id === participantId && participant.runtimeKind === "agent"
-              ? {
-                  ...participant,
-                  enabled: !participant.enabled,
-                  updatedAt: createTimestamp(),
-                }
-              : participant,
-          ),
-        ),
-      );
+      updateRoomState(roomId, (currentRoom) => toggleAgentParticipantInRoom({ room: currentRoom, participantId }));
     },
     [roomHasRunningAgent, updateRoomState],
   );
@@ -2835,32 +1918,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      updateRoomState(roomId, (currentRoom) => {
-        const agents = getAgentParticipants(currentRoom);
-        const agentIndex = agents.findIndex((participant) => participant.id === participantId);
-        const targetIndex = agentIndex + direction;
-        if (agentIndex < 0 || targetIndex < 0 || targetIndex >= agents.length) {
-          return currentRoom;
-        }
-
-        const reorderedAgents = [...agents];
-        const [movedAgent] = reorderedAgents.splice(agentIndex, 1);
-        reorderedAgents.splice(targetIndex, 0, movedAgent);
-        const reorderedById = new Map(reorderedAgents.map((participant, index) => [participant.id, index + 1]));
-
-        return syncRoomParticipants(
-          currentRoom,
-          currentRoom.participants.map((participant) =>
-            participant.runtimeKind === "agent"
-              ? {
-                  ...participant,
-                  order: reorderedById.get(participant.id) ?? participant.order,
-                  updatedAt: createTimestamp(),
-                }
-              : participant,
-          ),
-        );
-      });
+      updateRoomState(roomId, (currentRoom) => moveAgentParticipantInRoom({ room: currentRoom, participantId, direction }));
     },
     [roomHasRunningAgent, updateRoomState],
   );
@@ -2877,45 +1935,22 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const humanParticipants = getHumanParticipants(roomSnapshot);
-      const sender =
-        humanParticipants.find((participant) => participant.id === senderId) ??
-        (senderId === DEFAULT_LOCAL_PARTICIPANT_ID ? createHumanParticipant(LOCAL_PARTICIPANT_SENDER.name, DEFAULT_LOCAL_PARTICIPANT_ID) : null) ??
-        humanParticipants[0];
+      const sender = resolveRoomMessageSender({
+        room: roomSnapshot,
+        senderId,
+        defaultLocalParticipantId: DEFAULT_LOCAL_PARTICIPANT_ID,
+        defaultLocalParticipantName: LOCAL_PARTICIPANT_SENDER.name,
+      });
       if (!sender) {
         return;
       }
 
       const nextTitle = shouldAutoTitleRoom(roomSnapshot) ? getSuggestedRoomTitle(normalizedContent) || roomSnapshot.title : roomSnapshot.title;
-      const roomUserMessage = createRoomMessage(roomId, "user", normalizedContent, "user", {
-        seq: getNextRoomMessageSeq(roomSnapshot),
-        sender: getParticipantSender(sender),
-        kind: "user_input",
-        status: "completed",
-        final: true,
-      });
 
       setActiveRoomId(roomId);
       setSelectedSender(roomId, sender.id);
       interruptRoomScheduler(roomId);
-      updateRoomState(roomId, (room) => {
-        const roomWithHumanMembership =
-          sender.runtimeKind === "human" && !room.participants.some((participant) => participant.id === sender.id)
-            ? syncRoomParticipants(room, [...room.participants, createHumanParticipant(sender.name, sender.id)])
-            : room;
-        const nextRoom = appendMessageToRoom(
-          {
-            ...roomWithHumanMembership,
-            title: nextTitle,
-            error: "",
-          },
-          roomUserMessage,
-        );
-        return {
-          ...nextRoom,
-          agentId: getPrimaryRoomAgentId(nextRoom),
-        };
-      });
+      updateRoomState(roomId, (room) => applyOutgoingUserMessage({ room, content: normalizedContent, sender, nextTitle }));
       clearDraftForRoom(roomId);
       await runRoomScheduler(roomId);
     },
@@ -2923,9 +1958,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   );
 
   const clearAllWorkspace = useCallback(async () => {
-    Object.values(activeRunsRef.current).forEach((run) => run.controller.abort(new Error("Workspace reset by operator.")));
-    activeRunsRef.current = {};
-    activeSchedulerRunsRef.current = {};
+    clearAllActiveRuns("Workspace reset by operator.");
+    clearAllSchedulerRuns();
 
     const initialRoom = createRoomSession(1);
     const initialAgentStates = createInitialAgentStates();
@@ -2939,12 +1973,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setSelectedConsoleAgentId(initialRoom.agentId);
     setSelectedSenderByRoomId({});
     setDraftsByRoomId({});
-    setRunningAgentRequestIds({});
     setResettingAgentContextIds({});
 
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(PREVIOUS_STORAGE_KEY);
-    localStorage.removeItem(LEGACY_STORAGE_KEY);
+    clearPersistedWorkspaceState();
 
     await Promise.allSettled(
       ROOM_AGENTS.map((agent) =>
@@ -2957,7 +1988,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }),
       ),
     );
-  }, []);
+  }, [clearAllActiveRuns, clearAllSchedulerRuns]);
 
   const clearAgentConsole = useCallback(
     (agentId: RoomAgentId) => {
