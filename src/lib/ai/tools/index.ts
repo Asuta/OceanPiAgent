@@ -6,6 +6,7 @@ import { formatJsonOutput, type ToolDefinition, type ToolExecutionContext, type 
 import { workspaceTools } from "./workspace-tools";
 import type { ToolExecution, ToolScope } from "@/lib/chat/types";
 import { truncateText } from "@/lib/shared/text";
+import { createUuid } from "@/lib/utils/uuid";
 
 function getToolDefinitions(scope: ToolScope = "default"): Partial<Record<ToolName, ToolDefinition<unknown>>> {
   if (scope === "room") {
@@ -75,7 +76,7 @@ export async function executeTool(
     return {
       output,
       event: {
-        id: crypto.randomUUID(),
+        id: createUuid(),
         sequence: 0,
         toolName,
         displayName: toolName,
@@ -101,7 +102,7 @@ export async function executeTool(
     return {
       output: executionResult.output,
       event: {
-        id: crypto.randomUUID(),
+        id: createUuid(),
         sequence: 0,
         toolName: tool.name,
         displayName:
@@ -128,7 +129,7 @@ export async function executeTool(
     return {
       output,
       event: {
-        id: crypto.randomUUID(),
+        id: createUuid(),
         sequence: 0,
         toolName: tool.name,
         displayName:

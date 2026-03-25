@@ -8,6 +8,7 @@ import {
   THINKING_LEVELS,
 } from "@/lib/chat/types";
 import type { ChatResponseBody, ChatStreamEvent } from "@/lib/chat/types";
+import { createUuid } from "@/lib/utils/uuid";
 
 export const runtime = "nodejs";
 
@@ -44,7 +45,7 @@ function toAssistantResponse(
 ): ChatResponseBody {
   return {
     message: {
-      id: crypto.randomUUID(),
+      id: createUuid(),
       role: "assistant",
       content: result.assistantText,
       tools: result.toolEvents,
@@ -123,7 +124,7 @@ export async function POST(request: Request) {
               encodeSseEvent({
                 type: "done",
                 message: {
-                  id: crypto.randomUUID(),
+                  id: createUuid(),
                   role: "assistant",
                   content: result.assistantText || assistantText,
                   tools: toolEvents,

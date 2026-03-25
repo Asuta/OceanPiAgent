@@ -19,6 +19,7 @@ import type {
   RoomToolContext,
   ToolExecution,
 } from "@/lib/chat/types";
+import { createUuid } from "@/lib/utils/uuid";
 import {
   clearAgentRoomRun,
   completeAgentRoomRun,
@@ -75,7 +76,7 @@ function createReadNoReplyReceipt(agent: AgentRoomTurn["agent"], createdAt: stri
 
 function createEmittedRoomMessage(message: RoomMessageEmission, agent: AgentRoomTurn["agent"]): RoomMessage {
   return {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     roomId: message.roomId,
     seq: 0,
     role: "assistant",
@@ -154,7 +155,7 @@ function createTurn(
   error?: string,
 ): AgentRoomTurn {
   return {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     agent,
     userMessage: createUserMessage(
       roomId,

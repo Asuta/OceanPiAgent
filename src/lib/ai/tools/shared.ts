@@ -15,6 +15,7 @@ import type {
   RoomToolContext,
 } from "@/lib/chat/types";
 import { safeJsonStringify } from "@/lib/shared/text";
+import { createUuid } from "@/lib/utils/uuid";
 
 export type ToolName =
   | "web_fetch"
@@ -654,7 +655,7 @@ export function appendVisibleHistoryMessage(
   const createdAt = new Date().toISOString();
   const currentHistory = context.roomHistoryById[roomId] ?? [];
   const nextMessage: RoomHistoryMessageSummary = {
-    messageId: crypto.randomUUID(),
+    messageId: createUuid(),
     seq: (currentHistory[currentHistory.length - 1]?.seq ?? 0) + 1,
     createdAt,
     receipts: message.receipts ? [...message.receipts] : [],

@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { RoomCronJob, RoomCronRunRecord, RoomCronSchedule } from "@/lib/chat/types";
+import { createUuid } from "@/lib/utils/uuid";
 
 interface CronStoreData {
   jobs: RoomCronJob[];
@@ -175,7 +176,7 @@ export function createCronJob(input: Omit<RoomCronJob, "id" | "status" | "lastRu
   const timestamp = createTimestamp();
   return {
     ...input,
-    id: crypto.randomUUID(),
+    id: createUuid(),
     status: "idle",
     lastRunAt: null,
     nextRunAt: input.enabled ? computeNextRunAt(input.schedule) : null,
@@ -187,7 +188,7 @@ export function createCronJob(input: Omit<RoomCronJob, "id" | "status" | "lastRu
 
 export function createCronRunRecord(job: RoomCronJob, scheduledFor: string): RoomCronRunRecord {
   return {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     jobId: job.id,
     agentId: job.agentId,
     targetRoomId: job.targetRoomId,

@@ -11,6 +11,7 @@ import {
   type ActiveSchedulerRun,
 } from "@/components/workspace/scheduler";
 import type { ActiveRoomRun, ExecuteAgentTurnResult } from "@/components/workspace/use-room-execution";
+import { createUuid } from "@/lib/utils/uuid";
 
 export function useRoomScheduler(args: {
   roomsRef: MutableRefObject<RoomSession[]>;
@@ -49,7 +50,7 @@ export function useRoomScheduler(args: {
       }
 
       schedulerRunsRef.current[roomId] = {
-        cycleId: crypto.randomUUID(),
+        cycleId: createUuid(),
         activeAgentId: null,
         activeRequestId: null,
       };
@@ -87,7 +88,7 @@ export function useRoomScheduler(args: {
 
   const runRoomScheduler = useCallback(
     async (roomId: string) => {
-      const cycleId = crypto.randomUUID();
+      const cycleId = createUuid();
       interruptRoomScheduler(roomId);
       schedulerRunsRef.current[roomId] = {
         cycleId,
@@ -203,7 +204,7 @@ export function useRoomScheduler(args: {
           },
         }));
 
-        const requestId = crypto.randomUUID();
+        const requestId = createUuid();
         schedulerRunsRef.current[roomId] = {
           ...(schedulerRunsRef.current[roomId] ?? {
             cycleId,
