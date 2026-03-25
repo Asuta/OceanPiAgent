@@ -10,6 +10,10 @@ export type ProviderKey = "openai" | "right_codes" | "generic";
 
 export type ProviderMode = "auto" | ProviderKey;
 
+export const MODEL_CONFIG_KINDS = ["openai_compatible", "pi_builtin"] as const;
+
+export type ModelConfigKind = (typeof MODEL_CONFIG_KINDS)[number];
+
 export type ToolScope = "default" | "room";
 
 export const DEFAULT_MAX_TOOL_LOOP_STEPS = 50;
@@ -38,6 +42,24 @@ export interface ProviderCompatibility {
   responsesContinuation: ResponsesContinuation;
   responsesPayloadMode: ResponsesPayloadMode;
   notes: string[];
+}
+
+export interface ModelConfig {
+  id: string;
+  name: string;
+  kind: ModelConfigKind;
+  model: string;
+  apiFormat: ApiFormat;
+  baseUrl: string;
+  providerMode: ProviderMode;
+  hasApiKey: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelConfigExecutionOverrides {
+  baseUrl?: string;
+  apiKey?: string;
 }
 
 export type RoomMessageRole = "user" | "assistant" | "system";
@@ -312,6 +334,7 @@ export interface ChatMessage {
 }
 
 export interface ChatSettings {
+  modelConfigId: string | null;
   apiFormat: ApiFormat;
   model: string;
   systemPrompt: string;

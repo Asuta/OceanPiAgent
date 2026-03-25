@@ -10,6 +10,7 @@ export const roomAgentIdSchema = z.enum(["concierge", "researcher", "operator"])
 const providerKeySchema = z.enum(["openai", "right_codes", "generic"]);
 const providerModeSchema = z.enum(["auto", "openai", "right_codes", "generic"]);
 const apiFormatSchema = z.enum(["chat_completions", "responses"]);
+export const modelConfigKindSchema = z.enum(["openai_compatible", "pi_builtin"]);
 const chatCompletionsToolStyleSchema = z.enum(["tools", "functions"]);
 const responsesContinuationSchema = z.enum(["previous_response_id", "replay"]);
 const responsesPayloadModeSchema = z.enum(["json", "sse", "auto"]);
@@ -53,6 +54,19 @@ export const providerCompatibilitySchema = z.object({
   responsesContinuation: responsesContinuationSchema,
   responsesPayloadMode: responsesPayloadModeSchema,
   notes: z.array(z.string()),
+}).strict();
+
+export const modelConfigSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: modelConfigKindSchema,
+  model: z.string(),
+  apiFormat: apiFormatSchema,
+  baseUrl: z.string(),
+  providerMode: providerModeSchema,
+  hasApiKey: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
 }).strict();
 
 const roomMessageReceiptSchema = z.object({
@@ -192,6 +206,7 @@ const agentRoomTurnSchema = z.object({
 }).strict();
 
 const chatSettingsSchema = z.object({
+  modelConfigId: z.string().nullable().optional().default(null),
   apiFormat: apiFormatSchema,
   model: z.string(),
   systemPrompt: z.string(),

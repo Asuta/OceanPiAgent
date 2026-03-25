@@ -92,6 +92,7 @@ const ROOM_LOOP_MAX_ROUNDS = 20;
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
 
 const DEFAULT_SETTINGS: ChatSettings = {
+  modelConfigId: null,
   apiFormat: "chat_completions",
   model: "",
   systemPrompt: "",
@@ -889,6 +890,7 @@ function normalizeSettings(value: unknown): ChatSettings {
   }
 
   return {
+    modelConfigId: typeof value.modelConfigId === "string" && value.modelConfigId.trim() ? value.modelConfigId : null,
     apiFormat: value.apiFormat === "responses" ? "responses" : "chat_completions",
     model: typeof value.model === "string" ? value.model : "",
     systemPrompt: typeof value.systemPrompt === "string" ? value.systemPrompt : "",

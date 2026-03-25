@@ -15,6 +15,7 @@ import {
   runPreparedRoomTurn,
   type RunPreparedRoomTurnInput,
 } from "@/lib/server/room-runner";
+import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store";
 
 export const runtime = "nodejs";
 
@@ -29,6 +30,7 @@ const requestSchema = z.object({
     }),
   }),
   settings: z.object({
+    modelConfigId: z.string().max(120).nullable().optional().default(null),
     apiFormat: z.enum(["chat_completions", "responses"]),
     model: z.string().max(200).optional().default(""),
     systemPrompt: z.string().max(4_000).optional().default(""),
@@ -141,6 +143,7 @@ function toPreparedInput(payload: {
   knownAgents: AgentInfoCard[];
   roomHistoryById: Record<string, RoomHistoryMessageSummary[]>;
   agent: RunPreparedRoomTurnInput["agent"];
+  modelConfigOverrides?: RunPreparedRoomTurnInput["modelConfigOverrides"];
   signal?: AbortSignal;
 }): RunPreparedRoomTurnInput {
   return {
@@ -151,6 +154,7 @@ function toPreparedInput(payload: {
     knownAgents: payload.knownAgents,
     roomHistoryById: payload.roomHistoryById,
     agent: payload.agent,
+    modelConfigOverrides: payload.modelConfigOverrides,
     signal: payload.signal,
   };
 }
@@ -158,8 +162,11 @@ function toPreparedInput(payload: {
 export async function POST(request: Request) {
   try {
     const payload = requestSchema.parse(await request.json());
+    const resolvedSelection = await resolveSettingsWithModelConfig(payload.settings);
     const preparedInput = toPreparedInput({
       ...payload,
+      settings: resolvedSelection.settings,
+      modelConfigOverrides: resolvedSelection.modelConfigOverrides,
       signal: request.signal,
     });
 

@@ -35,6 +35,7 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
           },
         },
         settings: {
+          modelConfigId: null,
           apiFormat: "chat_completions",
           model: "fake-model",
           systemPrompt: "",

@@ -8,6 +8,7 @@ import {
   THINKING_LEVELS,
 } from "@/lib/chat/types";
 import type { ChatResponseBody, ChatStreamEvent } from "@/lib/chat/types";
+import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store";
 
 export const runtime = "nodejs";
 
@@ -22,6 +23,7 @@ const requestSchema = z.object({
     )
     .min(1),
   settings: z.object({
+    modelConfigId: z.string().max(120).nullable().optional().default(null),
     apiFormat: z.enum(["chat_completions", "responses"]),
     model: z.string().max(200).optional().default(""),
     systemPrompt: z.string().max(4_000).optional().default(""),
@@ -76,9 +78,11 @@ function encodeSseEvent(event: ChatStreamEvent): Uint8Array {
 export async function POST(request: Request) {
   try {
     const payload = requestSchema.parse(await request.json());
+    const resolvedSelection = await resolveSettingsWithModelConfig(payload.settings);
 
     if (!payload.stream) {
-      const result = await runConversation(payload.messages, payload.settings, {
+      const result = await runConversation(payload.messages, resolvedSelection.settings, {
+        modelConfigOverrides: resolvedSelection.modelConfigOverrides,
         signal: request.signal,
       });
       return NextResponse.json(toAssistantResponse(result));
@@ -93,7 +97,7 @@ export async function POST(request: Request) {
           try {
             const result = await streamConversation(
               payload.messages,
-              payload.settings,
+              resolvedSelection.settings,
               {
                 onTextDelta: (delta) => {
                   assistantText += delta;
@@ -115,6 +119,7 @@ export async function POST(request: Request) {
                 },
               },
               {
+                modelConfigOverrides: resolvedSelection.modelConfigOverrides,
                 signal: request.signal,
               },
             );

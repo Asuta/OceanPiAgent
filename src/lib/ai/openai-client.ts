@@ -11,6 +11,7 @@ import type {
   ChatMessage,
   ChatSettings,
   EmptyCompletionDiagnostic,
+  ModelConfigExecutionOverrides,
   ProviderCompatibility,
   RecoveryDiagnostic,
   RoomToolContext,
@@ -42,6 +43,7 @@ interface ConversationOptions {
   maxToolLoopSteps?: number;
   signal?: AbortSignal;
   toolContext?: RoomToolContext;
+  modelConfigOverrides?: ModelConfigExecutionOverrides;
 }
 
 class ConversationExecutionError extends Error {
@@ -57,16 +59,18 @@ class ConversationExecutionError extends Error {
 function resolveConversationOptions(options?: ConversationOptions): {
   toolScope: ToolScope;
   systemPromptOverride: string;
-  maxToolLoopSteps: number;
-  signal?: AbortSignal;
-  toolContext?: RoomToolContext;
-} {
+    maxToolLoopSteps: number;
+    signal?: AbortSignal;
+    toolContext?: RoomToolContext;
+    modelConfigOverrides?: ModelConfigExecutionOverrides;
+  } {
   return {
     toolScope: options?.toolScope || "default",
     systemPromptOverride: options?.systemPromptOverride || "",
     maxToolLoopSteps: coerceMaxToolLoopSteps(options?.maxToolLoopSteps),
     signal: options?.signal,
     toolContext: options?.toolContext,
+    modelConfigOverrides: options?.modelConfigOverrides,
   };
 }
 
@@ -247,7 +251,7 @@ async function executeConversation(
     toolScope: resolvedOptions.toolScope,
     toolContext: resolvedOptions.toolContext,
   });
-  const resolvedModel = resolvePiModel(effectiveSettings);
+  const resolvedModel = resolvePiModel(effectiveSettings, resolvedOptions.modelConfigOverrides);
   const baseSystemPrompt = resolvedOptions.systemPromptOverride || buildSystemPrompt(effectiveSettings.systemPrompt);
   const systemPromptText = await runBeforePromptBuildHooks({
     agentId: resolvedOptions.toolContext?.currentAgentId,

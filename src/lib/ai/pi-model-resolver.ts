@@ -7,7 +7,7 @@ import {
   getPiThinkingCapability,
   resolveActualThinkingLevel,
 } from "./pi-model-catalog";
-import type { ApiFormat, ChatSettings, ProviderCompatibility, ThinkingLevel } from "@/lib/chat/types";
+import type { ApiFormat, ChatSettings, ModelConfigExecutionOverrides, ProviderCompatibility, ThinkingLevel } from "@/lib/chat/types";
 
 const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -135,8 +135,13 @@ export function createPiCompatibilityFromModel(
   };
 }
 
-function createOpenAiCompatibleModel(settings: ChatSettings, requestedModel: string, baseUrl: string): ResolvedPiModel {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
+function createOpenAiCompatibleModel(
+  settings: ChatSettings,
+  requestedModel: string,
+  baseUrl: string,
+  overrides?: ModelConfigExecutionOverrides,
+): ResolvedPiModel {
+  const apiKey = overrides?.apiKey?.trim() || process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("Missing OPENAI_API_KEY. Copy .env.example to .env.local and fill it in.");
   }
@@ -182,7 +187,7 @@ function createOpenAiCompatibleModel(settings: ChatSettings, requestedModel: str
   };
 }
 
-export function resolvePiModel(settings: ChatSettings): ResolvedPiModel {
+export function resolvePiModel(settings: ChatSettings, overrides?: ModelConfigExecutionOverrides): ResolvedPiModel {
   const requestedModel = settings.model.trim() || process.env.OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL;
   const builtInReference = looksLikeBuiltInPiModelReference(requestedModel);
 
@@ -217,6 +222,7 @@ export function resolvePiModel(settings: ChatSettings): ResolvedPiModel {
   return createOpenAiCompatibleModel(
     settings,
     requestedModel,
-    normalizeBaseUrl(process.env.OPENAI_BASE_URL?.trim() || DEFAULT_OPENAI_BASE_URL),
+    normalizeBaseUrl(overrides?.baseUrl?.trim() || process.env.OPENAI_BASE_URL?.trim() || DEFAULT_OPENAI_BASE_URL),
+    overrides,
   );
 }

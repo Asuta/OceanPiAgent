@@ -5,6 +5,7 @@ import type {
   AssistantMessageMeta,
   AttachedRoomDefinition,
   ChatSettings,
+  ModelConfigExecutionOverrides,
   RoomAgentId,
   RoomChatResponseBody,
   RoomHistoryMessageSummary,
@@ -234,6 +235,7 @@ type RoomConversationRunner = (
     maxToolLoopSteps?: number;
     signal?: AbortSignal;
     toolContext?: RoomToolContext;
+    modelConfigOverrides?: ModelConfigExecutionOverrides;
   },
 ) => Promise<{
   assistantText: string;
@@ -282,6 +284,7 @@ interface BaseRoomTurnInput {
   attachedRooms: AttachedRoomDefinition[];
   knownAgents: AgentInfoCard[];
   roomHistoryById: Record<string, RoomHistoryMessageSummary[]>;
+  modelConfigOverrides?: ModelConfigExecutionOverrides;
   signal?: AbortSignal;
   conversationRunner?: RoomConversationRunner;
 }
@@ -461,6 +464,7 @@ export async function runPreparedRoomTurn(
         systemPromptOverride: promptOverride,
         signal: runContext.signal,
         toolContext,
+        modelConfigOverrides: args.modelConfigOverrides,
       },
     );
 

@@ -24,6 +24,7 @@ export const DEFAULT_AGENT_ID: RoomAgentId = "concierge";
 export const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
 
 const DEFAULT_SETTINGS: ChatSettings = {
+  modelConfigId: null,
   apiFormat: "chat_completions",
   model: "",
   systemPrompt: "",
