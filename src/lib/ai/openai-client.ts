@@ -32,6 +32,13 @@ interface RunConversationResult {
   recovery?: RecoveryDiagnostic;
 }
 
+interface RunTextPromptResult {
+  assistantText: string;
+  resolvedModel: string;
+  compatibility: ProviderCompatibility;
+  actualApiFormat: ApiFormat;
+}
+
 interface StreamConversationCallbacks {
   onTextDelta?: (delta: string) => void;
   onTool?: (tool: ToolExecution) => void;
@@ -388,4 +395,79 @@ export async function streamConversation(
   options?: ConversationOptions,
 ): Promise<RunConversationResult> {
   return executeConversation(messages, settings, callbacks, options);
+}
+
+export async function runTextPrompt(args: {
+  prompt: string;
+  settings: ChatSettings;
+  systemPrompt?: string;
+  signal?: AbortSignal;
+}): Promise<RunTextPromptResult> {
+  throwIfAborted(args.signal);
+  ensureGlobalProxyDispatcherInstalled();
+
+  const effectiveSettings = await runBeforeModelResolveHooks({
+    settings: args.settings,
+    toolScope: "default",
+  });
+  const resolvedModel = resolvePiModel(effectiveSettings);
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: args.systemPrompt?.trim() || "",
+      model: resolvedModel.model,
+      thinkingLevel: resolvedModel.actualThinkingLevel,
+      tools: [],
+      messages: [
+        {
+          role: "user",
+          content: args.prompt,
+          timestamp: Date.now(),
+        },
+      ],
+    },
+    getApiKey: resolvedModel.apiKey
+      ? async () => resolvedModel.apiKey
+      : undefined,
+  });
+
+  const abortListener = () => agent.abort();
+  args.signal?.addEventListener("abort", abortListener, { once: true });
+
+  try {
+    await agent.continue();
+  } catch (error) {
+    throw createConversationError(
+      normalizeConversationFailure(error, error instanceof Error ? error.message : "The model request failed."),
+      resolvedModel.actualApiFormat,
+      resolvedModel.compatibility,
+    );
+  } finally {
+    args.signal?.removeEventListener("abort", abortListener);
+  }
+
+  throwIfAborted(args.signal);
+
+  const generatedAssistantMessages = getGeneratedAssistantMessages(agent.state.messages as Message[]);
+  const finalAssistantMessage = generatedAssistantMessages[generatedAssistantMessages.length - 1];
+
+  if (finalAssistantMessage?.stopReason === "error" || finalAssistantMessage?.stopReason === "aborted") {
+    throw createConversationError(
+      normalizeConversationFailure(finalAssistantMessage.errorMessage, finalAssistantMessage.errorMessage || "The model request failed."),
+      resolvedModel.actualApiFormat,
+      resolvedModel.compatibility,
+    );
+  }
+
+  const assistantText = generatedAssistantMessages
+    .map((message) => extractAssistantText(message))
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+
+  return {
+    assistantText: assistantText || "The model returned no text.",
+    resolvedModel: resolvedModel.resolvedModelRef,
+    compatibility: resolvedModel.compatibility,
+    actualApiFormat: resolvedModel.actualApiFormat,
+  };
 }

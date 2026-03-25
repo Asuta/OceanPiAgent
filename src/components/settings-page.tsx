@@ -31,6 +31,7 @@ import {
   type ThinkingLevel,
 } from "@/lib/chat/types";
 import {
+  formatTimestamp,
   ROOM_AGENTS,
   getCompatibilityDetailPills,
   getCompatibilityModeLabel,
@@ -199,7 +200,15 @@ async function deleteModelConfigRequest(configId: string): Promise<void> {
 }
 
 export function SettingsPage() {
-  const { agentStates, isAgentRunning, clearAgentConsole, compactAgentContext, updateAgentSettings } = useWorkspace();
+  const {
+    agentStates,
+    agentCompactionFeedback,
+    isAgentRunning,
+    isAgentCompacting,
+    clearAgentConsole,
+    compactAgentContext,
+    updateAgentSettings,
+  } = useWorkspace();
   const [availableSkills, setAvailableSkills] = useState<WorkspaceSkillSummary[]>([]);
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [selectedModelConfigId, setSelectedModelConfigId] = useState<string>(NEW_MODEL_CONFIG_ID);
@@ -692,7 +701,9 @@ export function SettingsPage() {
       <section className="settings-grid page-enter page-enter-delay-1">
         {ROOM_AGENTS.map((agent) => {
           const state = agentStates[agent.id];
+          const compactionFeedback = agentCompactionFeedback[agent.id];
           const isRunning = isAgentRunning(agent.id);
+          const isCompacting = isAgentCompacting(agent.id);
           const compatibilityPills = getCompatibilityDetailPills(state.compatibility);
           const selectedModelConfig = modelConfigs.find((modelConfig) => modelConfig.id === state.settings.modelConfigId) ?? null;
           const effectiveModelRef = selectedModelConfig?.model ?? state.settings.model;
@@ -903,14 +914,35 @@ export function SettingsPage() {
                   type="button"
                   className="ghost-button"
                   onClick={() => void compactAgentContext(agent.id)}
-                  disabled={isRunning}
+                  disabled={isRunning || isCompacting}
                 >
-                  压缩隐藏上下文
+                  {isCompacting ? "压缩中..." : "压缩隐藏上下文"}
                 </button>
                 <button type="button" className="ghost-button" onClick={() => clearAgentConsole(agent.id)} disabled={isRunning}>
                   清空内部轨迹
                 </button>
               </div>
+
+              {isCompacting || compactionFeedback ? (
+                <section className="subtle-panel top-gap">
+                  <p className="section-label">上下文压缩</p>
+                  <strong className="panel-lead">{isCompacting ? "正在压缩隐藏上下文" : compactionFeedback?.message}</strong>
+                  {compactionFeedback ? (
+                    <p className="muted-copy top-gap">
+                      最近更新于 {formatTimestamp(compactionFeedback.updatedAt)}
+                    </p>
+                  ) : null}
+                  {!isCompacting && compactionFeedback?.summary ? (
+                    <>
+                      <p className="muted-copy top-gap">最近一次压缩生成的摘要如下。</p>
+                      <pre className="top-gap">{compactionFeedback.summary}</pre>
+                    </>
+                  ) : null}
+                  {!isCompacting && compactionFeedback && !compactionFeedback.summary ? (
+                    <p className="muted-copy top-gap">这次没有返回可展示的压缩文本。</p>
+                  ) : null}
+                </section>
+              ) : null}
             </article>
           );
         })}

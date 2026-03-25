@@ -14,6 +14,7 @@ import type {
   RoomSession,
   RoomToolActionUnion,
 } from "@/lib/chat/types";
+import { createUuid } from "@/lib/utils/uuid";
 import {
   appendMessageToRoom,
   applyMessageReceiptUpdate,
@@ -256,7 +257,7 @@ export function useRoomExecution(args: {
       const agent = getRoomAgent(params.agentId);
       const previousActiveRun = getActiveAgentRun(agent.id);
       const pendingTurn: AgentRoomTurn = {
-        id: crypto.randomUUID(),
+        id: createUuid(),
         agent: {
           id: agent.id,
           label: agent.label,
@@ -267,7 +268,7 @@ export function useRoomExecution(args: {
         emittedMessages: [],
         status: "running",
       };
-      const requestId = params.runRequestId ?? crypto.randomUUID();
+      const requestId = params.runRequestId ?? createUuid();
       const controller = new AbortController();
       let emittedMessages: RoomMessage[] = [];
       let receiptUpdates: RoomMessageReceiptUpdate[] = [];

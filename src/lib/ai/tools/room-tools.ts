@@ -26,6 +26,7 @@ import {
   uniqueAgentIds,
   type ToolDefinition,
 } from "./shared";
+import { createUuid } from "@/lib/utils/uuid";
 
 export const roomTools = {
   send_message_to_room: {
@@ -187,7 +188,7 @@ export const roomTools = {
       const title = args.title ?? buildAutoRoomTitle(agentIds, roomContext);
       const action = {
         type: "create_room",
-        roomId: crypto.randomUUID(),
+        roomId: createUuid(),
         title,
         agentIds,
       } satisfies Extract<Parameters<typeof mutateCreateRoomContext>[1], { type: "create_room" }>;

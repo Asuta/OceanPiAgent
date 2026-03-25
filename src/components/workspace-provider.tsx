@@ -1,5 +1,7 @@
 "use client";
 
+import { createUuid } from "@/lib/utils/uuid";
+
 import {
   createContext,
   useCallback,
@@ -134,10 +136,25 @@ const ROOM_VISIBLE_MESSAGE_KINDS = ["answer", "progress", "warning", "error", "c
 const ROOM_MESSAGE_STATUSES = ["pending", "streaming", "completed", "failed"] as const;
 const AGENT_TURN_STATUSES = ["running", "continued", "completed", "error"] as const;
 
+function createInitialAgentCompactionFeedback(): Record<RoomAgentId, AgentCompactionFeedback | null> {
+  return {
+    concierge: null,
+    researcher: null,
+    operator: null,
+  };
+}
+
 interface SendMessageArgs {
   roomId: string;
   content: string;
   senderId?: string;
+}
+
+export interface AgentCompactionFeedback {
+  status: "success" | "noop" | "error";
+  message: string;
+  summary: string;
+  updatedAt: string;
 }
 
 interface WorkspaceContextValue {
@@ -148,6 +165,7 @@ interface WorkspaceContextValue {
   activeRoomId: string;
   activeRoom: RoomSession | null;
   agentStates: Record<RoomAgentId, AgentSharedState>;
+  agentCompactionFeedback: Record<RoomAgentId, AgentCompactionFeedback | null>;
   runningAgentRequestIds: Record<string, string>;
   selectedConsoleAgentId: RoomAgentId | null;
   selectedSenderByRoomId: Record<string, string>;
@@ -158,6 +176,7 @@ interface WorkspaceContextValue {
   setDraft: (roomId: string, value: string) => void;
   getRoomById: (roomId: string) => RoomSession | null;
   isAgentRunning: (agentId: RoomAgentId) => boolean;
+  isAgentCompacting: (agentId: RoomAgentId) => boolean;
   isRoomRunning: (roomId: string) => boolean;
   createRoom: (agentId?: RoomAgentId) => RoomSession;
   renameRoom: (roomId: string, title: string) => void;
@@ -290,7 +309,7 @@ function sortRoomMessageReceipts(receipts: RoomMessageReceipt[]): RoomMessageRec
 }
 
 function createParticipantId(prefix: string): string {
-  return `${prefix}-${crypto.randomUUID()}`;
+  return `${prefix}-${createUuid()}`;
 }
 
 function getLegacyRoomSender(role: RoomMessage["role"], source: RoomMessage["source"]): RoomSender {
@@ -426,7 +445,7 @@ function normalizeRoomToolAction(value: unknown): RoomToolActionUnion | undefine
   if (value.type === "create_room") {
     return {
       type: "create_room",
-      roomId: typeof value.roomId === "string" ? value.roomId : crypto.randomUUID(),
+      roomId: typeof value.roomId === "string" ? value.roomId : createUuid(),
       title: typeof value.title === "string" && value.title.trim() ? value.title.trim() : "New Room",
       agentIds: Array.isArray(value.agentIds)
         ? value.agentIds.filter((agentId): agentId is RoomAgentId => agentId === "concierge" || agentId === "researcher" || agentId === "operator")
@@ -485,7 +504,7 @@ function normalizeRoomMessage(
   const receipts = normalizeRoomMessageReceipts(value.receipts, value.receiptStatus, value.receiptUpdatedAt, createdAt);
 
   return {
-    id: typeof value.id === "string" && value.id ? value.id : crypto.randomUUID(),
+    id: typeof value.id === "string" && value.id ? value.id : createUuid(),
     roomId: typeof value.roomId === "string" && value.roomId ? value.roomId : "",
     seq: typeof value.seq === "number" && Number.isFinite(value.seq) && value.seq > 0 ? Math.round(value.seq) : 0,
     role,
@@ -595,7 +614,7 @@ function normalizeToolExecution(value: unknown, index: number): ToolExecution | 
   const outputText = typeof value.outputText === "string" ? value.outputText : "";
 
   return {
-    id: typeof value.id === "string" && value.id ? value.id : crypto.randomUUID(),
+    id: typeof value.id === "string" && value.id ? value.id : createUuid(),
     sequence: typeof value.sequence === "number" && value.sequence > 0 ? value.sequence : index + 1,
     toolName: typeof value.toolName === "string" && value.toolName ? value.toolName : "tool",
     displayName: typeof value.displayName === "string" && value.displayName ? value.displayName : "Tool",
@@ -839,7 +858,7 @@ function normalizeAgentTurn(value: unknown, fallbackAgentId: RoomAgentId): Agent
     : [];
 
   return {
-    id: typeof value.id === "string" && value.id ? value.id : crypto.randomUUID(),
+    id: typeof value.id === "string" && value.id ? value.id : createUuid(),
     agent: {
       id: normalizeRoomAgentId(isRecord(value.agent) ? value.agent.id : undefined),
       label:
@@ -913,7 +932,7 @@ function normalizeRoomSession(value: unknown, index: number): RoomSession | null
   }
 
   const agentId = normalizeRoomAgentId(value.agentId);
-  const roomId = typeof value.id === "string" && value.id ? value.id : crypto.randomUUID();
+  const roomId = typeof value.id === "string" && value.id ? value.id : createUuid();
   const roomMessages = Array.isArray(value.roomMessages)
     ? value.roomMessages
         .map((message) => normalizeRoomMessage(message))
@@ -1191,6 +1210,9 @@ function getToolStats(tools: ToolExecution[]) {
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [rooms, setRooms] = useState<RoomSession[]>([]);
   const [agentStates, setAgentStates] = useState<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates());
+  const [agentCompactionFeedback, setAgentCompactionFeedback] = useState<Record<RoomAgentId, AgentCompactionFeedback | null>>(
+    createInitialAgentCompactionFeedback(),
+  );
   const [activeRoomId, setActiveRoomId] = useState("");
   const [selectedConsoleAgentId, setSelectedConsoleAgentId] = useState<RoomAgentId | null>(null);
   const [workspaceVersion, setWorkspaceVersion] = useState(0);
@@ -1971,11 +1993,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
     setRooms([initialRoom]);
     setAgentStates(initialAgentStates);
+    setAgentCompactionFeedback(createInitialAgentCompactionFeedback());
     setActiveRoomId(initialRoom.id);
     setSelectedConsoleAgentId(initialRoom.agentId);
     setSelectedSenderByRoomId({});
     setDraftsByRoomId({});
     setResettingAgentContextIds({});
+    setCompactingAgentContextIds({});
 
     clearPersistedWorkspaceState();
 
@@ -2067,13 +2091,59 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           body: JSON.stringify({ agentId }),
         });
 
+        const payload = (await response.json().catch(() => null)) as
+          | {
+              compacted?: boolean;
+              record?: {
+                summary?: string;
+                prunedMessages?: number;
+                charsBefore?: number;
+                charsAfter?: number;
+              } | null;
+              error?: string;
+            }
+          | null;
+
         if (!response.ok) {
-          throw new Error("Failed to compact agent context.");
+          throw new Error(payload?.error || "Failed to compact agent context.");
         }
+
+        const summary = payload?.record?.summary?.trim() || "";
+        const feedback: AgentCompactionFeedback = payload?.compacted
+          ? {
+              status: "success",
+              message:
+                typeof payload.record?.prunedMessages === "number"
+                  ? `已压缩 ${payload.record.prunedMessages} 条隐藏历史消息。`
+                  : "已压缩隐藏上下文。",
+              summary,
+              updatedAt: createTimestamp(),
+            }
+          : {
+              status: "noop",
+              message: "当前没有足够的隐藏上下文可压缩。",
+              summary,
+              updatedAt: createTimestamp(),
+            };
+
+        setAgentCompactionFeedback((current) => ({
+          ...current,
+          [agentId]: feedback,
+        }));
 
         updateAgentState(agentId, (state) => ({
           ...state,
           updatedAt: createTimestamp(),
+        }));
+      } catch (error) {
+        setAgentCompactionFeedback((current) => ({
+          ...current,
+          [agentId]: {
+            status: "error",
+            message: error instanceof Error ? error.message : "压缩隐藏上下文时发生未知错误。",
+            summary: "",
+            updatedAt: createTimestamp(),
+          },
         }));
       } finally {
         setCompactingAgentContextIds((current) => {
@@ -2114,6 +2184,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [runningAgentRequestIds],
   );
 
+  const isAgentCompacting = useCallback(
+    (agentId: RoomAgentId) => {
+      return Boolean(compactingAgentContextIds[agentId]);
+    },
+    [compactingAgentContextIds],
+  );
+
   const isRoomRunning = useCallback(
     (roomId: string) => {
       const room = roomsRef.current.find((entry) => entry.id === roomId);
@@ -2131,6 +2208,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       activeRoomId,
       activeRoom,
       agentStates,
+      agentCompactionFeedback,
       runningAgentRequestIds,
       selectedConsoleAgentId,
       selectedSenderByRoomId,
@@ -2141,6 +2219,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setDraft,
       getRoomById,
       isAgentRunning,
+      isAgentCompacting,
       isRoomRunning,
       createRoom,
       renameRoom,
@@ -2167,6 +2246,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       addAgentParticipant,
       addHumanParticipant,
       agentStates,
+      agentCompactionFeedback,
       archiveRoom,
       archivedRooms,
       clearAgentConsole,
@@ -2178,6 +2258,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       getRoomById,
       hydrated,
       isAgentRunning,
+      isAgentCompacting,
       isRoomRunning,
       moveAgentParticipant,
       removeParticipant,

@@ -15,6 +15,7 @@ import type {
   RoomSender,
   ToolExecution,
 } from "@/lib/chat/types";
+import { createUuid } from "@/lib/utils/uuid";
 
 type VisibleMessage = {
   role: "user" | "assistant";
@@ -296,7 +297,7 @@ export async function startAgentRoomRun(args: {
 
   if (previousRun && continuationSnapshot) {
     session.history.push({
-      id: crypto.randomUUID(),
+      id: createUuid(),
       role: "assistant",
       content: continuationSnapshot,
       createdAt: createTimestamp(),
@@ -314,12 +315,12 @@ export async function startAgentRoomRun(args: {
     session.updatedAt = createTimestamp();
   }
 
-  const requestId = crypto.randomUUID();
+  const requestId = createUuid();
   const abortController = new AbortController();
   const signal = AbortSignal.any([args.requestSignal, abortController.signal]);
 
   const incomingMessage: PersistedVisibleMessage = {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     role: "user",
     content: buildIncomingRoomEnvelope(
       args.roomId,
@@ -407,7 +408,7 @@ export async function completeAgentRoomRun(args: {
   }
 
   const assistantMessage: PersistedVisibleMessage = {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     role: "assistant",
     content: buildAssistantHistoryEntry(run, args.assistantText),
     createdAt: createTimestamp(),

@@ -1,8 +1,10 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { generateCompactionSummary } from "./agent-compaction";
 import { appendAgentCompactionMemory, clearAgentMemory } from "./agent-memory-store";
 import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runtime-hooks";
 import type { ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
+import { createUuid } from "@/lib/utils/uuid";
 
 export interface PersistedVisibleMessage {
   id: string;
@@ -81,7 +83,7 @@ function normalizeMessage(value: unknown): PersistedVisibleMessage | null {
   }
 
   return {
-    id: typeof value.id === "string" && value.id ? value.id : crypto.randomUUID(),
+    id: typeof value.id === "string" && value.id ? value.id : createUuid(),
     role: value.role,
     content: value.content,
     createdAt: typeof value.createdAt === "string" && value.createdAt ? value.createdAt : createTimestamp(),
@@ -94,7 +96,7 @@ function normalizeCompactionRecord(value: unknown): CompactionRecord | null {
   }
 
   return {
-    id: typeof value.id === "string" && value.id ? value.id : crypto.randomUUID(),
+    id: typeof value.id === "string" && value.id ? value.id : createUuid(),
     createdAt: typeof value.createdAt === "string" && value.createdAt ? value.createdAt : createTimestamp(),
     reason: value.reason,
     summary: typeof value.summary === "string" ? value.summary : "",
@@ -144,88 +146,6 @@ function estimateHistoryChars(messages: PersistedVisibleMessage[]): number {
   return messages.reduce((total, message) => total + message.content.length, 0);
 }
 
-function truncateLine(value: string, maxLength: number): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, maxLength).trim()}...`;
-}
-
-function extractRoomEnvelopeDetail(message: PersistedVisibleMessage): { roomLabel?: string; visibleMessage?: string } {
-  const roomIdMatch = message.content.match(/Room ID:\s*(.+)/);
-  const roomTitleMatch = message.content.match(/Room Title:\s*(.+)/);
-  const visibleMessageMatch = message.content.match(/Visible room message:\n([\s\S]+)$/);
-  return {
-    roomLabel:
-      roomTitleMatch?.[1]?.trim() && roomIdMatch?.[1]?.trim()
-        ? `${roomTitleMatch[1].trim()} (${roomIdMatch[1].trim()})`
-        : roomIdMatch?.[1]?.trim(),
-    visibleMessage: visibleMessageMatch?.[1]?.trim(),
-  };
-}
-
-function collectSectionLines(content: string, heading: string): string[] {
-  const blockMatch = content.match(new RegExp(`${heading}:\\n([\\s\\S]+?)(?:\\n\\n[A-Z][^\\n]+:|$)`));
-  if (!blockMatch?.[1]) {
-    return [];
-  }
-
-  return blockMatch[1]
-    .split(/\r?\n/g)
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("- "));
-}
-
-function buildCompactionSummary(messages: PersistedVisibleMessage[]): string {
-  const rooms = new Set<string>();
-  const userRequests: string[] = [];
-  const deliveries: string[] = [];
-  const toolFindings: string[] = [];
-  const roomActions: string[] = [];
-
-  for (const message of messages) {
-    if (message.role === "user") {
-      const detail = extractRoomEnvelopeDetail(message);
-      if (detail.roomLabel) {
-        rooms.add(detail.roomLabel);
-      }
-      if (detail.visibleMessage) {
-        userRequests.push(`- ${truncateLine(detail.visibleMessage, 220)}`);
-      } else {
-        userRequests.push(`- ${truncateLine(message.content, 220)}`);
-      }
-      continue;
-    }
-
-    deliveries.push(...collectSectionLines(message.content, "Visible room deliveries").slice(0, 4));
-    roomActions.push(...collectSectionLines(message.content, "Room actions").slice(0, 4));
-    toolFindings.push(...collectSectionLines(message.content, "Tool results used").slice(0, 4));
-  }
-
-  const sections = [
-    "[Compacted shared history summary]",
-    rooms.size > 0 ? `Rooms involved: ${[...rooms].join(", ")}` : "Rooms involved: unknown",
-    "",
-    "Important prior requests:",
-    ...(userRequests.slice(-6).length > 0 ? userRequests.slice(-6) : ["- none recorded"]),
-    "",
-    "Visible deliveries already made:",
-    ...(deliveries.slice(-6).length > 0 ? deliveries.slice(-6) : ["- none recorded"]),
-    "",
-    "Room actions already taken:",
-    ...(roomActions.slice(-6).length > 0 ? roomActions.slice(-6) : ["- none recorded"]),
-    "",
-    "Tool findings worth keeping:",
-    ...(toolFindings.slice(-6).length > 0 ? toolFindings.slice(-6) : ["- none recorded"]),
-    "",
-    "Treat this summary as compressed shared memory. Prefer newer tool results over older assumptions.",
-  ];
-
-  return sections.join("\n").trim();
-}
-
 export async function loadPersistedAgentRuntime(agentId: RoomAgentId): Promise<PersistedAgentRuntime> {
   await ensureRuntimeDir();
   const filePath = getRuntimeFilePath(agentId);
@@ -252,7 +172,7 @@ export async function appendPersistedHistoryMessage(args: {
 }): Promise<PersistedAgentRuntime> {
   const runtime = await loadPersistedAgentRuntime(args.agentId);
   runtime.history.push({
-    id: args.message.id || crypto.randomUUID(),
+    id: args.message.id || createUuid(),
     role: args.message.role,
     content: args.message.content,
     createdAt: args.message.createdAt || createTimestamp(),
@@ -315,9 +235,13 @@ export async function compactPersistedAgentRuntime(args: {
     charsBefore,
   });
 
-  const summary = buildCompactionSummary(prunedMessages);
+  const summary = await generateCompactionSummary({
+    agentId: args.agentId,
+    messages: prunedMessages,
+    resolvedModel: runtime.resolvedModel,
+  });
   const summaryMessage: PersistedVisibleMessage = {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     role: "assistant",
     content: summary,
     createdAt: createTimestamp(),
@@ -326,7 +250,7 @@ export async function compactPersistedAgentRuntime(args: {
   runtime.history = [summaryMessage, ...keptMessages];
   const charsAfter = estimateHistoryChars(runtime.history);
   const record: CompactionRecord = {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     createdAt: summaryMessage.createdAt,
     reason: args.reason,
     summary,

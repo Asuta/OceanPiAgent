@@ -9,6 +9,7 @@ import {
 import { runRoomTurnNonStreaming } from "@/lib/server/room-runner";
 import { loadWorkspaceEnvelope, mutateWorkspace } from "@/lib/server/workspace-store";
 import { applyCronTurnToWorkspace, createAgentSharedState, createTimestamp } from "@/lib/server/workspace-state";
+import { createUuid } from "@/lib/utils/uuid";
 
 type QueuedCronJob = {
   jobId: string;
@@ -226,7 +227,7 @@ async function runQueuedJob(item: QueuedCronJob): Promise<void> {
       roomId: job.targetRoomId,
       agentId: job.agentId,
       message: {
-        id: crypto.randomUUID(),
+        id: createUuid(),
         content: buildCronEnvelope(job),
         sender: createCronSender(job),
       },

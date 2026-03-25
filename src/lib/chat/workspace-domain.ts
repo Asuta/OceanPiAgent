@@ -19,6 +19,7 @@ import type {
   ToolExecution,
 } from "@/lib/chat/types";
 import { DEFAULT_MAX_TOOL_LOOP_STEPS } from "@/lib/chat/types";
+import { createUuid } from "@/lib/utils/uuid";
 
 export const DEFAULT_AGENT_ID: RoomAgentId = "concierge";
 export const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
@@ -195,7 +196,7 @@ export function createRoomSession(index: number, agentId: RoomAgentId = DEFAULT_
   ]);
 
   return {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     title: `Room ${index}`,
     agentId,
     archivedAt: null,
@@ -241,7 +242,7 @@ export function createRoomMessage(
         : DEFAULT_LOCAL_PARTICIPANT_SENDER;
 
   return {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     roomId,
     seq: options?.seq ?? 0,
     role,
