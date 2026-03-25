@@ -294,7 +294,7 @@ export async function startAgentRoomRun(args: {
   const previousRun = session.activeRun;
   const continuationSnapshot = previousRun ? buildContinuationSnapshot(previousRun) : undefined;
 
-  if (previousRun) {
+  if (previousRun && continuationSnapshot) {
     session.history.push({
       id: crypto.randomUUID(),
       role: "assistant",

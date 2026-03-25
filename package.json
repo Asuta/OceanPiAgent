@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node --experimental-strip-types --test tests/agent-workspace-store.test.ts"
+    "test": "tsx --test --test-concurrency=1 tests/*.test.ts"
   },
   "dependencies": {
     "@mariozechner/pi-agent-core": "^0.60.0",
@@ -27,6 +27,7 @@
     "@types/react-dom": "^19.2.2",
     "eslint": "^9.38.0",
     "eslint-config-next": "^16.1.6",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
 }

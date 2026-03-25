@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { roomWorkspaceStateSchema } from "@/lib/chat/schemas";
 import type { RoomWorkspaceState } from "@/lib/chat/types";
 import { createDefaultWorkspaceState } from "@/lib/server/workspace-state";
 
@@ -37,14 +38,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeEnvelope(value: unknown): WorkspaceEnvelope {
-  if (!isRecord(value) || !isRecord(value.state)) {
+  if (!isRecord(value)) {
+    return createDefaultEnvelope();
+  }
+
+  const parsedState = roomWorkspaceStateSchema.safeParse(value.state);
+  if (!parsedState.success) {
     return createDefaultEnvelope();
   }
 
   return {
     version: typeof value.version === "number" && Number.isFinite(value.version) ? Math.max(0, Math.floor(value.version)) : 0,
     updatedAt: typeof value.updatedAt === "string" && value.updatedAt ? value.updatedAt : createTimestamp(),
-    state: value.state as unknown as RoomWorkspaceState,
+    state: parsedState.data,
   };
 }
 
@@ -86,6 +92,7 @@ export async function saveWorkspaceState(args: {
   state: RoomWorkspaceState;
   expectedVersion: number;
 }): Promise<WorkspaceEnvelope> {
+  const parsedState = roomWorkspaceStateSchema.parse(args.state);
   return withWorkspaceWriteLock(async () => {
     const current = await loadWorkspaceEnvelope();
     if (current.version !== args.expectedVersion) {
@@ -98,7 +105,7 @@ export async function saveWorkspaceState(args: {
     const nextEnvelope: WorkspaceEnvelope = {
       version: current.version + 1,
       updatedAt: createTimestamp(),
-      state: args.state,
+      state: parsedState,
     };
     await writeWorkspaceEnvelope(nextEnvelope);
     return nextEnvelope;
@@ -110,7 +117,7 @@ export async function mutateWorkspace(
 ): Promise<WorkspaceEnvelope> {
   return withWorkspaceWriteLock(async () => {
     const current = await loadWorkspaceEnvelope();
-    const nextState = await mutator(current.state);
+    const nextState = roomWorkspaceStateSchema.parse(await mutator(current.state));
     const nextEnvelope: WorkspaceEnvelope = {
       version: current.version + 1,
       updatedAt: createTimestamp(),

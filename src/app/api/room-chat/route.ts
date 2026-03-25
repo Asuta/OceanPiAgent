@@ -1,37 +1,20 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { extractAssistantMetaFromConversationError, streamConversation } from "@/lib/ai/openai-client";
-import { buildRoomBridgePrompt } from "@/lib/ai/system-prompt";
-import {
-  clearAgentRoomRun,
-  completeAgentRoomRun,
-  isCurrentAgentRun,
-  recordAgentTextDelta,
-  recordAgentToolEvent,
-  startAgentRoomRun,
-} from "@/lib/server/agent-room-sessions";
 import {
   DEFAULT_MAX_TOOL_LOOP_STEPS,
   MAX_MAX_TOOL_LOOP_STEPS,
   MIN_MAX_TOOL_LOOP_STEPS,
   THINKING_LEVELS,
+  type AgentInfoCard,
+  type AttachedRoomDefinition,
+  type RoomChatStreamEvent,
+  type RoomHistoryMessageSummary,
 } from "@/lib/chat/types";
-import type {
-  AgentInfoCard,
-  AgentRoomTurn,
-  AttachedRoomDefinition,
-  RoomHistoryMessageSummary,
-  RoomChatResponseBody,
-  RoomChatStreamEvent,
-  RoomMessageEmission,
-  RoomMessageReceipt,
-  RoomMessageReceiptStatus,
-  RoomMessageReceiptUpdate,
-  RoomMessage,
-  RoomSender,
-  RoomToolContext,
-  ToolExecution,
-} from "@/lib/chat/types";
+import {
+  extractAssistantMetaFromRoomTurnError,
+  runPreparedRoomTurn,
+  type RunPreparedRoomTurnInput,
+} from "@/lib/server/room-runner";
 
 export const runtime = "nodejs";
 
@@ -146,473 +129,105 @@ const requestSchema = z.object({
   stream: z.boolean().optional().default(true),
 });
 
-function createAgentSender(agent: AgentRoomTurn["agent"]): RoomSender {
-  return {
-    id: agent.id,
-    name: agent.label,
-    role: "participant",
-  };
-}
-
-function sortReceipts(receipts: RoomMessageReceipt[]): RoomMessageReceipt[] {
-  return [...receipts].sort((left, right) => {
-    const byCreatedAt = left.createdAt.localeCompare(right.createdAt);
-    if (byCreatedAt !== 0) {
-      return byCreatedAt;
-    }
-
-    return left.participantName.localeCompare(right.participantName);
-  });
-}
-
-function upsertReceipt(receipts: RoomMessageReceipt[], receipt: RoomMessageReceipt): RoomMessageReceipt[] {
-  if (receipts.some((entry) => entry.participantId === receipt.participantId)) {
-    return receipts;
-  }
-
-  const nextReceipts = receipts.filter((entry) => entry.participantId !== receipt.participantId);
-  nextReceipts.push(receipt);
-  return sortReceipts(nextReceipts);
-}
-
-function createReadNoReplyReceipt(agent: AgentRoomTurn["agent"], createdAt: string): RoomMessageReceipt {
-  return {
-    participantId: agent.id,
-    participantName: agent.label,
-    agentId: agent.id,
-    type: "read_no_reply",
-    createdAt,
-  };
-}
-
-function createRoomMessage(message: RoomMessageEmission, agent: AgentRoomTurn["agent"]): RoomMessage {
-  return {
-    id: crypto.randomUUID(),
-    roomId: message.roomId,
-    seq: 0,
-    role: "assistant",
-    sender: createAgentSender(agent),
-    content: message.content,
-    source: "agent_emit",
-    kind: message.kind,
-    status: message.status,
-    final: message.final,
-    createdAt: new Date().toISOString(),
-    receipts: [],
-    receiptStatus: "none",
-    receiptUpdatedAt: null,
-  };
-}
-
-function createUserMessage(
-  roomId: string,
-  messageId: string,
-  sender: RoomSender,
-  content: string,
-  receipts: RoomMessageReceipt[],
-  receiptStatus: RoomMessageReceiptStatus,
-  receiptUpdatedAt: string | null,
-): RoomMessage {
-  const normalizedReceipts = sortReceipts(receipts);
-  const latestReceipt = normalizedReceipts[normalizedReceipts.length - 1] ?? null;
-  return {
-    id: messageId,
-    roomId,
-    seq: 0,
-    role: "user",
-    sender,
-    content,
-    source: "user",
-    kind: "user_input",
-    status: "completed",
-    final: true,
-    createdAt: new Date().toISOString(),
-    receipts: normalizedReceipts,
-    receiptStatus: normalizedReceipts.length > 0 ? "read_no_reply" : receiptStatus,
-    receiptUpdatedAt: latestReceipt?.createdAt ?? receiptUpdatedAt,
-  };
-}
-
-function createMessageReceiptUpdate(
-  roomId: string,
-  messageId: string,
-  receipt: RoomMessageReceipt,
-): RoomMessageReceiptUpdate {
-  return {
-    roomId,
-    messageId,
-    receipt,
-    receiptStatus: "read_no_reply",
-    receiptUpdatedAt: receipt.createdAt,
-  };
-}
-
-function createTurn(
-  agent: AgentRoomTurn["agent"],
-  roomId: string,
-  userMessageId: string,
-  userSender: RoomSender,
-  userContent: string,
-  userMessageReceipts: RoomMessageReceipt[],
-  userMessageReceiptStatus: RoomMessageReceiptStatus,
-  userMessageReceiptUpdatedAt: string | null,
-  assistantContent: string,
-  tools: ToolExecution[],
-  emittedMessages: RoomMessage[],
-  meta: AgentRoomTurn["meta"],
-  resolvedModel: string,
-  status: AgentRoomTurn["status"],
-  continuationSnapshot?: string,
-  error?: string,
-): AgentRoomTurn {
-  return {
-    id: crypto.randomUUID(),
-    agent,
-    userMessage: createUserMessage(
-      roomId,
-      userMessageId,
-      userSender,
-      userContent,
-      userMessageReceipts,
-      userMessageReceiptStatus,
-      userMessageReceiptUpdatedAt,
-    ),
-    assistantContent,
-    tools,
-    emittedMessages,
-    status,
-    meta,
-    resolvedModel,
-    ...(continuationSnapshot
-      ? {
-          continuationSnapshot,
-        }
-      : {}),
-    ...(error
-      ? {
-          error,
-        }
-      : {}),
-  };
-}
-
 function encodeSseEvent(event: RoomChatStreamEvent): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
 }
 
-function createToolContext(payload: {
-  room: { id: string };
-  agent: { id: AgentRoomTurn["agent"]["id"] };
+function toPreparedInput(payload: {
+  message: RunPreparedRoomTurnInput["message"];
+  settings: RunPreparedRoomTurnInput["settings"];
+  room: RunPreparedRoomTurnInput["room"];
   attachedRooms: AttachedRoomDefinition[];
   knownAgents: AgentInfoCard[];
   roomHistoryById: Record<string, RoomHistoryMessageSummary[]>;
-}): RoomToolContext {
+  agent: RunPreparedRoomTurnInput["agent"];
+  signal?: AbortSignal;
+}): RunPreparedRoomTurnInput {
   return {
-    currentAgentId: payload.agent.id,
-    currentRoomId: payload.room.id,
-    attachedRooms: payload.attachedRooms.map((room) => ({
-      ...room,
-      participants: room.participants.map((participant) => ({
-        ...participant,
-      })),
-    })),
-    knownAgents: payload.knownAgents.map((agent) => ({
-      ...agent,
-      skills: [...agent.skills],
-    })),
-    roomHistoryById: Object.fromEntries(
-      Object.entries(payload.roomHistoryById).map(([roomId, messages]) => [
-        roomId,
-        messages.map((message) => ({
-          ...message,
-          receipts: [...message.receipts],
-        })),
-      ]),
-    ),
+    message: payload.message,
+    settings: payload.settings,
+    room: payload.room,
+    attachedRooms: payload.attachedRooms,
+    knownAgents: payload.knownAgents,
+    roomHistoryById: payload.roomHistoryById,
+    agent: payload.agent,
+    signal: payload.signal,
   };
 }
 
 export async function POST(request: Request) {
   try {
     const payload = requestSchema.parse(await request.json());
-    const userContent = payload.message.content;
-    const userMessageId = payload.message.id;
-    const userSender = payload.message.sender;
-    const agent = {
-      id: payload.agent.id,
-      label: payload.agent.label,
-    } satisfies AgentRoomTurn["agent"];
-    const toolContext = createToolContext(payload);
-    const promptOverride = buildRoomBridgePrompt({
-      operatorPrompt: payload.settings.systemPrompt,
-      roomId: payload.room.id,
-      roomTitle: payload.room.title,
-      agentLabel: payload.agent.label,
-      agentInstruction: payload.agent.instruction,
-      attachedRooms: payload.attachedRooms,
-    });
-    const runContext = await startAgentRoomRun({
-      agentId: payload.agent.id,
-      roomId: payload.room.id,
-      roomTitle: payload.room.title,
-      attachedRooms: payload.attachedRooms,
-      userMessageId,
-      userSender,
-      userContent,
-      requestSignal: request.signal,
+    const preparedInput = toPreparedInput({
+      ...payload,
+      signal: request.signal,
     });
 
     if (!payload.stream) {
-      const toolEvents: ToolExecution[] = [];
-      const emittedMessages: RoomMessage[] = [];
-      const receiptUpdates: RoomMessageReceiptUpdate[] = [];
-      let currentUserReceiptStatus: RoomMessageReceiptStatus = "none";
-      let currentUserReceiptUpdatedAt: string | null = null;
-      let currentUserReceipts: RoomMessageReceipt[] = [];
-
-      const result = await streamConversation(
-        runContext.history,
-        payload.settings,
-        {
-          onTextDelta: (delta) => {
-            if (!isCurrentAgentRun(payload.agent.id, runContext.requestId)) {
-              return;
-            }
-
-            recordAgentTextDelta(payload.agent.id, runContext.requestId, delta);
-          },
-          onTool: (tool) => {
-            if (!isCurrentAgentRun(payload.agent.id, runContext.requestId)) {
-              return;
-            }
-
-            toolEvents.push(tool);
-            recordAgentToolEvent(payload.agent.id, runContext.requestId, tool);
-            if (tool.roomMessage) {
-              emittedMessages.push(createRoomMessage(tool.roomMessage, agent));
-            }
-            if (
-              tool.roomAction?.type === "read_no_reply" &&
-              tool.roomAction.roomId &&
-              tool.roomAction.messageId
-            ) {
-              const receiptUpdatedAt = new Date().toISOString();
-              const receipt = createReadNoReplyReceipt(agent, receiptUpdatedAt);
-              receiptUpdates.push(createMessageReceiptUpdate(tool.roomAction.roomId, tool.roomAction.messageId, receipt));
-              if (tool.roomAction.roomId === payload.room.id && tool.roomAction.messageId === userMessageId) {
-                currentUserReceiptStatus = "read_no_reply";
-                currentUserReceiptUpdatedAt = receiptUpdatedAt;
-                currentUserReceipts = upsertReceipt(currentUserReceipts, receipt);
-              }
-            }
-          },
-        },
-        {
-          toolScope: "room",
-          systemPromptOverride: promptOverride,
-          signal: runContext.signal,
-          toolContext,
-        },
-      );
-
-      await completeAgentRoomRun({
-        agentId: payload.agent.id,
-        requestId: runContext.requestId,
-        assistantText: result.assistantText,
-        resolvedModel: result.resolvedModel,
-        compatibility: result.compatibility,
-      });
-
-      const responseBody: RoomChatResponseBody = {
-        turn: createTurn(
-          agent,
-          payload.room.id,
-          userMessageId,
-          userSender,
-          userContent,
-          currentUserReceipts,
-          currentUserReceiptStatus,
-          currentUserReceiptUpdatedAt,
-          result.assistantText,
-          toolEvents.length > 0 ? toolEvents : result.toolEvents,
-          emittedMessages,
-          {
-            apiFormat: result.actualApiFormat,
-            compatibility: result.compatibility,
-            ...(result.recovery
-              ? {
-                  recovery: result.recovery,
-                }
-              : {}),
-            ...(result.emptyCompletion
-              ? {
-                  emptyCompletion: result.emptyCompletion,
-                }
-              : {}),
-          },
-          result.resolvedModel,
-          "completed",
-          runContext.continuationSnapshot,
-        ),
-        resolvedModel: result.resolvedModel,
-        compatibility: result.compatibility,
-        emittedMessages,
-        receiptUpdates,
-      };
-
-      return NextResponse.json(responseBody);
+      const result = await runPreparedRoomTurn(preparedInput);
+      return NextResponse.json(result);
     }
 
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         void (async () => {
-          let assistantContent = "";
-          const toolEvents: ToolExecution[] = [];
-          const emittedMessages: RoomMessage[] = [];
-          let currentUserReceiptStatus: RoomMessageReceiptStatus = "none";
-          let currentUserReceiptUpdatedAt: string | null = null;
-          let currentUserReceipts: RoomMessageReceipt[] = [];
-
           try {
-            const result = await streamConversation(
-              runContext.history,
-              payload.settings,
-              {
-                onTextDelta: (delta) => {
-                  if (!isCurrentAgentRun(payload.agent.id, runContext.requestId)) {
-                    return;
-                  }
-
-                  assistantContent += delta;
-                  recordAgentTextDelta(payload.agent.id, runContext.requestId, delta);
-                  controller.enqueue(
-                    encodeSseEvent({
-                      type: "agent-text-delta",
-                      delta,
-                    }),
-                  );
-                },
-                onTool: (tool) => {
-                  if (!isCurrentAgentRun(payload.agent.id, runContext.requestId)) {
-                    return;
-                  }
-
-                  toolEvents.push(tool);
-                  recordAgentToolEvent(payload.agent.id, runContext.requestId, tool);
-                  controller.enqueue(
-                    encodeSseEvent({
-                      type: "tool",
-                      tool,
-                    }),
-                  );
-
-                  if (tool.roomAction?.type === "read_no_reply") {
-                    const receiptUpdatedAt = new Date().toISOString();
-                    const receipt = createReadNoReplyReceipt(agent, receiptUpdatedAt);
-                    if (tool.roomAction.roomId === payload.room.id && tool.roomAction.messageId === userMessageId) {
-                      currentUserReceiptStatus = "read_no_reply";
-                      currentUserReceiptUpdatedAt = receiptUpdatedAt;
-                      currentUserReceipts = upsertReceipt(currentUserReceipts, receipt);
-                    }
-
-                    const receiptUpdate = createMessageReceiptUpdate(tool.roomAction.roomId, tool.roomAction.messageId, receipt);
-
-                    controller.enqueue(
-                      encodeSseEvent({
-                        type: "message-receipt",
-                        update: receiptUpdate,
-                      }),
-                    );
-                  }
-
-                  if (tool.roomMessage) {
-                    const roomMessage = createRoomMessage(tool.roomMessage, agent);
-                    emittedMessages.push(roomMessage);
-                    controller.enqueue(
-                      encodeSseEvent({
-                        type: "room-message",
-                        message: roomMessage,
-                      }),
-                    );
-                  }
-                },
+            const result = await runPreparedRoomTurn(preparedInput, {
+              onTextDelta: (delta) => {
+                controller.enqueue(
+                  encodeSseEvent({
+                    type: "agent-text-delta",
+                    delta,
+                  }),
+                );
               },
-              {
-                toolScope: "room",
-                systemPromptOverride: promptOverride,
-                signal: runContext.signal,
-                toolContext,
+              onTool: (tool) => {
+                controller.enqueue(
+                  encodeSseEvent({
+                    type: "tool",
+                    tool,
+                  }),
+                );
               },
-            );
-
-            if (!isCurrentAgentRun(payload.agent.id, runContext.requestId)) {
-              return;
-            }
-
-            await completeAgentRoomRun({
-              agentId: payload.agent.id,
-              requestId: runContext.requestId,
-              assistantText: result.assistantText || assistantContent,
-              resolvedModel: result.resolvedModel,
-              compatibility: result.compatibility,
+              onRoomMessage: (message) => {
+                controller.enqueue(
+                  encodeSseEvent({
+                    type: "room-message",
+                    message,
+                  }),
+                );
+              },
+              onReceiptUpdate: (update) => {
+                controller.enqueue(
+                  encodeSseEvent({
+                    type: "message-receipt",
+                    update,
+                  }),
+                );
+              },
             });
 
             controller.enqueue(
               encodeSseEvent({
                 type: "done",
-                turn: createTurn(
-                  agent,
-                  payload.room.id,
-                  userMessageId,
-                  userSender,
-                  userContent,
-                  currentUserReceipts,
-                  currentUserReceiptStatus,
-                  currentUserReceiptUpdatedAt,
-                  result.assistantText || assistantContent,
-                  toolEvents.length > 0 ? toolEvents : result.toolEvents,
-                  emittedMessages,
-                  {
-                    apiFormat: result.actualApiFormat,
-                    compatibility: result.compatibility,
-                    ...(result.recovery
-                      ? {
-                          recovery: result.recovery,
-                        }
-                      : {}),
-                    ...(result.emptyCompletion
-                      ? {
-                          emptyCompletion: result.emptyCompletion,
-                        }
-                      : {}),
-                  },
-                  result.resolvedModel,
-                  "completed",
-                  runContext.continuationSnapshot,
-                ),
+                turn: result.turn,
                 resolvedModel: result.resolvedModel,
                 compatibility: result.compatibility,
               }),
             );
           } catch (error) {
-            clearAgentRoomRun(payload.agent.id, runContext.requestId);
-
-            if (runContext.signal.aborted) {
+            if (request.signal.aborted) {
               controller.close();
               return;
             }
 
             const message = error instanceof Error ? error.message : "Unknown server error.";
-            const meta = extractAssistantMetaFromConversationError(error);
+            const meta = extractAssistantMetaFromRoomTurnError(error);
             controller.enqueue(
               encodeSseEvent({
                 type: "error",
                 error: message,
-                ...(meta
-                  ? {
-                      meta,
-                    }
-                  : {}),
+                ...(meta ? { meta } : {}),
               }),
             );
           } finally {

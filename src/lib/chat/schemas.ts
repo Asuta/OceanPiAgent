@@ -1,0 +1,250 @@
+import { z } from "zod";
+import {
+  MAX_MAX_TOOL_LOOP_STEPS,
+  MIN_MAX_TOOL_LOOP_STEPS,
+  THINKING_LEVELS,
+  type RoomWorkspaceState,
+} from "@/lib/chat/types";
+
+export const roomAgentIdSchema = z.enum(["concierge", "researcher", "operator"]);
+const providerKeySchema = z.enum(["openai", "right_codes", "generic"]);
+const providerModeSchema = z.enum(["auto", "openai", "right_codes", "generic"]);
+const apiFormatSchema = z.enum(["chat_completions", "responses"]);
+const chatCompletionsToolStyleSchema = z.enum(["tools", "functions"]);
+const responsesContinuationSchema = z.enum(["previous_response_id", "replay"]);
+const responsesPayloadModeSchema = z.enum(["json", "sse", "auto"]);
+const toolExecutionStatusSchema = z.enum(["success", "error"]);
+const roomMessageRoleSchema = z.enum(["user", "assistant", "system"]);
+const roomMessageSourceSchema = z.enum(["user", "agent_emit", "system"]);
+const roomMessageKindSchema = z.enum(["user_input", "answer", "progress", "warning", "error", "clarification", "system"]);
+const roomMessageStatusSchema = z.enum(["pending", "streaming", "completed", "failed"]);
+const roomMessageReceiptStatusSchema = z.enum(["none", "read_no_reply"]);
+const roomSenderRoleSchema = z.enum(["participant", "system"]);
+const roomParticipantRuntimeKindSchema = z.enum(["human", "agent"]);
+const agentTurnStatusSchema = z.enum(["running", "continued", "completed", "error"]);
+const roomManagementActionSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("create_room"),
+    roomId: z.string(),
+    title: z.string(),
+    agentIds: z.array(roomAgentIdSchema),
+  }).strict(),
+  z.object({
+    type: z.literal("add_agents_to_room"),
+    roomId: z.string(),
+    agentIds: z.array(roomAgentIdSchema),
+  }).strict(),
+  z.object({
+    type: z.literal("leave_room"),
+    roomId: z.string(),
+  }).strict(),
+  z.object({
+    type: z.literal("remove_room_participant"),
+    roomId: z.string(),
+    participantId: z.string(),
+  }).strict(),
+]);
+
+export const providerCompatibilitySchema = z.object({
+  providerKey: providerKeySchema,
+  providerLabel: z.string(),
+  baseUrl: z.string(),
+  chatCompletionsToolStyle: chatCompletionsToolStyleSchema,
+  responsesContinuation: responsesContinuationSchema,
+  responsesPayloadMode: responsesPayloadModeSchema,
+  notes: z.array(z.string()),
+}).strict();
+
+const roomMessageReceiptSchema = z.object({
+  participantId: z.string(),
+  participantName: z.string(),
+  agentId: roomAgentIdSchema.optional(),
+  type: z.literal("read_no_reply"),
+  createdAt: z.string(),
+}).strict();
+
+const roomSenderSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  role: roomSenderRoleSchema,
+}).strict();
+
+const roomParticipantSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  senderRole: roomSenderRoleSchema,
+  runtimeKind: roomParticipantRuntimeKindSchema,
+  enabled: z.boolean(),
+  order: z.number().int(),
+  agentId: roomAgentIdSchema.optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+}).strict();
+
+const roomMessageEmissionSchema = z.object({
+  roomId: z.string(),
+  content: z.string(),
+  kind: z.enum(["answer", "progress", "warning", "error", "clarification"]),
+  status: roomMessageStatusSchema,
+  final: z.boolean(),
+}).strict();
+
+const roomToolActionSchema = z.object({
+  type: z.literal("read_no_reply"),
+  roomId: z.string(),
+  messageId: z.string(),
+}).strict();
+
+const roomToolActionUnionSchema = z.union([roomToolActionSchema, roomManagementActionSchema]);
+
+const emptyCompletionDiagnosticSchema = z.object({
+  createdAt: z.string(),
+  apiFormat: apiFormatSchema,
+  providerKey: providerKeySchema,
+  providerLabel: z.string(),
+  requestedModel: z.string(),
+  resolvedModel: z.string(),
+  baseUrl: z.string(),
+  textDeltaLength: z.number(),
+  finalTextLength: z.number(),
+  toolCallCount: z.number(),
+  toolEventCount: z.number(),
+  payloadMode: responsesPayloadModeSchema.optional(),
+  finishReason: z.string().nullable().optional(),
+  responseId: z.string().optional(),
+  assistantContentShape: z.string().optional(),
+  outputItemTypes: z.array(z.string()).optional(),
+  chunkCount: z.number().optional(),
+  sawDoneEvent: z.boolean().optional(),
+  chunkPreviews: z.array(z.string()).optional(),
+}).strict();
+
+const recoveryAttemptDiagnosticSchema = z.object({
+  attempt: z.number(),
+  strategy: z.enum(["retry_no_output", "resume_after_tools"]),
+  trigger: z.literal("finish_reason_error"),
+  delayMs: z.number(),
+  toolEventCount: z.number(),
+  finishReason: z.string().nullable().optional(),
+  chunkCount: z.number().optional(),
+  sawDoneEvent: z.boolean().optional(),
+  chunkPreviews: z.array(z.string()).optional(),
+}).strict();
+
+const recoveryDiagnosticSchema = z.object({
+  attempts: z.array(recoveryAttemptDiagnosticSchema),
+}).strict();
+
+const assistantMessageMetaSchema = z.object({
+  apiFormat: apiFormatSchema,
+  compatibility: providerCompatibilitySchema,
+  emptyCompletion: emptyCompletionDiagnosticSchema.optional(),
+  recovery: recoveryDiagnosticSchema.optional(),
+}).strict();
+
+const toolExecutionSchema = z.object({
+  id: z.string(),
+  sequence: z.number(),
+  toolName: z.string(),
+  displayName: z.string(),
+  inputSummary: z.string(),
+  inputText: z.string(),
+  resultPreview: z.string(),
+  outputText: z.string(),
+  status: toolExecutionStatusSchema,
+  durationMs: z.number(),
+  roomMessage: roomMessageEmissionSchema.optional(),
+  roomAction: roomToolActionUnionSchema.optional(),
+}).strict();
+
+const roomMessageSchema = z.object({
+  id: z.string(),
+  roomId: z.string(),
+  seq: z.number().int(),
+  role: roomMessageRoleSchema,
+  sender: roomSenderSchema,
+  content: z.string(),
+  source: roomMessageSourceSchema,
+  kind: roomMessageKindSchema,
+  status: roomMessageStatusSchema,
+  final: z.boolean(),
+  createdAt: z.string(),
+  receipts: z.array(roomMessageReceiptSchema),
+  receiptStatus: roomMessageReceiptStatusSchema,
+  receiptUpdatedAt: z.string().nullable(),
+}).strict();
+
+const agentRoomTurnSchema = z.object({
+  id: z.string(),
+  agent: z.object({
+    id: roomAgentIdSchema,
+    label: z.string(),
+  }).strict(),
+  userMessage: roomMessageSchema,
+  continuationSnapshot: z.string().optional(),
+  assistantContent: z.string(),
+  tools: z.array(toolExecutionSchema),
+  emittedMessages: z.array(roomMessageSchema),
+  status: agentTurnStatusSchema,
+  meta: assistantMessageMetaSchema.optional(),
+  resolvedModel: z.string().optional(),
+  error: z.string().optional(),
+}).strict();
+
+const chatSettingsSchema = z.object({
+  apiFormat: apiFormatSchema,
+  model: z.string(),
+  systemPrompt: z.string(),
+  providerMode: providerModeSchema,
+  maxToolLoopSteps: z.number().int().min(MIN_MAX_TOOL_LOOP_STEPS).max(MAX_MAX_TOOL_LOOP_STEPS),
+  thinkingLevel: z.enum(THINKING_LEVELS),
+  enabledSkillIds: z.array(z.string()),
+}).strict();
+
+const agentSharedStateSchema = z.object({
+  settings: chatSettingsSchema,
+  agentTurns: z.array(agentRoomTurnSchema),
+  resolvedModel: z.string(),
+  compatibility: providerCompatibilitySchema.nullable(),
+  updatedAt: z.string(),
+}).strict();
+
+const roomSchedulerStateSchema = z.object({
+  status: z.enum(["idle", "running"]),
+  nextAgentParticipantId: z.string().nullable(),
+  activeParticipantId: z.string().nullable(),
+  roundCount: z.number().int(),
+  agentCursorByParticipantId: z.record(z.string(), z.number().int()),
+  agentReceiptRevisionByParticipantId: z.record(z.string(), z.number().int()),
+}).strict();
+
+const roomSessionSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  agentId: roomAgentIdSchema,
+  archivedAt: z.string().nullable(),
+  ownerParticipantId: z.string().nullable(),
+  receiptRevision: z.number().int(),
+  participants: z.array(roomParticipantSchema),
+  scheduler: roomSchedulerStateSchema,
+  roomMessages: z.array(roomMessageSchema),
+  agentTurns: z.array(agentRoomTurnSchema),
+  error: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+}).strict();
+
+export const roomWorkspaceStateSchema = z.object({
+  rooms: z.array(roomSessionSchema),
+  agentStates: z.object({
+    concierge: agentSharedStateSchema,
+    researcher: agentSharedStateSchema,
+    operator: agentSharedStateSchema,
+  }).strict(),
+  activeRoomId: z.string(),
+  selectedConsoleAgentId: roomAgentIdSchema.optional(),
+}).strict();
+
+export function parseRoomWorkspaceState(value: unknown): RoomWorkspaceState {
+  return roomWorkspaceStateSchema.parse(value);
+}

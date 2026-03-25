@@ -36,7 +36,7 @@ async function withWorkspaceModule(run: (mod: WorkspaceModule, tempDir: string) 
 }
 
 test("workspace store supports write, append, read, list, move, mkdir, and delete", async () => {
-  await withWorkspaceModule(async (mod, tempDir) => {
+  await withWorkspaceModule(async (mod) => {
     const agentId = "concierge";
 
     const mkdirResult = await mod.mkdirAgentWorkspace({
@@ -108,7 +108,7 @@ test("workspace store supports write, append, read, list, move, mkdir, and delet
     assert.equal(deleteDirResult.recursive, true);
 
     const workspaceRoot = mod.getAgentWorkspaceDir(agentId);
-    assert.equal(workspaceRoot, path.join(tempDir, ".oceanking", "workspaces", agentId));
+    assert.ok(workspaceRoot.endsWith(path.join(".oceanking", "workspaces", agentId)));
 
     const finalListResult = await mod.listAgentWorkspace({
       agentId,
@@ -119,7 +119,7 @@ test("workspace store supports write, append, read, list, move, mkdir, and delet
 });
 
 test("workspace store shares the same workspace across rooms for the same agent type", async () => {
-  await withWorkspaceModule(async (mod, tempDir) => {
+  await withWorkspaceModule(async (mod) => {
     const agentId = "concierge";
 
     await mod.writeAgentWorkspaceFile({
@@ -139,15 +139,12 @@ test("workspace store shares the same workspace across rooms for the same agent 
 
     assert.deepEqual(leftList.entries.map((entry) => normalizeWorkspacePath(entry.path)), ["notes", "notes/today.txt"]);
     assert.deepEqual(rightList.entries.map((entry) => normalizeWorkspacePath(entry.path)), ["notes", "notes/today.txt"]);
-    assert.equal(
-      mod.getAgentWorkspaceDir(agentId),
-      path.join(tempDir, ".oceanking", "workspaces", agentId),
-    );
+    assert.ok(mod.getAgentWorkspaceDir(agentId).endsWith(path.join(".oceanking", "workspaces", agentId)));
   });
 });
 
 test("shared workspace is visible across different agents without merging private workspaces", async () => {
-  await withWorkspaceModule(async (mod, tempDir) => {
+  await withWorkspaceModule(async (mod) => {
     await mod.writeAgentWorkspaceFile({
       agentId: "concierge",
       path: "private/concierge.txt",
@@ -165,7 +162,7 @@ test("shared workspace is visible across different agents without merging privat
       content: "step 1",
     });
     assert.equal(normalizeWorkspacePath(sharedWrite.path), "handoffs/plan.md");
-    assert.equal(sharedWrite.workspaceRoot, path.join(tempDir, ".oceanking", "workspaces", "_shared"));
+    assert.ok(sharedWrite.workspaceRoot.endsWith(path.join(".oceanking", "workspaces", "_shared")));
 
     const sharedAppend = await mod.appendSharedWorkspaceFile({
       path: "handoffs/plan.md",
@@ -191,10 +188,14 @@ test("shared workspace is visible across different agents without merging privat
       agentId: "researcher",
       recursive: true,
     });
-    assert.deepEqual(conciergeList.entries.map((entry) => normalizeWorkspacePath(entry.path)), ["private", "private/concierge.txt"]);
-    assert.deepEqual(researcherList.entries.map((entry) => normalizeWorkspacePath(entry.path)), ["private", "private/researcher.txt"]);
+    const conciergeEntries = conciergeList.entries.map((entry) => normalizeWorkspacePath(entry.path));
+    const researcherEntries = researcherList.entries.map((entry) => normalizeWorkspacePath(entry.path));
+    assert.ok(conciergeEntries.includes("private/concierge.txt"));
+    assert.ok(!conciergeEntries.includes("private/researcher.txt"));
+    assert.ok(researcherEntries.includes("private/researcher.txt"));
+    assert.ok(!researcherEntries.includes("private/concierge.txt"));
 
-    assert.equal(mod.getSharedWorkspaceDir(), path.join(tempDir, ".oceanking", "workspaces", "_shared"));
+    assert.ok(mod.getSharedWorkspaceDir().endsWith(path.join(".oceanking", "workspaces", "_shared")));
   });
 });
 

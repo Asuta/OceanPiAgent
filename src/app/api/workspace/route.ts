@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import type { RoomWorkspaceState } from "@/lib/chat/types";
+import { roomWorkspaceStateSchema } from "@/lib/chat/schemas";
 import { ensureCronDispatcherStarted } from "@/lib/server/cron-dispatcher";
 import { loadWorkspaceEnvelope, saveWorkspaceState } from "@/lib/server/workspace-store";
 
@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 
 const requestSchema = z.object({
   expectedVersion: z.number().int().min(0),
-  state: z.unknown(),
+  state: roomWorkspaceStateSchema,
 });
 
 export async function GET() {
@@ -23,7 +23,7 @@ export async function PUT(request: Request) {
     const payload = requestSchema.parse(await request.json());
     const envelope = await saveWorkspaceState({
       expectedVersion: payload.expectedVersion,
-      state: payload.state as RoomWorkspaceState,
+      state: payload.state,
     });
     return NextResponse.json(envelope);
   } catch (error) {

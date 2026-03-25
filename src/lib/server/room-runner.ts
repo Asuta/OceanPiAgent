@@ -1,15 +1,10 @@
 import { buildRoomBridgePrompt } from "@/lib/ai/system-prompt";
-import { extractAssistantMetaFromConversationError, streamConversation } from "@/lib/ai/openai-client";
-import {
-  clearAgentRoomRun,
-  completeAgentRoomRun,
-  isCurrentAgentRun,
-  recordAgentTextDelta,
-  recordAgentToolEvent,
-  startAgentRoomRun,
-} from "@/lib/server/agent-room-sessions";
 import type {
+  AgentInfoCard,
   AgentRoomTurn,
+  AssistantMessageMeta,
+  AttachedRoomDefinition,
+  ChatSettings,
   RoomAgentId,
   RoomChatResponseBody,
   RoomHistoryMessageSummary,
@@ -21,9 +16,25 @@ import type {
   RoomSender,
   RoomSession,
   RoomToolActionUnion,
+  RoomToolContext,
   ToolExecution,
 } from "@/lib/chat/types";
-import { createAttachedRoomDefinition, createKnownAgentCards, createRoomHistorySummary, createTimestamp, getActiveRooms, getRoomAgent } from "@/lib/server/workspace-state";
+import {
+  clearAgentRoomRun,
+  completeAgentRoomRun,
+  isCurrentAgentRun,
+  recordAgentTextDelta,
+  recordAgentToolEvent,
+  startAgentRoomRun,
+} from "@/lib/server/agent-room-sessions";
+import {
+  createAttachedRoomDefinition,
+  createKnownAgentCards,
+  createRoomHistorySummary,
+  createTimestamp,
+  getActiveRooms,
+  getRoomAgent,
+} from "@/lib/server/workspace-state";
 
 function createAgentSender(agent: AgentRoomTurn["agent"]): RoomSender {
   return {
@@ -166,19 +177,23 @@ function createTurn(
 }
 
 function createToolContext(args: {
-  room: RoomSession;
+  roomId: string;
   agentId: RoomAgentId;
-  attachedRooms: ReturnType<typeof createAttachedRoomDefinition>[];
+  attachedRooms: AttachedRoomDefinition[];
+  knownAgents: AgentInfoCard[];
   roomHistoryById: Record<string, RoomHistoryMessageSummary[]>;
-}) {
+}): RoomToolContext {
   return {
     currentAgentId: args.agentId,
-    currentRoomId: args.room.id,
+    currentRoomId: args.roomId,
     attachedRooms: args.attachedRooms.map((room) => ({
       ...room,
       participants: room.participants.map((participant) => ({ ...participant })),
     })),
-    knownAgents: createKnownAgentCards(),
+    knownAgents: args.knownAgents.map((agent) => ({
+      ...agent,
+      skills: [...agent.skills],
+    })),
     roomHistoryById: Object.fromEntries(
       Object.entries(args.roomHistoryById).map(([roomId, messages]) => [
         roomId,
@@ -206,24 +221,79 @@ function getRoomHistoryByIdForAgent(workspace: { rooms: RoomSession[] }, agentId
   );
 }
 
-export interface RunRoomTurnInput {
-  workspace: { rooms: RoomSession[] };
-  roomId: string;
-  agentId: RoomAgentId;
+type RoomConversationRunner = (
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+  settings: ChatSettings,
+  callbacks?: {
+    onTextDelta?: (delta: string) => void;
+    onTool?: (tool: ToolExecution) => void;
+  },
+  options?: {
+    toolScope?: "default" | "room";
+    systemPromptOverride?: string;
+    maxToolLoopSteps?: number;
+    signal?: AbortSignal;
+    toolContext?: RoomToolContext;
+  },
+) => Promise<{
+  assistantText: string;
+  toolEvents: ToolExecution[];
+  resolvedModel: string;
+  compatibility: AssistantMessageMeta["compatibility"];
+  actualApiFormat: AssistantMessageMeta["apiFormat"];
+  emptyCompletion?: NonNullable<AgentRoomTurn["meta"]>["emptyCompletion"];
+  recovery?: NonNullable<AgentRoomTurn["meta"]>["recovery"];
+}>;
+
+async function resolveConversationDependencies(conversationRunner?: RoomConversationRunner) {
+  if (conversationRunner) {
+    return {
+      conversationRunner,
+      extractConversationErrorMeta: (error: unknown) => {
+        void error;
+        return undefined as AssistantMessageMeta | undefined;
+      },
+    };
+  }
+
+  const conversationModule = await import("../ai/openai-client");
+  return {
+    conversationRunner: conversationModule.streamConversation as RoomConversationRunner,
+    extractConversationErrorMeta: conversationModule.extractAssistantMetaFromConversationError,
+  };
+}
+
+interface BaseRoomTurnInput {
   message: {
     id: string;
     content: string;
     sender: RoomSender;
   };
-  settings: {
-    apiFormat: "chat_completions" | "responses";
-    model: string;
-    systemPrompt: string;
-    providerMode: "auto" | "openai" | "right_codes" | "generic";
-    maxToolLoopSteps: number;
-    thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-    enabledSkillIds: string[];
+  settings: ChatSettings;
+  room: {
+    id: string;
+    title: string;
   };
+  agent: {
+    id: RoomAgentId;
+    label: string;
+    instruction: string;
+  };
+  attachedRooms: AttachedRoomDefinition[];
+  knownAgents: AgentInfoCard[];
+  roomHistoryById: Record<string, RoomHistoryMessageSummary[]>;
+  signal?: AbortSignal;
+  conversationRunner?: RoomConversationRunner;
+}
+
+export type RunPreparedRoomTurnInput = BaseRoomTurnInput;
+
+export interface RunRoomTurnInput {
+  workspace: { rooms: RoomSession[] };
+  roomId: string;
+  agentId: RoomAgentId;
+  message: BaseRoomTurnInput["message"];
+  settings: ChatSettings;
   signal?: AbortSignal;
 }
 
@@ -231,38 +301,102 @@ export interface RunRoomTurnResult extends RoomChatResponseBody {
   roomActions: RoomToolActionUnion[];
 }
 
-export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<RunRoomTurnResult> {
+export interface RoomTurnCallbacks {
+  onTextDelta?: (delta: string) => void;
+  onTool?: (tool: ToolExecution) => void;
+  onRoomMessage?: (message: RoomMessage) => void;
+  onReceiptUpdate?: (update: RoomMessageReceiptUpdate) => void;
+}
+
+class RoomTurnExecutionError extends Error {
+  assistantMeta?: AssistantMessageMeta;
+  partial: {
+    agent: AgentRoomTurn["agent"];
+    roomId: string;
+    userMessageId: string;
+    userSender: RoomSender;
+    userContent: string;
+    toolEvents: ToolExecution[];
+    emittedMessages: RoomMessage[];
+    receiptUpdates: RoomMessageReceiptUpdate[];
+    currentUserReceipts: RoomMessageReceipt[];
+    currentUserReceiptStatus: RoomMessageReceiptStatus;
+    currentUserReceiptUpdatedAt: string | null;
+    resolvedModel: string;
+    continuationSnapshot?: string;
+  };
+
+  constructor(
+    message: string,
+    partial: RoomTurnExecutionError["partial"],
+    assistantMeta?: AssistantMessageMeta,
+  ) {
+    super(message);
+    this.name = "RoomTurnExecutionError";
+    this.partial = partial;
+    this.assistantMeta = assistantMeta;
+  }
+}
+
+function buildPreparedInputFromWorkspace(args: RunRoomTurnInput): RunPreparedRoomTurnInput {
   const room = args.workspace.rooms.find((entry) => entry.id === args.roomId);
   if (!room) {
     throw new Error(`Room ${args.roomId} does not exist.`);
   }
 
   const agentDef = getRoomAgent(args.agentId);
-  const agent = { id: agentDef.id, label: agentDef.label } satisfies AgentRoomTurn["agent"];
-  const attachedRooms = getAttachedRoomsForAgent(args.workspace, args.agentId, room.id);
-  const roomHistoryById = getRoomHistoryByIdForAgent(args.workspace, args.agentId);
+  return {
+    message: args.message,
+    settings: args.settings,
+    room: {
+      id: room.id,
+      title: room.title,
+    },
+    agent: {
+      id: agentDef.id,
+      label: agentDef.label,
+      instruction: agentDef.instruction,
+    },
+    attachedRooms: getAttachedRoomsForAgent(args.workspace, args.agentId, room.id),
+    knownAgents: createKnownAgentCards(),
+    roomHistoryById: getRoomHistoryByIdForAgent(args.workspace, args.agentId),
+    signal: args.signal,
+  };
+}
+
+export function extractAssistantMetaFromRoomTurnError(error: unknown): AssistantMessageMeta | undefined {
+  return error instanceof RoomTurnExecutionError ? error.assistantMeta : undefined;
+}
+
+export async function runPreparedRoomTurn(
+  args: RunPreparedRoomTurnInput,
+  callbacks?: RoomTurnCallbacks,
+): Promise<RunRoomTurnResult> {
+  const { conversationRunner, extractConversationErrorMeta } = await resolveConversationDependencies(args.conversationRunner);
+  const agent = { id: args.agent.id, label: args.agent.label } satisfies AgentRoomTurn["agent"];
   const toolContext = createToolContext({
-    room,
-    agentId: args.agentId,
-    attachedRooms,
-    roomHistoryById,
+    roomId: args.room.id,
+    agentId: args.agent.id,
+    attachedRooms: args.attachedRooms,
+    knownAgents: args.knownAgents,
+    roomHistoryById: args.roomHistoryById,
   });
 
   const promptOverride = buildRoomBridgePrompt({
     operatorPrompt: args.settings.systemPrompt,
-    roomId: room.id,
-    roomTitle: room.title,
-    agentLabel: agentDef.label,
-    agentInstruction: agentDef.instruction,
-    attachedRooms,
+    roomId: args.room.id,
+    roomTitle: args.room.title,
+    agentLabel: args.agent.label,
+    agentInstruction: args.agent.instruction,
+    attachedRooms: args.attachedRooms,
   });
 
   const requestController = new AbortController();
   const runContext = await startAgentRoomRun({
-    agentId: args.agentId,
-    roomId: room.id,
-    roomTitle: room.title,
-    attachedRooms: attachedRooms.map((attachedRoom) => ({
+    agentId: args.agent.id,
+    roomId: args.room.id,
+    roomTitle: args.room.title,
+    attachedRooms: args.attachedRooms.map((attachedRoom) => ({
       id: attachedRoom.id,
       title: attachedRoom.title,
       archived: attachedRoom.archived,
@@ -281,31 +415,40 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
   let currentUserReceipts: RoomMessageReceipt[] = [];
 
   try {
-    const result = await streamConversation(
+    const result = await conversationRunner(
       runContext.history,
       args.settings,
       {
         onTextDelta: (delta) => {
-          if (!isCurrentAgentRun(args.agentId, runContext.requestId)) {
+          if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
             return;
           }
-          recordAgentTextDelta(args.agentId, runContext.requestId, delta);
+          recordAgentTextDelta(args.agent.id, runContext.requestId, delta);
+          callbacks?.onTextDelta?.(delta);
         },
         onTool: (tool) => {
-          if (!isCurrentAgentRun(args.agentId, runContext.requestId)) {
+          if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
             return;
           }
 
           toolEvents.push(tool);
-          recordAgentToolEvent(args.agentId, runContext.requestId, tool);
+          recordAgentToolEvent(args.agent.id, runContext.requestId, tool);
+          callbacks?.onTool?.(tool);
+
           if (tool.roomMessage) {
-            emittedMessages.push(createEmittedRoomMessage(tool.roomMessage, agent));
+            const roomMessage = createEmittedRoomMessage(tool.roomMessage, agent);
+            emittedMessages.push(roomMessage);
+            callbacks?.onRoomMessage?.(roomMessage);
           }
+
           if (tool.roomAction?.type === "read_no_reply" && tool.roomAction.roomId && tool.roomAction.messageId) {
             const receiptUpdatedAt = createTimestamp();
             const receipt = createReadNoReplyReceipt(agent, receiptUpdatedAt);
-            receiptUpdates.push(createMessageReceiptUpdate(tool.roomAction.roomId, tool.roomAction.messageId, receipt));
-            if (tool.roomAction.roomId === room.id && tool.roomAction.messageId === args.message.id) {
+            const receiptUpdate = createMessageReceiptUpdate(tool.roomAction.roomId, tool.roomAction.messageId, receipt);
+            receiptUpdates.push(receiptUpdate);
+            callbacks?.onReceiptUpdate?.(receiptUpdate);
+
+            if (tool.roomAction.roomId === args.room.id && tool.roomAction.messageId === args.message.id) {
               currentUserReceiptStatus = "read_no_reply";
               currentUserReceiptUpdatedAt = receiptUpdatedAt;
               currentUserReceipts = upsertReceipt(currentUserReceipts, receipt);
@@ -322,7 +465,7 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
     );
 
     await completeAgentRoomRun({
-      agentId: args.agentId,
+      agentId: args.agent.id,
       requestId: runContext.requestId,
       assistantText: result.assistantText,
       resolvedModel: result.resolvedModel,
@@ -331,7 +474,7 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
 
     const turn = createTurn(
       agent,
-      room.id,
+      args.room.id,
       args.message.id,
       args.message.sender,
       args.message.content,
@@ -361,31 +504,59 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
       roomActions: turn.tools.flatMap((tool) => (tool.roomAction ? [tool.roomAction] : [])),
     };
   } catch (error) {
-    clearAgentRoomRun(args.agentId, runContext.requestId);
+    clearAgentRoomRun(args.agent.id, runContext.requestId);
     const message = error instanceof Error ? error.message : "Unknown server error.";
-    const meta = extractAssistantMetaFromConversationError(error);
-
-    return {
-      turn: createTurn(
+    throw new RoomTurnExecutionError(
+      message,
+      {
         agent,
-        room.id,
-        args.message.id,
-        args.message.sender,
-        args.message.content,
+        roomId: args.room.id,
+        userMessageId: args.message.id,
+        userSender: args.message.sender,
+        userContent: args.message.content,
+        toolEvents,
+        emittedMessages,
+        receiptUpdates,
         currentUserReceipts,
         currentUserReceiptStatus,
         currentUserReceiptUpdatedAt,
+        resolvedModel: runContext.resolvedModel,
+        continuationSnapshot: runContext.continuationSnapshot,
+      },
+      extractConversationErrorMeta(error),
+    );
+  }
+}
+
+export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<RunRoomTurnResult> {
+  try {
+    return await runPreparedRoomTurn(buildPreparedInputFromWorkspace(args));
+  } catch (error) {
+    if (!(error instanceof RoomTurnExecutionError)) {
+      throw error;
+    }
+
+    return {
+      turn: createTurn(
+        error.partial.agent,
+        error.partial.roomId,
+        error.partial.userMessageId,
+        error.partial.userSender,
+        error.partial.userContent,
+        error.partial.currentUserReceipts,
+        error.partial.currentUserReceiptStatus,
+        error.partial.currentUserReceiptUpdatedAt,
         "",
-        toolEvents,
-        emittedMessages,
-        meta,
-        runContext.resolvedModel,
+        error.partial.toolEvents,
+        error.partial.emittedMessages,
+        error.assistantMeta,
+        error.partial.resolvedModel,
         "error",
-        runContext.continuationSnapshot,
-        message,
+        error.partial.continuationSnapshot,
+        error.message,
       ),
-      resolvedModel: runContext.resolvedModel,
-      compatibility: runContext.compatibility ?? {
+      resolvedModel: error.partial.resolvedModel,
+      compatibility: error.assistantMeta?.compatibility ?? {
         providerKey: "openai",
         providerLabel: "Unknown",
         baseUrl: "",
@@ -394,9 +565,9 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
         responsesPayloadMode: "json",
         notes: [],
       },
-      emittedMessages,
-      receiptUpdates,
-      roomActions: toolEvents.flatMap((tool) => (tool.roomAction ? [tool.roomAction] : [])),
+      emittedMessages: error.partial.emittedMessages,
+      receiptUpdates: error.partial.receiptUpdates,
+      roomActions: error.partial.toolEvents.flatMap((tool) => (tool.roomAction ? [tool.roomAction] : [])),
     };
   }
 }
