@@ -33,12 +33,21 @@
 - Tool loop on the server
 - Provider compatibility layer for both API formats
 - Layered UI: `Chat Room` + `Agent Console`
+- Multi-agent room scheduler with per-room turn orchestration
+- Workspace state sync with local persistence and server-side versioned snapshots
 - Per-agent shared workspace directories under `.oceanking/workspaces/<agentId>/`
 - Built-in tools:
   - `web_fetch`
   - `custom_command`
   - `memory_search`
   - `memory_get`
+  - `list_attached_rooms`
+  - `list_known_agents`
+  - `get_room_history`
+  - `create_room`
+  - `add_agents_to_room`
+  - `leave_room`
+  - `remove_room_participant`
   - `workspace_list`
   - `workspace_read`
   - `workspace_write`
@@ -46,8 +55,25 @@
   - `workspace_append`
   - `workspace_move`
   - `workspace_mkdir`
-- Room-only bridge tool:
+  - `shared_workspace_list`
+  - `shared_workspace_read`
+  - `shared_workspace_write`
+  - `shared_workspace_delete`
+  - `shared_workspace_append`
+  - `shared_workspace_move`
+  - `shared_workspace_mkdir`
   - `send_message_to_room`
+  - `read_no_reply`
+  - `list_cron_jobs`
+  - `get_cron_job`
+  - `create_cron_job`
+  - `update_cron_job`
+  - `pause_cron_job`
+  - `resume_cron_job`
+  - `delete_cron_job`
+  - `run_cron_job_now`
+  - `list_cron_runs`
+  - `preview_cron_schedule`
 - Built-in custom commands:
   - `list_commands`
   - `project_profile`
@@ -88,6 +114,7 @@ Notes:
 ```bash
 npm install
 npm run dev
+npm test
 ```
 
 Open `http://localhost:3000`.
@@ -97,30 +124,62 @@ Open `http://localhost:3000`.
 ```text
 src/
   app/
-    api/chat/route.ts        # chat endpoint + tool loop entry
-    api/room-chat/route.ts   # chat-room wrapper endpoint
+    api/chat/route.ts        # base chat endpoint + tool loop entry
+    api/room-chat/route.ts   # room transport + SSE wrapper
+    api/workspace/route.ts   # versioned workspace persistence API
     globals.css              # visual system
     layout.tsx               # app shell
     page.tsx                 # main page
   components/
-    chat-workspace.tsx       # chat room + agent console UI
+    workspace-provider.tsx   # top-level workspace composition layer
+    workspace/
+      persistence.ts         # local/server workspace persistence helpers
+      room-actions.ts        # room mutation helpers
+      room-stream.ts         # SSE room stream parser
+      scheduler.ts           # scheduler packet helpers
+      use-room-execution.ts  # room turn execution hook
+      use-room-scheduler.ts  # room scheduler hook
   lib/
     ai/
       openai-client.ts       # OpenAI-compatible adapters
+      skills.ts              # skill loading and filtering
       system-prompt.ts       # default system prompt
       tools/
+        base-tools.ts        # common web/custom command tools
+        room-tools.ts        # room-scoped agent tools
+        cron-tools.ts        # cron management tools
+        memory-tools.ts      # agent memory tools
+        workspace-tools.ts   # private/shared workspace tools
+        shared.ts            # shared tool schemas and helpers
+        index.ts             # tool registry composition
         custom-commands.ts   # command dispatcher
-        index.ts             # tool registry
         web-fetch.ts         # guarded webpage fetcher
     chat/
       catalog.ts             # UI-facing tool metadata
+      schemas.ts             # zod schemas for workspace state
       types.ts               # shared types
+      workspace-domain.ts    # shared room/workspace domain logic
+    server/
+      room-runner.ts         # shared room turn execution service
+      workspace-store.ts     # versioned workspace persistence store
+      workspace-state.ts     # server-facing workspace helpers
     shared/
       text.ts                # small text helpers
 .oceanking/
   agent-runtime/            # per-agent shared runtime state
+  crons/                    # scheduled job state + run history
   memory/                   # per-agent memory timeline + compactions
   workspaces/               # per-agent shared filesystem workspaces
+tests/
+  *.test.ts                 # workspace/domain/runner regression tests
+```
+
+## Validation Commands
+
+```bash
+npm run lint
+npm test
+npm run build
 ```
 
 ## How Tool Calling Works
@@ -159,6 +218,12 @@ src/
 3. The internal agent can think, call tools, and produce raw assistant text inside the `Agent Console`
 4. Nothing is shown back to the room unless the agent explicitly calls `send_message_to_room`
 5. The `content` field of `send_message_to_room` becomes the filtered human-visible room message
+
+## Room Runtime Notes
+
+- `src/lib/server/room-runner.ts` owns the shared room turn execution flow used by the room API
+- `src/lib/chat/workspace-domain.ts` holds shared room/workspace domain rules reused by client and server
+- `src/components/workspace-provider.tsx` now focuses on composing state, persistence, scheduler, and room execution hooks instead of owning every detail inline
 
 ## Safety Notes
 
