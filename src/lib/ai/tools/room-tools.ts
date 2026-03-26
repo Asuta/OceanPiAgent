@@ -75,6 +75,7 @@ export const roomTools = {
           status: args.status,
           final: args.final,
           content: args.content,
+          attachments: [],
         });
       }
       return createRoomMessageResult(args);

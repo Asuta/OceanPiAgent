@@ -10,6 +10,7 @@ import {
   type RoomChatStreamEvent,
   type RoomHistoryMessageSummary,
 } from "@/lib/chat/types";
+import { messageImageAttachmentSchema } from "@/lib/chat/schemas";
 import {
   extractAssistantMetaFromRoomTurnError,
   runPreparedRoomTurn,
@@ -22,12 +23,21 @@ export const runtime = "nodejs";
 const requestSchema = z.object({
   message: z.object({
     id: z.string().max(120),
-    content: z.string().trim().min(1).max(20_000),
+    content: z.string().max(20_000),
+    attachments: z.array(messageImageAttachmentSchema).max(3).optional().default([]),
     sender: z.object({
       id: z.string().trim().min(1).max(120),
       name: z.string().trim().min(1).max(120),
       role: z.enum(["participant", "system"]),
     }),
+  }).superRefine((message, ctx) => {
+    if (!message.content.trim() && message.attachments.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Message content or at least one image is required.",
+        path: ["content"],
+      });
+    }
   }),
   settings: z.object({
     modelConfigId: z.string().max(120).nullable().optional().default(null),
@@ -106,6 +116,7 @@ const requestSchema = z.object({
           final: z.boolean(),
           createdAt: z.string(),
           content: z.string().max(20_000),
+          attachments: z.array(messageImageAttachmentSchema).max(3).optional().default([]),
           receipts: z
             .array(
               z.object({

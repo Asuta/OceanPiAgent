@@ -2,6 +2,7 @@ import { getModel, getProviders, supportsXhigh, type Api, type Model } from "@ma
 import { createProviderCompatibility } from "./provider-compat";
 import {
   getPiConfiguredApiLabel,
+  getPiInputCapability,
   getPiProviderForModelValue,
   getPiProviderOption,
   getPiThinkingCapability,
@@ -147,6 +148,7 @@ function createOpenAiCompatibleModel(
   }
 
   const capability = getPiThinkingCapability(requestedModel);
+  const inputCapability = getPiInputCapability(requestedModel);
   const actualThinkingLevel = resolveActualThinkingLevel(settings.thinkingLevel, capability);
   const actualApiFormat = settings.apiFormat;
   const compatibility = createProviderCompatibility(baseUrl, settings.providerMode);
@@ -171,7 +173,7 @@ function createOpenAiCompatibleModel(
     provider: compatibility.providerKey === "openai" ? "openai" : "oceanking-openai-compatible",
     baseUrl,
     reasoning: capability.reasoning,
-    input: ["text"],
+    input: inputCapability.supportsImageInput ? ["text", "image"] : ["text"],
     cost: ZERO_COST,
     contextWindow: 200_000,
     maxTokens: 32_768,

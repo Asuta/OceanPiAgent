@@ -3,13 +3,14 @@ import path from "node:path";
 import { generateCompactionSummary } from "./agent-compaction";
 import { appendAgentCompactionMemory, clearAgentMemory } from "./agent-memory-store";
 import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runtime-hooks";
-import type { ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
+import type { MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 
 export interface PersistedVisibleMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  attachments: MessageImageAttachment[];
   createdAt: string;
 }
 
@@ -86,6 +87,20 @@ function normalizeMessage(value: unknown): PersistedVisibleMessage | null {
     id: typeof value.id === "string" && value.id ? value.id : createUuid(),
     role: value.role,
     content: value.content,
+    attachments: Array.isArray(value.attachments)
+      ? value.attachments.filter(
+          (attachment): attachment is MessageImageAttachment =>
+            typeof attachment === "object"
+            && attachment !== null
+            && (attachment as MessageImageAttachment).kind === "image"
+            && typeof (attachment as MessageImageAttachment).id === "string"
+            && typeof (attachment as MessageImageAttachment).mimeType === "string"
+            && typeof (attachment as MessageImageAttachment).filename === "string"
+            && typeof (attachment as MessageImageAttachment).sizeBytes === "number"
+            && typeof (attachment as MessageImageAttachment).storagePath === "string"
+            && typeof (attachment as MessageImageAttachment).url === "string",
+        )
+      : [],
     createdAt: typeof value.createdAt === "string" && value.createdAt ? value.createdAt : createTimestamp(),
   };
 }
@@ -143,7 +158,7 @@ function normalizeRuntime(agentId: RoomAgentId, value: unknown): PersistedAgentR
 }
 
 function estimateHistoryChars(messages: PersistedVisibleMessage[]): number {
-  return messages.reduce((total, message) => total + message.content.length, 0);
+  return messages.reduce((total, message) => total + message.content.length + message.attachments.length * 64, 0);
 }
 
 export async function loadPersistedAgentRuntime(agentId: RoomAgentId): Promise<PersistedAgentRuntime> {
@@ -168,13 +183,14 @@ export async function savePersistedAgentRuntime(runtime: PersistedAgentRuntime):
 
 export async function appendPersistedHistoryMessage(args: {
   agentId: RoomAgentId;
-  message: Omit<PersistedVisibleMessage, "id" | "createdAt"> & Partial<Pick<PersistedVisibleMessage, "id" | "createdAt">>;
+  message: Omit<PersistedVisibleMessage, "id" | "createdAt" | "attachments"> & Partial<Pick<PersistedVisibleMessage, "id" | "createdAt" | "attachments">>;
 }): Promise<PersistedAgentRuntime> {
   const runtime = await loadPersistedAgentRuntime(args.agentId);
   runtime.history.push({
     id: args.message.id || createUuid(),
     role: args.message.role,
     content: args.message.content,
+    attachments: args.message.attachments ? [...args.message.attachments] : [],
     createdAt: args.message.createdAt || createTimestamp(),
   });
   runtime.updatedAt = createTimestamp();
@@ -219,8 +235,9 @@ export async function compactPersistedAgentRuntime(args: {
   if (splitIndex % 2 !== 0 && splitIndex < runtime.history.length - 1) {
     splitIndex += 1;
   }
-  const prunedMessages = runtime.history.slice(0, splitIndex);
-  const keptMessages = runtime.history.slice(splitIndex);
+  const candidatePrunedMessages = runtime.history.slice(0, splitIndex);
+  const prunedMessages = candidatePrunedMessages.filter((message) => message.attachments.length === 0);
+  const keptMessages = runtime.history.filter((message, index) => index >= splitIndex || message.attachments.length > 0);
   if (prunedMessages.length === 0) {
     return {
       compacted: false,
@@ -244,6 +261,7 @@ export async function compactPersistedAgentRuntime(args: {
     id: createUuid(),
     role: "assistant",
     content: summary,
+    attachments: [],
     createdAt: createTimestamp(),
   };
 

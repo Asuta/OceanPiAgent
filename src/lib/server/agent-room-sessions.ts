@@ -7,7 +7,9 @@ import {
   savePersistedAgentRuntime,
   type PersistedVisibleMessage,
 } from "./agent-runtime-store";
+import { formatMessageForTranscript, summarizeImageAttachments } from "@/lib/chat/message-attachments";
 import type {
+  MessageImageAttachment,
   ProviderCompatibility,
   RoomAgentId,
   RoomMessageEmission,
@@ -20,6 +22,7 @@ import { createUuid } from "@/lib/utils/uuid";
 type VisibleMessage = {
   role: "user" | "assistant";
   content: string;
+  attachments: MessageImageAttachment[];
 };
 
 interface AgentRuntimeRun {
@@ -29,6 +32,7 @@ interface AgentRuntimeRun {
   userMessageId: string;
   userSender: RoomSender;
   userContent: string;
+  userAttachments: MessageImageAttachment[];
   assistantContent: string;
   toolEvents: ToolExecution[];
   emittedMessages: RoomMessageEmission[];
@@ -145,6 +149,7 @@ function buildIncomingRoomEnvelope(
   messageId: string,
   sender: RoomSender,
   content: string,
+  attachments: MessageImageAttachment[],
   attachedRooms: AttachedRoomDescriptor[],
 ): string {
   return [
@@ -158,18 +163,23 @@ function buildIncomingRoomEnvelope(
     `Sender Role: ${sender.role}`,
     "Currently attached rooms for this agent:",
     formatAttachedRooms(attachedRooms, roomId),
+    attachments.length > 0 ? "Visible room attachments:" : null,
+    ...(attachments.length > 0 ? summarizeImageAttachments(attachments) : []),
     "Visible room message:",
-    content,
-  ].join("\n");
+    formatMessageForTranscript(content, attachments),
+  ].filter((item): item is string => Boolean(item)).join("\n");
 }
 
 function buildContinuationSnapshot(run: AgentRuntimeRun): string {
   const sections = [
     "[Continuation snapshot from an unfinished shared agent run]",
-    `Current room context: ${run.roomTitle} (${run.roomId})`,
-    `Original user message id: ${run.userMessageId}`,
-    `Original sender: ${run.userSender.name} (${run.userSender.id}, ${run.userSender.role})`,
-    `Original room message:\n${run.userContent}`,
+      `Current room context: ${run.roomTitle} (${run.roomId})`,
+      `Original user message id: ${run.userMessageId}`,
+      `Original sender: ${run.userSender.name} (${run.userSender.id}, ${run.userSender.role})`,
+      `Original room message:\n${formatMessageForTranscript(run.userContent, run.userAttachments)}`,
+      ...(run.userAttachments.length > 0
+        ? ["Original room attachments:", ...summarizeImageAttachments(run.userAttachments)]
+        : []),
   ];
 
   if (run.emittedMessages.length > 0) {
@@ -278,6 +288,7 @@ function toVisibleHistory(history: PersistedVisibleMessage[]): VisibleMessage[] 
   return history.map((message) => ({
     role: message.role,
     content: message.content,
+    attachments: [...message.attachments],
   }));
 }
 
@@ -289,6 +300,7 @@ export async function startAgentRoomRun(args: {
   userMessageId: string;
   userSender: RoomSender;
   userContent: string;
+  userAttachments: MessageImageAttachment[];
   requestSignal: AbortSignal;
 }) {
   const session = await hydrateSession(args.agentId);
@@ -300,6 +312,7 @@ export async function startAgentRoomRun(args: {
       id: createUuid(),
       role: "assistant",
       content: continuationSnapshot,
+      attachments: [],
       createdAt: createTimestamp(),
     });
     session.updatedAt = createTimestamp();
@@ -328,8 +341,10 @@ export async function startAgentRoomRun(args: {
       args.userMessageId,
       args.userSender,
       args.userContent,
+      args.userAttachments,
       args.attachedRooms,
     ),
+    attachments: [...args.userAttachments],
     createdAt: createTimestamp(),
   };
 
@@ -341,6 +356,7 @@ export async function startAgentRoomRun(args: {
     userMessageId: args.userMessageId,
     userSender: args.userSender,
     userContent: args.userContent,
+    userAttachments: [...args.userAttachments],
     assistantContent: "",
     toolEvents: [],
     emittedMessages: [],
@@ -411,6 +427,7 @@ export async function completeAgentRoomRun(args: {
     id: createUuid(),
     role: "assistant",
     content: buildAssistantHistoryEntry(run, args.assistantText),
+    attachments: [],
     createdAt: createTimestamp(),
   };
 

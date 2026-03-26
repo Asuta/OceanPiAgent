@@ -4,8 +4,25 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createKnownAgentCards } from "@/lib/chat/workspace-domain";
+import type { MessageImageAttachment } from "@/lib/chat/types";
 import { resetAgentRoomSession } from "@/lib/server/agent-room-sessions";
 import { runPreparedRoomTurn } from "@/lib/server/room-runner";
+
+const TEST_IMAGE_ATTACHMENT: MessageImageAttachment = {
+  id: "img-1",
+  kind: "image",
+  mimeType: "image/jpeg",
+  filename: "test.jpg",
+  sizeBytes: 1234,
+  storagePath: "images/test.jpg",
+  url: "/api/uploads/image/images/test.jpg",
+};
+
+type ReplayedMessage = {
+  role: "user" | "assistant";
+  content: string;
+  attachments?: MessageImageAttachment[];
+};
 
 async function withTempCwd(run: () => Promise<void>) {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "oceanking-room-runner-test-"));
@@ -28,6 +45,7 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
         message: {
           id: "user-msg-1",
           content: "Please check this quickly",
+          attachments: [],
           sender: {
             id: "local-user",
             name: "You",
@@ -159,6 +177,185 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
     assert.equal(result.roomActions.length, 1);
     assert.equal(result.turn.userMessage.receiptStatus, "read_no_reply");
     assert.equal(result.turn.userMessage.receipts.length, 1);
+
+    await resetAgentRoomSession("concierge");
+  });
+});
+
+test("runPreparedRoomTurn keeps image attachments in persisted agent history", async () => {
+  await withTempCwd(async () => {
+    await runPreparedRoomTurn({
+      message: {
+        id: "user-msg-image",
+        content: "Please remember this image",
+        attachments: [TEST_IMAGE_ATTACHMENT],
+        sender: {
+          id: "local-user",
+          name: "You",
+          role: "participant",
+        },
+      },
+      settings: {
+        modelConfigId: null,
+        apiFormat: "chat_completions",
+        model: "fake-model",
+        systemPrompt: "",
+        providerMode: "auto",
+        maxToolLoopSteps: 4,
+        thinkingLevel: "off",
+        enabledSkillIds: [],
+      },
+      room: {
+        id: "room-1",
+        title: "Primary Room",
+      },
+      attachedRooms: [
+        {
+          id: "room-1",
+          title: "Primary Room",
+          archived: false,
+          ownerParticipantId: "concierge",
+          ownerName: "Harbor Concierge",
+          currentAgentMembershipRole: "owner",
+          currentAgentIsOwner: true,
+          participants: [
+            {
+              participantId: "concierge",
+              name: "Harbor Concierge",
+              runtimeKind: "agent",
+              membershipRole: "owner",
+              enabled: true,
+              agentId: "concierge",
+            },
+            {
+              participantId: "local-user",
+              name: "You",
+              runtimeKind: "human",
+              membershipRole: "member",
+              enabled: true,
+            },
+          ],
+          messageCount: 1,
+          latestMessageAt: null,
+        },
+      ],
+      knownAgents: createKnownAgentCards(),
+      roomHistoryById: {
+        "room-1": [],
+      },
+      agent: {
+        id: "concierge",
+        label: "Harbor Concierge",
+        instruction: "Keep it short.",
+      },
+      conversationRunner: async () => ({
+        assistantText: "Got it.",
+        toolEvents: [],
+        resolvedModel: "fake-provider/fake-model",
+        compatibility: {
+          providerKey: "generic",
+          providerLabel: "Generic",
+          baseUrl: "https://example.test/v1",
+          chatCompletionsToolStyle: "tools",
+          responsesContinuation: "replay",
+          responsesPayloadMode: "json",
+          notes: [],
+        },
+        actualApiFormat: "chat_completions",
+      }),
+    });
+
+    let replayedMessages: ReplayedMessage[] | null = null;
+
+    await runPreparedRoomTurn({
+      message: {
+        id: "user-msg-followup",
+        content: "What was in the previous image?",
+        attachments: [],
+        sender: {
+          id: "local-user",
+          name: "You",
+          role: "participant",
+        },
+      },
+      settings: {
+        modelConfigId: null,
+        apiFormat: "chat_completions",
+        model: "fake-model",
+        systemPrompt: "",
+        providerMode: "auto",
+        maxToolLoopSteps: 4,
+        thinkingLevel: "off",
+        enabledSkillIds: [],
+      },
+      room: {
+        id: "room-1",
+        title: "Primary Room",
+      },
+      attachedRooms: [
+        {
+          id: "room-1",
+          title: "Primary Room",
+          archived: false,
+          ownerParticipantId: "concierge",
+          ownerName: "Harbor Concierge",
+          currentAgentMembershipRole: "owner",
+          currentAgentIsOwner: true,
+          participants: [
+            {
+              participantId: "concierge",
+              name: "Harbor Concierge",
+              runtimeKind: "agent",
+              membershipRole: "owner",
+              enabled: true,
+              agentId: "concierge",
+            },
+            {
+              participantId: "local-user",
+              name: "You",
+              runtimeKind: "human",
+              membershipRole: "member",
+              enabled: true,
+            },
+          ],
+          messageCount: 2,
+          latestMessageAt: null,
+        },
+      ],
+      knownAgents: createKnownAgentCards(),
+      roomHistoryById: {
+        "room-1": [],
+      },
+      agent: {
+        id: "concierge",
+        label: "Harbor Concierge",
+        instruction: "Keep it short.",
+      },
+      conversationRunner: async (messages: ReplayedMessage[]) => {
+        replayedMessages = messages;
+        return {
+          assistantText: "Still have it.",
+          toolEvents: [],
+          resolvedModel: "fake-provider/fake-model",
+          compatibility: {
+            providerKey: "generic",
+            providerLabel: "Generic",
+            baseUrl: "https://example.test/v1",
+            chatCompletionsToolStyle: "tools",
+            responsesContinuation: "replay",
+            responsesPayloadMode: "json",
+            notes: [],
+          },
+          actualApiFormat: "chat_completions",
+        };
+      },
+    });
+
+    if (!replayedMessages) {
+      assert.fail("Expected the second run to receive replayed messages.");
+    }
+    const secondRunMessages = replayedMessages as ReplayedMessage[];
+    assert.ok(secondRunMessages.some((message: ReplayedMessage) => message.role === "user" && message.attachments?.[0]?.id === TEST_IMAGE_ATTACHMENT.id));
 
     await resetAgentRoomSession("concierge");
   });

@@ -306,6 +306,7 @@ export function useRoomExecution(args: {
             message: {
               id: params.inputMessage.id,
               content: params.inputMessage.content,
+              attachments: params.inputMessage.attachments,
               sender: params.inputMessage.sender,
             },
             settings: (agentStatesRef.current[agent.id] ?? createAgentSharedState()).settings,

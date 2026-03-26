@@ -41,12 +41,14 @@ export function resolveRoomMessageSender(args: {
 export function applyOutgoingUserMessage(args: {
   room: RoomSession;
   content: string;
+  attachments?: RoomSession["roomMessages"][number]["attachments"];
   sender: RoomParticipant;
   nextTitle: string;
 }): RoomSession {
   const roomUserMessage = createRoomMessage(args.room.id, "user", args.content, "user", {
     seq: getNextRoomMessageSeq(args.room),
     sender: getParticipantSender(args.sender),
+    attachments: args.attachments ?? [],
     kind: "user_input",
     status: "completed",
     final: true,

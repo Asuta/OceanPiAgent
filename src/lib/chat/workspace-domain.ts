@@ -1,4 +1,5 @@
 import { ROOM_AGENTS } from "@/lib/chat/catalog";
+import { formatMessageForTranscript } from "@/lib/chat/message-attachments";
 import type {
   AgentInfoCard,
   AgentSharedState,
@@ -231,7 +232,7 @@ export function createRoomMessage(
   role: RoomMessage["role"],
   content: string,
   source: RoomMessage["source"],
-  options?: Partial<Pick<RoomMessage, "kind" | "status" | "final" | "sender" | "seq">>,
+  options?: Partial<Pick<RoomMessage, "kind" | "status" | "final" | "sender" | "seq" | "attachments">>,
 ): RoomMessage {
   const defaultKind = role === "user" ? "user_input" : role === "system" ? "system" : "answer";
   const defaultSender =
@@ -248,6 +249,7 @@ export function createRoomMessage(
     role,
     sender: options?.sender || defaultSender,
     content,
+    attachments: options?.attachments ? [...options.attachments] : [],
     source,
     kind: options?.kind || defaultKind,
     status: options?.status || "completed",
@@ -429,6 +431,7 @@ export function createRoomHistorySummary(room: RoomSession): RoomHistoryMessageS
     final: message.final,
     createdAt: message.createdAt,
     content: message.content,
+    attachments: [...message.attachments],
     receipts: [...message.receipts],
   }));
 }
@@ -575,7 +578,7 @@ export function getRoomPreview(room: RoomSession): string {
   if (!lastMessage) {
     return room.archivedAt ? "Archived room" : "Empty room";
   }
-  const preview = lastMessage.content.replace(/\s+/g, " ").trim();
+  const preview = formatMessageForTranscript(lastMessage.content, lastMessage.attachments).replace(/\s+/g, " ").trim();
   return preview.length > 56 ? `${preview.slice(0, 56).trim()}...` : preview;
 }
 

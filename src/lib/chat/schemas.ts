@@ -77,6 +77,16 @@ const roomMessageReceiptSchema = z.object({
   createdAt: z.string(),
 }).strict();
 
+export const messageImageAttachmentSchema = z.object({
+  id: z.string(),
+  kind: z.literal("image"),
+  mimeType: z.string(),
+  filename: z.string(),
+  sizeBytes: z.number().int().min(0),
+  storagePath: z.string(),
+  url: z.string(),
+}).strict();
+
 const roomSenderSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -178,6 +188,7 @@ const roomMessageSchema = z.object({
   role: roomMessageRoleSchema,
   sender: roomSenderSchema,
   content: z.string(),
+  attachments: z.array(messageImageAttachmentSchema).default([]),
   source: roomMessageSourceSchema,
   kind: roomMessageKindSchema,
   status: roomMessageStatusSchema,
@@ -214,6 +225,15 @@ const chatSettingsSchema = z.object({
   maxToolLoopSteps: z.number().int().min(MIN_MAX_TOOL_LOOP_STEPS).max(MAX_MAX_TOOL_LOOP_STEPS),
   thinkingLevel: z.enum(THINKING_LEVELS),
   enabledSkillIds: z.array(z.string()),
+}).strict();
+
+const chatMessageSchema = z.object({
+  id: z.string(),
+  role: z.enum(["user", "assistant"]),
+  content: z.string(),
+  attachments: z.array(messageImageAttachmentSchema).default([]),
+  tools: z.array(toolExecutionSchema).optional(),
+  meta: assistantMessageMetaSchema.optional(),
 }).strict();
 
 const agentSharedStateSchema = z.object({
@@ -259,6 +279,8 @@ export const roomWorkspaceStateSchema = z.object({
   activeRoomId: z.string(),
   selectedConsoleAgentId: roomAgentIdSchema.optional(),
 }).strict();
+
+export const chatMessageRequestSchema = chatMessageSchema;
 
 export function parseRoomWorkspaceState(value: unknown): RoomWorkspaceState {
   return roomWorkspaceStateSchema.parse(value);

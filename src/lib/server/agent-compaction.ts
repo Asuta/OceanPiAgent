@@ -1,4 +1,5 @@
 import { DEFAULT_MAX_TOOL_LOOP_STEPS, type ChatSettings, type RoomAgentId } from "@/lib/chat/types";
+import { formatMessageForTranscript, summarizeImageAttachments } from "@/lib/chat/message-attachments";
 import type { PersistedVisibleMessage } from "./agent-runtime-store";
 
 const REQUIRED_SUMMARY_HEADINGS = [
@@ -77,6 +78,8 @@ export function buildRuleBasedCompactionSummary(messages: PersistedVisibleMessag
       }
       if (detail.visibleMessage) {
         userRequests.push(`- ${truncateLine(detail.visibleMessage, 220)}`);
+      } else if (message.attachments.length > 0) {
+        userRequests.push(`- ${truncateLine(formatMessageForTranscript(message.content, message.attachments), 220)}`);
       } else {
         userRequests.push(`- ${truncateLine(message.content, 220)}`);
       }
@@ -125,7 +128,12 @@ function createCompactionSettings(resolvedModel: string): ChatSettings {
 
 function formatCompactionMessage(message: PersistedVisibleMessage): string {
   const content = message.content.trim() || "(empty)";
-  return [`<message role="${message.role}" createdAt="${message.createdAt}">`, content, "</message>"].join("\n");
+  return [
+    `<message role="${message.role}" createdAt="${message.createdAt}">`,
+    ...(message.attachments.length > 0 ? ["<attachments>", ...summarizeImageAttachments(message.attachments), "</attachments>"] : []),
+    content,
+    "</message>",
+  ].join("\n");
 }
 
 function splitMessagesIntoChunks(messages: PersistedVisibleMessage[], maxChars = MAX_CHUNK_CHARS): PersistedVisibleMessage[][] {
