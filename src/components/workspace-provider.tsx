@@ -77,6 +77,7 @@ import {
   saveWorkspaceEnvelope,
   saveWorkspaceStateToLocalStorage,
 } from "@/components/workspace/persistence";
+import { buildWorkspaceStateSnapshot, workspaceStatesEqual } from "@/components/workspace/workspace-state";
 import {
   addAgentParticipantToRoom,
   addHumanParticipantToRoom,
@@ -1252,6 +1253,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const roomsRef = useRef<RoomSession[]>([]);
   const agentStatesRef = useRef<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates());
   const workspaceVersionRef = useRef(0);
+  const activeRoomIdRef = useRef("");
+  const selectedConsoleAgentIdRef = useRef<RoomAgentId | null>(null);
   const skipNextServerPersistRef = useRef(false);
   const workspacePersistTimerRef = useRef<number | null>(null);
   const pendingWorkspacePersistRef = useRef<RoomWorkspaceState | null>(null);
@@ -1367,17 +1370,25 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    saveWorkspaceStateToLocalStorage({
+    saveWorkspaceStateToLocalStorage(buildWorkspaceStateSnapshot({
       rooms,
       agentStates,
       activeRoomId,
-      selectedConsoleAgentId: selectedConsoleAgentId ?? undefined,
-    } satisfies RoomWorkspaceState);
+      selectedConsoleAgentId,
+    }));
   }, [activeRoomId, agentStates, hydrated, rooms, selectedConsoleAgentId]);
 
   useEffect(() => {
     workspaceVersionRef.current = workspaceVersion;
   }, [workspaceVersion]);
+
+  useEffect(() => {
+    activeRoomIdRef.current = activeRoomId;
+  }, [activeRoomId]);
+
+  useEffect(() => {
+    selectedConsoleAgentIdRef.current = selectedConsoleAgentId;
+  }, [selectedConsoleAgentId]);
 
   const persistWorkspaceSnapshot = useCallback(async () => {
     if (workspacePersistInFlightRef.current) {
@@ -1386,6 +1397,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
     workspacePersistInFlightRef.current = true;
     let scheduledDelayedRetry = false;
+    const getCurrentWorkspaceSnapshot = () =>
+      buildWorkspaceStateSnapshot({
+        rooms: roomsRef.current,
+        agentStates: agentStatesRef.current,
+        activeRoomId: activeRoomIdRef.current,
+        selectedConsoleAgentId: selectedConsoleAgentIdRef.current,
+      });
+
     try {
       while (pendingWorkspacePersistRef.current) {
         const payload = pendingWorkspacePersistRef.current;
@@ -1398,7 +1417,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         });
 
         if (!response) {
-          pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? payload;
+          pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? getCurrentWorkspaceSnapshot();
           window.setTimeout(() => {
             void persistWorkspaceSnapshot();
           }, 1000);
@@ -1431,14 +1450,25 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }
 
         const requestIsLatest = requestNonce === workspacePersistNonceRef.current && pendingWorkspacePersistRef.current === null;
-        if (requestIsLatest && typeof conflictVersion === "number" && conflictState && Object.keys(activeRunsRef.current).length === 0) {
+        const latestSnapshot = getCurrentWorkspaceSnapshot();
+        const localStateChangedSinceRequest = !workspaceStatesEqual(latestSnapshot, payload);
+        const localPersistStillQueued = workspacePersistTimerRef.current !== null;
+
+        if (
+          requestIsLatest
+          && !localStateChangedSinceRequest
+          && !localPersistStillQueued
+          && typeof conflictVersion === "number"
+          && conflictState
+          && Object.keys(activeRunsRef.current).length === 0
+        ) {
           applyWorkspaceSnapshot(conflictState, conflictVersion, {
             skipServerPersist: true,
           });
           break;
         }
 
-        pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? payload;
+        pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? latestSnapshot;
       }
     } finally {
       workspacePersistInFlightRef.current = false;
@@ -1458,12 +1488,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const payload = {
+    const payload = buildWorkspaceStateSnapshot({
       rooms,
       agentStates,
       activeRoomId,
-      selectedConsoleAgentId: selectedConsoleAgentId ?? undefined,
-    } satisfies RoomWorkspaceState;
+      selectedConsoleAgentId,
+    });
 
     const timer = window.setTimeout(() => {
       workspacePersistNonceRef.current += 1;
