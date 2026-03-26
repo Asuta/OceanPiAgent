@@ -18,6 +18,7 @@ import { safeJsonStringify } from "@/lib/shared/text";
 import { createUuid } from "@/lib/utils/uuid";
 
 export type ToolName =
+  | "bash"
   | "web_fetch"
   | "custom_command"
   | "send_message_to_room"
@@ -107,6 +108,14 @@ export const webFetchArgsSchema = z.object({
   url: z.string().url(),
   focus: optionalTrimmedString(200),
 });
+
+export const bashArgsSchema = z
+  .object({
+    command: z.string().trim().min(1).max(20_000),
+    cwd: optionalTrimmedString(1_000),
+    timeoutMs: z.number().int().min(1_000).max(10 * 60 * 1_000).optional().default(120_000),
+  })
+  .strict();
 
 export const customCommandArgsSchema = z.object({
   command: z.enum(CUSTOM_COMMAND_NAME_TUPLE),

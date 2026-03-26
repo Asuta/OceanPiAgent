@@ -46,6 +46,20 @@ function updateTurn(
   return turns.map((turn) => (turn.id === turnId ? updater(turn) : turn));
 }
 
+function appendMissingRoomMessages(room: RoomSession, messages: RoomMessage[]): RoomSession {
+  let nextRoom = room;
+
+  for (const message of messages) {
+    if (nextRoom.roomMessages.some((entry) => entry.id === message.id)) {
+      continue;
+    }
+
+    nextRoom = appendMessageToRoom(nextRoom, message);
+  }
+
+  return nextRoom;
+}
+
 export function useRoomExecution(args: {
   roomsRef: MutableRefObject<RoomSession[]>;
   agentStatesRef: MutableRefObject<Record<RoomAgentId, AgentSharedState>>;
@@ -190,14 +204,21 @@ export function useRoomExecution(args: {
           applyReceiptUpdateToAllAgentConsoles(update);
         },
         onDone: (event) => {
-          updateRoomState(initiatingRoomId, (room) => ({
-            ...room,
-            roomMessages: room.roomMessages.map((message) =>
-              message.id === event.turn.userMessage.id ? event.turn.userMessage : message,
-            ),
-            error: "",
-            updatedAt: createTimestamp(),
-          }));
+          updateRoomState(initiatingRoomId, (room) => {
+            const nextRoom = appendMissingRoomMessages(
+              {
+                ...room,
+                roomMessages: room.roomMessages.map((message) =>
+                  message.id === event.turn.userMessage.id ? event.turn.userMessage : message,
+                ),
+                error: "",
+                updatedAt: createTimestamp(),
+              },
+              event.turn.emittedMessages,
+            );
+
+            return nextRoom;
+          });
 
           updateAgentTurns(agentId, (turns) =>
             updateTurn(turns, turnId, (turn) => ({

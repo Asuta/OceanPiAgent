@@ -79,6 +79,18 @@ function createPiTool<TParameters extends TSchema>(definition: {
 function buildBaseTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
   return [
     createPiTool({
+      name: "bash",
+      label: "Bash",
+      description: "Run an unrestricted shell command in the server environment and inspect stdout, stderr, and exit status.",
+      parameters: Type.Object({
+        command: Type.String({ description: "Shell command to execute." }),
+        cwd: Type.Optional(Type.String({ description: "Optional working directory. Relative paths resolve from the server process cwd." })),
+        timeoutMs: Type.Optional(Type.Integer({ description: "Optional timeout in milliseconds." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
       name: "web_fetch",
       label: "Web Fetch",
       description: "Fetch a public webpage when you need live facts, then return readable text for synthesis.",
