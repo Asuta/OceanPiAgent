@@ -917,7 +917,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                         const isOwner = participant.id === room.ownerParticipantId;
                         return (
                           <div key={participant.id} className="participant-row-card">
-                            <div>
+                            <div className="participant-meta">
                               <strong>{participant.name}</strong>
                               <p>
                                 {isAgent ? `${getRoomAgent(participant.agentId ?? primaryAgentId).summary}` : "人工参与者"}

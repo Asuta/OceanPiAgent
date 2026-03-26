@@ -1526,6 +1526,29 @@ p {
   padding: 14px;
 }
 
+.participant-meta {
+  min-width: 0;
+}
+
+.participant-meta p {
+  margin: 0;
+  word-break: break-word;
+}
+
+.room-side-panel .participant-row-card {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.room-side-panel .participant-actions {
+  justify-content: flex-start;
+  align-items: center;
+}
+
+.room-side-panel .participant-actions .meta-chip {
+  flex-shrink: 0;
+}
+
 .danger-panel {
   background: rgba(171, 73, 55, 0.05);
   border-color: rgba(171, 73, 55, 0.12);
