@@ -19,10 +19,23 @@ export interface MemoryFileSlice {
 
 const MEMORY_ROOT = path.join(process.cwd(), ".oceanking", "memory");
 const TIMELINE_FILE_NAME = "timeline.md";
+const TIMELINE_DIR_NAME = "timeline";
 const COMPACTIONS_FILE_NAME = "compactions.md";
+const RECENT_TIMELINE_FILE_SCAN_LIMIT = 3;
+
+interface MemoryMarkdownFile {
+  path: string;
+  absolutePath: string;
+  kind: "timeline" | "compactions" | "other";
+  shardKey: string;
+}
 
 function createTimestamp(): string {
   return new Date().toISOString();
+}
+
+function createTimelineShardName(timestamp = createTimestamp()): string {
+  return `${timestamp.slice(0, 7)}.md`;
 }
 
 function normalizeToken(value: string): string {
@@ -60,6 +73,50 @@ async function ensureMemoryDir(agentId: RoomAgentId): Promise<string> {
 
 function getMemoryDir(agentId: RoomAgentId): string {
   return path.join(MEMORY_ROOT, agentId);
+}
+
+function getTimelineDir(agentId: RoomAgentId): string {
+  return path.join(getMemoryDir(agentId), TIMELINE_DIR_NAME);
+}
+
+function getTimelineShardKey(relPath: string): string {
+  if (relPath === TIMELINE_FILE_NAME) {
+    return "0000-00";
+  }
+
+  const match = /^timeline\/(\d{4}-\d{2})\.md$/u.exec(relPath);
+  return match?.[1] ?? "";
+}
+
+function toMemoryFileKind(relPath: string): MemoryMarkdownFile["kind"] {
+  if (relPath === COMPACTIONS_FILE_NAME) {
+    return "compactions";
+  }
+
+  if (relPath === TIMELINE_FILE_NAME || relPath.startsWith(`${TIMELINE_DIR_NAME}/`)) {
+    return "timeline";
+  }
+
+  return "other";
+}
+
+function orderFilesForSearch(files: MemoryMarkdownFile[]): Array<MemoryMarkdownFile & { searchOrder: number }> {
+  const timelineFiles = files
+    .filter((file) => file.kind === "timeline")
+    .sort((left, right) => right.shardKey.localeCompare(left.shardKey) || left.path.localeCompare(right.path));
+  const recentTimelineFiles = timelineFiles.slice(0, RECENT_TIMELINE_FILE_SCAN_LIMIT);
+  const olderTimelineFiles = timelineFiles.slice(RECENT_TIMELINE_FILE_SCAN_LIMIT);
+  const compactionFiles = files
+    .filter((file) => file.kind === "compactions")
+    .sort((left, right) => left.path.localeCompare(right.path));
+  const otherFiles = files
+    .filter((file) => file.kind === "other")
+    .sort((left, right) => left.path.localeCompare(right.path));
+
+  return [...recentTimelineFiles, ...compactionFiles, ...otherFiles, ...olderTimelineFiles].map((file, index) => ({
+    ...file,
+    searchOrder: index,
+  }));
 }
 
 async function appendMarkdownSection(filePath: string, heading: string, bodyLines: string[]): Promise<void> {
@@ -102,8 +159,10 @@ export async function appendAgentTurnMemory(args: {
   emittedMessages: Array<{ roomId: string; content: string; kind: string; status: string; final: boolean }>;
   resolvedModel: string;
 }): Promise<void> {
-  const dirPath = await ensureMemoryDir(args.agentId);
-  const filePath = path.join(dirPath, TIMELINE_FILE_NAME);
+  await ensureMemoryDir(args.agentId);
+  const timelineDirPath = getTimelineDir(args.agentId);
+  await mkdir(timelineDirPath, { recursive: true });
+  const filePath = path.join(timelineDirPath, createTimelineShardName());
   const heading = `${createTimestamp()} · ${args.roomTitle} (${args.roomId})`;
   await appendMarkdownSection(filePath, heading, [
     `- roomId: ${args.roomId}`,
@@ -148,15 +207,38 @@ export async function appendAgentCompactionMemory(args: {
   ]);
 }
 
-async function listMarkdownFiles(agentId: RoomAgentId): Promise<Array<{ path: string; absolutePath: string }>> {
+async function listMarkdownFiles(agentId: RoomAgentId): Promise<MemoryMarkdownFile[]> {
   const dirPath = getMemoryDir(agentId);
-  const entries = await readdir(dirPath, { withFileTypes: true }).catch(() => []);
-  return entries
+  const timelineDirPath = getTimelineDir(agentId);
+  const [rootEntries, timelineEntries] = await Promise.all([
+    readdir(dirPath, { withFileTypes: true }).catch(() => []),
+    readdir(timelineDirPath, { withFileTypes: true }).catch(() => []),
+  ]);
+
+  const files: MemoryMarkdownFile[] = rootEntries
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".md"))
     .map((entry) => ({
       path: entry.name,
       absolutePath: path.join(dirPath, entry.name),
+      kind: toMemoryFileKind(entry.name),
+      shardKey: getTimelineShardKey(entry.name),
     }));
+
+  files.push(
+    ...timelineEntries
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".md"))
+      .map((entry) => {
+        const relPath = `${TIMELINE_DIR_NAME}/${entry.name}`;
+        return {
+          path: relPath,
+          absolutePath: path.join(timelineDirPath, entry.name),
+          kind: toMemoryFileKind(relPath),
+          shardKey: getTimelineShardKey(relPath),
+        };
+      }),
+  );
+
+  return files;
 }
 
 export async function searchAgentMemory(
@@ -173,6 +255,13 @@ export async function searchAgentMemory(
   if (files.length === 0) {
     return [];
   }
+  const orderedFiles = orderFilesForSearch(files);
+  const timelineFileCount = files.filter((file) => file.kind === "timeline").length;
+  const nonTimelineFileCount = orderedFiles.filter((file) => file.kind !== "timeline").length;
+  const olderTimelineStartIndex = Math.min(
+    orderedFiles.length,
+    Math.min(timelineFileCount, RECENT_TIMELINE_FILE_SCAN_LIMIT) + nonTimelineFileCount,
+  );
 
   const queryTokens = new Set(tokenize(normalizedQuery));
   const maxResults = typeof options?.maxResults === "number" && Number.isFinite(options.maxResults)
@@ -183,8 +272,14 @@ export async function searchAgentMemory(
     : 0;
 
   const results: MemorySearchResult[] = [];
+  const resultOrder = new Map<string, number>();
 
-  for (const file of files) {
+  for (let index = 0; index < orderedFiles.length; index += 1) {
+    if (index >= olderTimelineStartIndex && results.length >= maxResults) {
+      break;
+    }
+
+    const file = orderedFiles[index];
     const text = await readFile(file.absolutePath, "utf8").catch(() => "");
     if (!text.trim()) {
       continue;
@@ -203,8 +298,13 @@ export async function searchAgentMemory(
       const overlap = lineTokens.reduce((count, token) => count + (queryTokens.has(token) ? 1 : 0), 0);
       const substringBoost = snippet.toLowerCase().includes(normalizedQuery.toLowerCase()) ? 2 : 0;
       const headingBoost = lines[index]?.startsWith("## ") ? 1 : 0;
-      const score = overlap + substringBoost + headingBoost;
-      if (score < minScore || score <= 0) {
+      const matchScore = overlap + substringBoost;
+      if (matchScore <= 0) {
+        continue;
+      }
+
+      const score = matchScore + headingBoost;
+      if (score < minScore) {
         continue;
       }
 
@@ -215,10 +315,20 @@ export async function searchAgentMemory(
         snippet: toLinePreview(lines, index, end),
         score,
       });
+      resultOrder.set(`${file.path}:${index + 1}:${end}`, file.searchOrder);
     }
   }
 
-  return results.sort((left, right) => right.score - left.score || left.path.localeCompare(right.path)).slice(0, maxResults);
+  return results
+    .sort(
+      (left, right) =>
+        right.score - left.score
+        || (resultOrder.get(`${left.path}:${left.startLine}:${left.endLine}`) ?? Number.MAX_SAFE_INTEGER)
+          - (resultOrder.get(`${right.path}:${right.startLine}:${right.endLine}`) ?? Number.MAX_SAFE_INTEGER)
+        || left.path.localeCompare(right.path)
+        || left.startLine - right.startLine,
+    )
+    .slice(0, maxResults);
 }
 
 export async function readAgentMemoryFile(args: {
@@ -257,10 +367,9 @@ export async function clearAgentMemory(agentId: RoomAgentId): Promise<void> {
 
 export async function getAgentMemorySummary(agentId: RoomAgentId): Promise<{ fileCount: number; hasTimeline: boolean; hasCompactions: boolean }> {
   const files = await listMarkdownFiles(agentId);
-  const names = new Set(files.map((file) => file.path));
   return {
     fileCount: files.length,
-    hasTimeline: names.has(TIMELINE_FILE_NAME),
-    hasCompactions: names.has(COMPACTIONS_FILE_NAME),
+    hasTimeline: files.some((file) => file.kind === "timeline"),
+    hasCompactions: files.some((file) => file.kind === "compactions"),
   };
 }

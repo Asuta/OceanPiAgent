@@ -112,6 +112,7 @@ export function buildRuleBasedCompactionSummary(messages: PersistedVisibleMessag
 
 function createCompactionSettings(resolvedModel: string): ChatSettings {
   return {
+    modelConfigId: null,
     apiFormat: "chat_completions",
     model: resolvedModel.trim(),
     systemPrompt: "",
