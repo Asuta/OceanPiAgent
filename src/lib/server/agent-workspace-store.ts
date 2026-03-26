@@ -63,8 +63,6 @@ export interface AgentWorkspaceDeleteResult {
   recursive: boolean;
 }
 
-const WORKSPACE_ROOT = path.join(process.cwd(), ".oceanking", "workspaces");
-const SHARED_WORKSPACE_DIR = path.join(WORKSPACE_ROOT, "_shared");
 const DEFAULT_READ_LINE_COUNT = 200;
 const MAX_READ_LINE_COUNT = 400;
 const DEFAULT_LIST_LIMIT = 200;
@@ -93,7 +91,11 @@ function isPathInside(parentPath: string, childPath: string): boolean {
 }
 
 function getWorkspaceRootPath(): string {
-  return WORKSPACE_ROOT;
+  return path.join(process.cwd(), ".oceanking", "workspaces");
+}
+
+export function getAgentWorkspaceRootDir(): string {
+  return getWorkspaceRootPath();
 }
 
 export function getAgentWorkspaceDir(agentId: RoomAgentId): string {
@@ -101,7 +103,7 @@ export function getAgentWorkspaceDir(agentId: RoomAgentId): string {
 }
 
 export function getSharedWorkspaceDir(): string {
-  return SHARED_WORKSPACE_DIR;
+  return path.join(getWorkspaceRootPath(), "_shared");
 }
 
 export function isAgentWorkspaceOutsideAccessEnabled(): boolean {

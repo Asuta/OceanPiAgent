@@ -162,7 +162,7 @@ export const CUSTOM_COMMANDS = [
   },
 ] as const;
 
-export const ROOM_AGENTS: RoomAgentDefinition[] = [
+export const BUILTIN_ROOM_AGENTS: RoomAgentDefinition[] = [
   {
     id: "concierge",
     label: "Harbor Concierge",
@@ -191,6 +191,8 @@ export const ROOM_AGENTS: RoomAgentDefinition[] = [
       "You are Bridge Operator, a room agent focused on execution. Break work into clear actions, surface warnings early, and keep the room updated with practical status messages.",
   },
 ];
+
+export const ROOM_AGENTS = BUILTIN_ROOM_AGENTS;
 
 export const ROOM_BRIDGE_RULES = [
   "用户发言先进入底层 Agent 会话，而不是直接贴给可见房间。",

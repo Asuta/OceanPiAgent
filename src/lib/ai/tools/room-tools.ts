@@ -172,7 +172,7 @@ export const roomTools = {
         title: { type: "string", description: "Optional room title. If omitted, the room title is generated from the participating agent labels." },
         agentIds: {
           type: "array",
-          items: { type: "string", enum: ["concierge", "researcher", "operator"] },
+          items: { type: "string" },
           description: "Optional list of additional agent ids to include in the new room. The current agent is always included automatically.",
         },
       },
@@ -219,7 +219,7 @@ export const roomTools = {
         roomId: { type: "string", description: "The attached room id that should receive new agent members." },
         agentIds: {
           type: "array",
-          items: { type: "string", enum: ["concierge", "researcher", "operator"] },
+          items: { type: "string" },
           description: "The agent ids to add to the target room.",
         },
       },

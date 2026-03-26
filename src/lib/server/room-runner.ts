@@ -38,6 +38,7 @@ import {
   getActiveRooms,
   getRoomAgent,
 } from "@/lib/server/workspace-state";
+import { listAgentDefinitions } from "@/lib/server/agent-registry";
 
 function createAgentSender(agent: AgentRoomTurn["agent"]): RoomSender {
   return {
@@ -351,13 +352,14 @@ class RoomTurnExecutionError extends Error {
   }
 }
 
-function buildPreparedInputFromWorkspace(args: RunRoomTurnInput): RunPreparedRoomTurnInput {
+async function buildPreparedInputFromWorkspace(args: RunRoomTurnInput): Promise<RunPreparedRoomTurnInput> {
   const room = args.workspace.rooms.find((entry) => entry.id === args.roomId);
   if (!room) {
     throw new Error(`Room ${args.roomId} does not exist.`);
   }
 
-  const agentDef = getRoomAgent(args.agentId);
+  const agentDefinitions = await listAgentDefinitions();
+  const agentDef = getRoomAgent(args.agentId, agentDefinitions);
   return {
     message: args.message,
     settings: args.settings,
@@ -371,7 +373,7 @@ function buildPreparedInputFromWorkspace(args: RunRoomTurnInput): RunPreparedRoo
       instruction: agentDef.instruction,
     },
     attachedRooms: getAttachedRoomsForAgent(args.workspace, args.agentId, room.id),
-    knownAgents: createKnownAgentCards(),
+    knownAgents: createKnownAgentCards(agentDefinitions),
     roomHistoryById: getRoomHistoryByIdForAgent(args.workspace, args.agentId),
     signal: args.signal,
   };
@@ -557,7 +559,7 @@ export async function runPreparedRoomTurn(
 
 export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<RunRoomTurnResult> {
   try {
-    return await runPreparedRoomTurn(buildPreparedInputFromWorkspace(args));
+    return await runPreparedRoomTurn(await buildPreparedInputFromWorkspace(args));
   } catch (error) {
     if (!(error instanceof RoomTurnExecutionError)) {
       throw error;

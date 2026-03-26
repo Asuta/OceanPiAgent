@@ -6,6 +6,7 @@ import type {
   AgentSharedState,
   AssistantMessageMeta,
   AttachedRoomDefinition,
+  RoomAgentDefinition,
   RoomAgentId,
   RoomChatResponseBody,
   RoomHistoryMessageSummary,
@@ -20,7 +21,6 @@ import {
   applyMessageReceiptUpdate,
   createAgentSharedState,
   createTimestamp,
-  getRoomAgent,
 } from "@/lib/chat/workspace-domain";
 import { readRoomStream as processRoomStream } from "@/components/workspace/room-stream";
 import type { ActiveSchedulerRun } from "@/components/workspace/scheduler";
@@ -71,6 +71,7 @@ export function useRoomExecution(args: {
   updateAgentState: (agentId: RoomAgentId, updater: (state: AgentSharedState) => AgentSharedState) => void;
   applyReceiptUpdateToAllAgentConsoles: (update: RoomMessageReceiptUpdate) => void;
   applyRoomToolActions: (actions: RoomToolActionUnion[], actorAgentId: RoomAgentId) => void;
+  getAgentDefinition: (agentId: RoomAgentId) => RoomAgentDefinition;
   getAttachedRoomsForAgent: (agentId: RoomAgentId, currentRoomId: string, currentRoomTitle: string) => AttachedRoomDefinition[];
   getKnownAgentsForToolContext: () => AgentInfoCard[];
   getRoomHistoryByIdForAgent: (agentId: RoomAgentId) => Record<string, RoomHistoryMessageSummary[]>;
@@ -89,6 +90,7 @@ export function useRoomExecution(args: {
     updateAgentState,
     applyReceiptUpdateToAllAgentConsoles,
     applyRoomToolActions,
+    getAgentDefinition,
     getAttachedRoomsForAgent,
     getKnownAgentsForToolContext,
     getRoomHistoryByIdForAgent,
@@ -275,7 +277,7 @@ export function useRoomExecution(args: {
       }
 
       const roomTitle = roomSnapshot.title;
-      const agent = getRoomAgent(params.agentId);
+      const agent = getAgentDefinition(params.agentId);
       const previousActiveRun = getActiveAgentRun(agent.id);
       const pendingTurn: AgentRoomTurn = {
         id: createUuid(),
@@ -476,6 +478,7 @@ export function useRoomExecution(args: {
       applyRoomToolActions,
       finishAgentRun,
       getActiveAgentRun,
+      getAgentDefinition,
       getAttachedRoomsForAgent,
       getKnownAgentsForToolContext,
       getRoomHistoryByIdForAgent,

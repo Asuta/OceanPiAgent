@@ -6,7 +6,7 @@ import {
   type RoomWorkspaceState,
 } from "@/lib/chat/types";
 
-export const roomAgentIdSchema = z.enum(["concierge", "researcher", "operator"]);
+export const roomAgentIdSchema = z.string().trim().min(1).max(120);
 const providerKeySchema = z.enum(["openai", "right_codes", "generic"]);
 const providerModeSchema = z.enum(["auto", "openai", "right_codes", "generic"]);
 const apiFormatSchema = z.enum(["chat_completions", "responses"]);
@@ -271,11 +271,7 @@ const roomSessionSchema = z.object({
 
 export const roomWorkspaceStateSchema = z.object({
   rooms: z.array(roomSessionSchema),
-  agentStates: z.object({
-    concierge: agentSharedStateSchema,
-    researcher: agentSharedStateSchema,
-    operator: agentSharedStateSchema,
-  }).strict(),
+  agentStates: z.record(roomAgentIdSchema, agentSharedStateSchema),
   activeRoomId: z.string(),
   selectedConsoleAgentId: roomAgentIdSchema.optional(),
 }).strict();

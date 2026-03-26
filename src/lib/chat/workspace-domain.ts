@@ -58,8 +58,32 @@ export function createTimestamp(): string {
   return new Date().toISOString();
 }
 
-export function getRoomAgent(agentId: RoomAgentId): RoomAgentDefinition {
-  return ROOM_AGENTS.find((agent) => agent.id === agentId) ?? ROOM_AGENTS[0];
+function formatAgentLabel(agentId: string): string {
+  const trimmed = agentId.trim();
+  if (!trimmed) {
+    return "Agent";
+  }
+
+  return trimmed
+    .split(/[-_\s]+/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || trimmed;
+}
+
+export function createFallbackRoomAgent(agentId: RoomAgentId): RoomAgentDefinition {
+  return {
+    id: agentId,
+    label: formatAgentLabel(agentId),
+    summary: `Custom agent ${agentId}.`,
+    skills: [],
+    workingStyle: "Custom, workspace-backed agent.",
+    instruction: "",
+  };
+}
+
+export function getRoomAgent(agentId: RoomAgentId, agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): RoomAgentDefinition {
+  return agentDefinitions.find((agent) => agent.id === agentId) ?? createFallbackRoomAgent(agentId);
 }
 
 export function sortRoomsByUpdatedAt(rooms: RoomSession[]): RoomSession[] {
@@ -78,12 +102,9 @@ export function createAgentSharedState(overrides?: Partial<AgentSharedState>): A
   };
 }
 
-export function createInitialAgentStates(): Record<RoomAgentId, AgentSharedState> {
-  return {
-    concierge: createAgentSharedState(),
-    researcher: createAgentSharedState(),
-    operator: createAgentSharedState(),
-  };
+export function createInitialAgentStates(agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): Record<RoomAgentId, AgentSharedState> {
+  const definitions = agentDefinitions.length > 0 ? agentDefinitions : [getRoomAgent(DEFAULT_AGENT_ID)];
+  return Object.fromEntries(definitions.map((agent) => [agent.id, createAgentSharedState()])) as Record<RoomAgentId, AgentSharedState>;
 }
 
 export function createHumanParticipant(name: string, id = DEFAULT_LOCAL_PARTICIPANT_ID): RoomParticipant {
@@ -100,9 +121,9 @@ export function createHumanParticipant(name: string, id = DEFAULT_LOCAL_PARTICIP
   };
 }
 
-export function createAgentParticipant(agentId: RoomAgentId, order: number): RoomParticipant {
+export function createAgentParticipant(agentId: RoomAgentId, order: number, agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): RoomParticipant {
   const timestamp = createTimestamp();
-  const agent = getRoomAgent(agentId);
+  const agent = getRoomAgent(agentId, agentDefinitions);
   return {
     id: agentId,
     name: agent.label,
@@ -189,11 +210,11 @@ export function createSchedulerState(agentParticipantId: string | null): RoomSch
   };
 }
 
-export function createRoomSession(index: number, agentId: RoomAgentId = DEFAULT_AGENT_ID): RoomSession {
+export function createRoomSession(index: number, agentId: RoomAgentId = DEFAULT_AGENT_ID, agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): RoomSession {
   const timestamp = createTimestamp();
   const participants = sortRoomParticipants([
     createHumanParticipant(DEFAULT_LOCAL_PARTICIPANT_SENDER.name),
-    createAgentParticipant(agentId, 1),
+    createAgentParticipant(agentId, 1, agentDefinitions),
   ]);
 
   return {
@@ -213,11 +234,11 @@ export function createRoomSession(index: number, agentId: RoomAgentId = DEFAULT_
   };
 }
 
-export function createDefaultWorkspaceState(): RoomWorkspaceState {
-  const initialRoom = createRoomSession(1);
+export function createDefaultWorkspaceState(agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): RoomWorkspaceState {
+  const initialRoom = createRoomSession(1, DEFAULT_AGENT_ID, agentDefinitions);
   return {
     rooms: [initialRoom],
-    agentStates: createInitialAgentStates(),
+    agentStates: createInitialAgentStates(agentDefinitions),
     activeRoomId: initialRoom.id,
     selectedConsoleAgentId: initialRoom.agentId,
   };
@@ -436,8 +457,8 @@ export function createRoomHistorySummary(room: RoomSession): RoomHistoryMessageS
   }));
 }
 
-export function createKnownAgentCards(): AgentInfoCard[] {
-  return ROOM_AGENTS.map((agent) => ({
+export function createKnownAgentCards(agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): AgentInfoCard[] {
+  return agentDefinitions.map((agent) => ({
     agentId: agent.id,
     label: agent.label,
     summary: agent.summary,
@@ -461,10 +482,11 @@ export function createAgentOwnedRoomSession(
   title: string,
   ownerAgentId: RoomAgentId,
   agentIds: RoomAgentId[],
+  agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS,
 ): RoomSession {
   const timestamp = createTimestamp();
   const uniqueAgentIds = [...new Set(agentIds.length > 0 ? agentIds : [ownerAgentId])];
-  const participants = sortRoomParticipants(uniqueAgentIds.map((agentId, index) => createAgentParticipant(agentId, index + 1)));
+  const participants = sortRoomParticipants(uniqueAgentIds.map((agentId, index) => createAgentParticipant(agentId, index + 1, agentDefinitions)));
 
   let room: RoomSession = {
     id: roomId,
@@ -483,7 +505,7 @@ export function createAgentOwnedRoomSession(
   };
 
   const memberNames = participants.map((participant) => participant.name).join(", ");
-  room = appendMessageToRoom(room, createSystemRoomEvent(room, `${getRoomAgent(ownerAgentId).label} created this room with ${memberNames}.`));
+  room = appendMessageToRoom(room, createSystemRoomEvent(room, `${getRoomAgent(ownerAgentId, agentDefinitions).label} created this room with ${memberNames}.`));
   return room;
 }
 
@@ -491,6 +513,7 @@ export function reduceRoomManagementActions(
   currentRooms: RoomSession[],
   actions: RoomToolActionUnion[],
   actorAgentId: RoomAgentId,
+  agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS,
 ): RoomSession[] {
   let nextRooms = currentRooms;
 
@@ -503,7 +526,7 @@ export function reduceRoomManagementActions(
       if (nextRooms.some((room) => room.id === action.roomId)) {
         continue;
       }
-      const nextRoom = createAgentOwnedRoomSession(action.roomId, action.title, actorAgentId, action.agentIds);
+      const nextRoom = createAgentOwnedRoomSession(action.roomId, action.title, actorAgentId, action.agentIds, agentDefinitions);
       nextRooms = [nextRoom, ...nextRooms];
       continue;
     }
@@ -522,11 +545,11 @@ export function reduceRoomManagementActions(
         }
         let nextRoom = syncRoomParticipants(
           room,
-          [...room.participants, ...additions.map((agentId, index) => createAgentParticipant(agentId, getAgentParticipants(room).length + index + 1))],
+          [...room.participants, ...additions.map((agentId, index) => createAgentParticipant(agentId, getAgentParticipants(room).length + index + 1, agentDefinitions))],
         );
         nextRoom = appendMessageToRoom(
           nextRoom,
-          createSystemRoomEvent(nextRoom, `${getRoomAgent(actorAgentId).label} added ${additions.map((agentId) => getRoomAgent(agentId).label).join(", ")} to the room.`),
+          createSystemRoomEvent(nextRoom, `${getRoomAgent(actorAgentId, agentDefinitions).label} added ${additions.map((agentId) => getRoomAgent(agentId, agentDefinitions).label).join(", ")} to the room.`),
         );
         return nextRoom;
       });
@@ -542,7 +565,7 @@ export function reduceRoomManagementActions(
           room,
           room.participants.filter((participant) => participant.id !== actorAgentId),
         );
-        nextRoom = appendMessageToRoom(nextRoom, createSystemRoomEvent(nextRoom, `${getRoomAgent(actorAgentId).label} left the room.`));
+        nextRoom = appendMessageToRoom(nextRoom, createSystemRoomEvent(nextRoom, `${getRoomAgent(actorAgentId, agentDefinitions).label} left the room.`));
         return nextRoom;
       });
       continue;
@@ -563,7 +586,7 @@ export function reduceRoomManagementActions(
         );
         nextRoom = appendMessageToRoom(
           nextRoom,
-          createSystemRoomEvent(nextRoom, `${getRoomAgent(actorAgentId).label} removed ${removedParticipant.name} from the room.`),
+          createSystemRoomEvent(nextRoom, `${getRoomAgent(actorAgentId, agentDefinitions).label} removed ${removedParticipant.name} from the room.`),
         );
         return nextRoom;
       });

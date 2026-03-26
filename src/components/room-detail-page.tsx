@@ -11,12 +11,11 @@ import {
   formatMessageForTranscript,
 } from "@/lib/chat/message-attachments";
 import {
-  ROOM_AGENTS,
+  DEFAULT_AGENT_ID,
   formatTimestamp,
   getHumanParticipants,
   getPrimaryRoomAgentId,
   getReceiptInlineNote,
-  getRoomAgent,
   getToolStats,
   useWorkspace,
 } from "@/components/workspace-provider";
@@ -224,6 +223,7 @@ function getMessageCardClass(message: RoomMessage) {
 export function RoomDetailPage({ roomId }: { roomId: string }) {
   const router = useRouter();
   const {
+    agents,
     rooms,
     activeRooms,
     agentStates,
@@ -250,6 +250,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     isRoomRunning,
     clearAgentConsole,
     resetAgentContext,
+    getAgentDefinition,
   } = useWorkspace();
 
   const [inspectorTab, setInspectorTab] = useState<"console" | "room">("console");
@@ -385,7 +386,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   }, [humanParticipants, room]);
   const selectedSenderId = room ? selectedSenderByRoomId[room.id] : undefined;
   const selectedSender = availableSenders.find((participant) => participant.id === selectedSenderId) ?? availableSenders[0] ?? null;
-  const primaryAgentId = room ? getPrimaryRoomAgentId(room) : "concierge";
+  const primaryAgentId = room ? getPrimaryRoomAgentId(room) : DEFAULT_AGENT_ID;
   const consoleAgentId = (selectedConsoleAgentId ?? primaryAgentId) as RoomAgentId;
   const consoleAgentState = agentStates[consoleAgentId];
   const titleDraft = room ? titleDraftByRoomId[room.id] ?? room.title : "";
@@ -701,11 +702,11 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               <div className="room-chat-titleline">
                 <h1>{room.title}</h1>
                 <span className={isRunning ? "thread-status running" : "thread-status idle"}>{isRunning ? "处理中" : "空闲"}</span>
-                <span className="meta-chip subtle">{getRoomAgent(primaryAgentId).label}</span>
+                <span className="meta-chip subtle">{getAgentDefinition(primaryAgentId).label}</span>
                 <span className="meta-chip subtle">{room.roomMessages.length} 条消息</span>
               </div>
               <p className="thread-panel-copy">
-                {isRunning ? `${activeParticipant?.name || getRoomAgent(primaryAgentId).label} 正在继续处理这条会话。` : "当前房间已准备就绪，可以直接继续对话。"}
+                {isRunning ? `${activeParticipant?.name || getAgentDefinition(primaryAgentId).label} 正在继续处理这条会话。` : "当前房间已准备就绪，可以直接继续对话。"}
               </p>
             </div>
 
@@ -742,7 +743,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
           {isRunning ? (
             <div className="thread-live-banner" role="status" aria-live="polite">
               <div className="thread-live-copy">
-                <strong>{activeParticipant?.name || getRoomAgent(primaryAgentId).label} 正在继续处理这条会话</strong>
+                <strong>{activeParticipant?.name || getAgentDefinition(primaryAgentId).label} 正在继续处理这条会话</strong>
                 <p>如果你现在发送新消息，会中断当前轮询并接管为新的上下文。</p>
               </div>
               <span className="thread-live-badge">live</span>
@@ -995,7 +996,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                         value={consoleAgentId}
                         onChange={(event) => setSelectedConsoleAgentId(event.target.value as RoomAgentId)}
                       >
-                        {ROOM_AGENTS.map((agent) => (
+                        {agents.map((agent) => (
                           <option key={agent.id} value={agent.id}>
                             {agent.label}
                           </option>
@@ -1133,7 +1134,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                             <div className="participant-meta">
                               <strong>{participant.name}</strong>
                               <p>
-                                {isAgent ? `${getRoomAgent(participant.agentId ?? primaryAgentId).summary}` : "人工参与者"}
+                                {isAgent ? `${getAgentDefinition(participant.agentId ?? primaryAgentId).summary}` : "人工参与者"}
                               </p>
                             </div>
                             <div className="participant-actions">
@@ -1184,7 +1185,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                     </div>
 
                     <div className="agent-preset-row top-gap">
-                      {ROOM_AGENTS.map((agent) => {
+                      {agents.map((agent) => {
                         const exists = room.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === agent.id);
                         return (
                           <button

@@ -102,7 +102,7 @@ export const optionalUrlString = z.preprocess(
 );
 
 export const emptyArgsSchema = z.object({}).strict();
-export const roomAgentIdSchema = z.enum(["concierge", "researcher", "operator"]);
+export const roomAgentIdSchema = z.string().trim().min(1).max(120);
 
 export const webFetchArgsSchema = z.object({
   url: z.string().url(),

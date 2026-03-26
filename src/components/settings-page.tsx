@@ -28,11 +28,11 @@ import {
   type ModelConfig,
   type ModelConfigKind,
   type ProviderMode,
+  type RoomAgentDefinition,
   type ThinkingLevel,
 } from "@/lib/chat/types";
 import {
   formatTimestamp,
-  ROOM_AGENTS,
   getCompatibilityDetailPills,
   getCompatibilityModeLabel,
   useWorkspace,
@@ -75,6 +75,28 @@ interface ModelConfigDraft {
   apiKey: string;
   clearApiKey: boolean;
   builtInProviderId: PiProviderId;
+}
+
+interface AgentEditorDraft {
+  label: string;
+  summary: string;
+  workingStyle: string;
+  skillsText: string;
+  instruction: string;
+}
+
+function createAgentEditorDraft(agent: RoomAgentDefinition): AgentEditorDraft {
+  return {
+    label: agent.label,
+    summary: agent.summary,
+    workingStyle: agent.workingStyle,
+    skillsText: agent.skills.join(", "),
+    instruction: agent.instruction,
+  };
+}
+
+function parseSkillsText(value: string): string[] {
+  return [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))];
 }
 
 function getThinkingNote(args: {
@@ -201,16 +223,32 @@ async function deleteModelConfigRequest(configId: string): Promise<void> {
 
 export function SettingsPage() {
   const {
+    agents,
     agentStates,
     agentCompactionFeedback,
     isAgentRunning,
     isAgentCompacting,
     clearAgentConsole,
     compactAgentContext,
+    createAgentDefinition,
     updateAgentSettings,
+    updateAgentDefinition,
   } = useWorkspace();
   const [settingsTab, setSettingsTab] = useState<"models" | "agents" | "runtime">("models");
   const [availableSkills, setAvailableSkills] = useState<WorkspaceSkillSummary[]>([]);
+  const [agentDraftsById, setAgentDraftsById] = useState<Record<string, AgentEditorDraft>>({});
+  const [savingAgentIds, setSavingAgentIds] = useState<Record<string, boolean>>({});
+  const [agentErrorById, setAgentErrorById] = useState<Record<string, string>>({});
+  const [creatingAgent, setCreatingAgent] = useState(false);
+  const [createAgentError, setCreateAgentError] = useState("");
+  const [newAgentId, setNewAgentId] = useState("");
+  const [newAgentDraft, setNewAgentDraft] = useState<AgentEditorDraft>({
+    label: "",
+    summary: "",
+    workingStyle: "",
+    skillsText: "",
+    instruction: "",
+  });
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [selectedModelConfigId, setSelectedModelConfigId] = useState<string>(NEW_MODEL_CONFIG_ID);
   const [modelConfigDraft, setModelConfigDraft] = useState<ModelConfigDraft>(() => ({
@@ -260,6 +298,18 @@ export function SettingsPage() {
   }, []);
 
   useEffect(() => {
+    setAgentDraftsById((current) => {
+      const next = { ...current };
+      for (const agent of agents) {
+        if (!next[agent.id]) {
+          next[agent.id] = createAgentEditorDraft(agent);
+        }
+      }
+      return next;
+    });
+  }, [agents]);
+
+  useEffect(() => {
     if (selectedModelConfigId === NEW_MODEL_CONFIG_ID) {
       return;
     }
@@ -288,7 +338,7 @@ export function SettingsPage() {
       let nextModelConfigs = [...modelConfigs];
       const configBySignature = new Map(nextModelConfigs.map((modelConfig) => [getModelConfigSignature(modelConfig), modelConfig]));
 
-      for (const agent of ROOM_AGENTS) {
+      for (const agent of agents) {
         const state = agentStates[agent.id];
         if (state.settings.modelConfigId) {
           continue;
@@ -327,10 +377,10 @@ export function SettingsPage() {
         updateAgentSettings(agent.id, applyModelConfigToSettings(state.settings, modelConfig));
       }
     })();
-  }, [agentStates, loadingModelConfigs, modelConfigs, updateAgentSettings]);
+  }, [agentStates, agents, loadingModelConfigs, modelConfigs, updateAgentSettings]);
 
   const syncAgentsWithModelConfig = (modelConfig: ModelConfig) => {
-    for (const agent of ROOM_AGENTS) {
+    for (const agent of agents) {
       const state = agentStates[agent.id];
       if (state.settings.modelConfigId === modelConfig.id) {
         updateAgentSettings(agent.id, applyModelConfigToSettings(state.settings, modelConfig));
@@ -391,7 +441,7 @@ export function SettingsPage() {
 
     try {
       await deleteModelConfigRequest(selectedModelConfigId);
-      for (const agent of ROOM_AGENTS) {
+      for (const agent of agents) {
         const state = agentStates[agent.id];
         if (state.settings.modelConfigId === selectedModelConfigId) {
           updateAgentSettings(agent.id, { modelConfigId: null });
@@ -408,9 +458,106 @@ export function SettingsPage() {
 
   const selectedModelConfig = modelConfigs.find((modelConfig) => modelConfig.id === selectedModelConfigId) ?? null;
 
-  const renderAgentCard = (agent: (typeof ROOM_AGENTS)[number], view: "agents" | "runtime") => {
+  const updateAgentDraft = (agentId: string, patch: Partial<AgentEditorDraft>) => {
+    setAgentDraftsById((current) => ({
+      ...current,
+      [agentId]: {
+        ...(current[agentId]
+          ?? createAgentEditorDraft(
+            agents.find((agent) => agent.id === agentId) ?? {
+              id: agentId,
+              label: agentId,
+              summary: "",
+              skills: [],
+              workingStyle: "",
+              instruction: "",
+            },
+          )),
+        ...patch,
+      },
+    }));
+  };
+
+  const handleSaveAgent = async (agentId: string) => {
+    const draft = agentDraftsById[agentId];
+    if (!draft || !draft.label.trim() || !draft.summary.trim() || !draft.workingStyle.trim()) {
+      setAgentErrorById((current) => ({
+        ...current,
+        [agentId]: "请先填写 label、summary 和 working style。",
+      }));
+      return;
+    }
+
+    setSavingAgentIds((current) => ({ ...current, [agentId]: true }));
+    setAgentErrorById((current) => ({ ...current, [agentId]: "" }));
+    try {
+      const savedAgent = await updateAgentDefinition(agentId, {
+        label: draft.label,
+        summary: draft.summary,
+        workingStyle: draft.workingStyle,
+        skills: parseSkillsText(draft.skillsText),
+        instruction: draft.instruction,
+      });
+      setAgentDraftsById((current) => ({
+        ...current,
+        [agentId]: createAgentEditorDraft(savedAgent),
+      }));
+    } catch (error) {
+      setAgentErrorById((current) => ({
+        ...current,
+        [agentId]: error instanceof Error ? error.message : "保存 Agent 失败。",
+      }));
+    } finally {
+      setSavingAgentIds((current) => {
+        const next = { ...current };
+        delete next[agentId];
+        return next;
+      });
+    }
+  };
+
+  const handleCreateAgent = async () => {
+    if (!newAgentId.trim() || !newAgentDraft.label.trim() || !newAgentDraft.summary.trim() || !newAgentDraft.workingStyle.trim()) {
+      setCreateAgentError("请先填写 Agent ID、Label、Summary 和 Working Style。");
+      return;
+    }
+
+    setCreatingAgent(true);
+    setCreateAgentError("");
+    try {
+      const createdAgent = await createAgentDefinition({
+        id: newAgentId,
+        label: newAgentDraft.label,
+        summary: newAgentDraft.summary,
+        workingStyle: newAgentDraft.workingStyle,
+        skills: parseSkillsText(newAgentDraft.skillsText),
+        instruction: newAgentDraft.instruction,
+      });
+      setNewAgentId("");
+      setNewAgentDraft({
+        label: "",
+        summary: "",
+        workingStyle: "",
+        skillsText: "",
+        instruction: "",
+      });
+      setAgentDraftsById((current) => ({
+        ...current,
+        [createdAgent.id]: createAgentEditorDraft(createdAgent),
+      }));
+    } catch (error) {
+      setCreateAgentError(error instanceof Error ? error.message : "创建 Agent 失败。");
+    } finally {
+      setCreatingAgent(false);
+    }
+  };
+
+  const renderAgentCard = (agent: RoomAgentDefinition, view: "agents" | "runtime") => {
     const state = agentStates[agent.id];
+    const agentDraft = agentDraftsById[agent.id] ?? createAgentEditorDraft(agent);
     const compactionFeedback = agentCompactionFeedback[agent.id];
+    const agentError = agentErrorById[agent.id] ?? "";
+    const isSavingAgent = Boolean(savingAgentIds[agent.id]);
     const isRunning = isAgentRunning(agent.id);
     const isCompacting = isAgentCompacting(agent.id);
     const compatibilityPills = getCompatibilityDetailPills(state.compatibility);
@@ -438,6 +585,72 @@ export function SettingsPage() {
               <span className="meta-chip subtle">{configuredApiLabel}</span>
               <span className="meta-chip subtle">{isRunning ? "运行中" : "空闲"}</span>
             </div>
+          </div>
+
+          <div className="form-grid two-columns top-gap">
+            <label className="field-block" htmlFor={`${agent.id}-label`}>
+              <span>Label</span>
+              <input
+                id={`${agent.id}-label`}
+                className="text-input"
+                value={agentDraft.label}
+                onChange={(event) => updateAgentDraft(agent.id, { label: event.target.value })}
+                disabled={isRunning || isSavingAgent}
+              />
+            </label>
+
+            <label className="field-block" htmlFor={`${agent.id}-skills`}>
+              <span>Skills</span>
+              <input
+                id={`${agent.id}-skills`}
+                className="text-input"
+                value={agentDraft.skillsText}
+                onChange={(event) => updateAgentDraft(agent.id, { skillsText: event.target.value })}
+                disabled={isRunning || isSavingAgent}
+              />
+            </label>
+
+            <label className="field-block" htmlFor={`${agent.id}-summary`}>
+              <span>Summary</span>
+              <textarea
+                id={`${agent.id}-summary`}
+                className="text-area compact"
+                value={agentDraft.summary}
+                onChange={(event) => updateAgentDraft(agent.id, { summary: event.target.value })}
+                disabled={isRunning || isSavingAgent}
+              />
+            </label>
+
+            <label className="field-block" htmlFor={`${agent.id}-style`}>
+              <span>Working Style</span>
+              <textarea
+                id={`${agent.id}-style`}
+                className="text-area compact"
+                value={agentDraft.workingStyle}
+                onChange={(event) => updateAgentDraft(agent.id, { workingStyle: event.target.value })}
+                disabled={isRunning || isSavingAgent}
+              />
+            </label>
+          </div>
+
+          <label className="field-block top-gap" htmlFor={`${agent.id}-private-prompt`}>
+            <span>Private Prompt</span>
+            <textarea
+              id={`${agent.id}-private-prompt`}
+              className="text-area compact"
+              value={agentDraft.instruction}
+              onChange={(event) => updateAgentDraft(agent.id, { instruction: event.target.value })}
+              placeholder="写入这个 Agent workspace 的私有提示词。"
+              disabled={isRunning || isSavingAgent}
+            />
+          </label>
+
+          {agentError ? <p className="muted-copy top-gap danger-text">{agentError}</p> : null}
+
+          <div className="card-actions compact-right top-gap">
+            <button type="button" className="ghost-button" onClick={() => void handleSaveAgent(agent.id)} disabled={isRunning || isSavingAgent}>
+              {isSavingAgent ? "保存中..." : "保存 Agent 资料"}
+            </button>
           </div>
 
           <div className="form-grid two-columns">
@@ -519,13 +732,13 @@ export function SettingsPage() {
           </div>
 
           <label className="field-block" htmlFor={`${agent.id}-prompt`}>
-            <span>System Prompt</span>
+            <span>Operator Override</span>
             <textarea
               id={`${agent.id}-prompt`}
               className="text-area compact"
               value={state.settings.systemPrompt}
               onChange={(event) => updateAgentSettings(agent.id, { systemPrompt: event.target.value })}
-              placeholder="为这个 Agent 增加额外的行为约束。"
+              placeholder="追加到基础 system prompt 的临时 operator note。"
               disabled={isRunning}
             />
           </label>
@@ -995,9 +1208,90 @@ export function SettingsPage() {
         </section>
       ) : null}
 
-      {settingsTab === "agents" ? <section className="settings-grid page-enter page-enter-delay-1">{ROOM_AGENTS.map((agent) => renderAgentCard(agent, "agents"))}</section> : null}
+      {settingsTab === "agents" ? (
+        <>
+          <section className="surface-panel page-enter page-enter-delay-1">
+            <div className="settings-card-header">
+              <div>
+                <p className="section-label">Agent Factory</p>
+                <h2>创建新的 workspace-backed Agent</h2>
+                <p>新 Agent 会立即生成自己的 workspace 文件夹和 `.agent/system-prompt.md`。</p>
+              </div>
+            </div>
 
-      {settingsTab === "runtime" ? <section className="settings-grid page-enter page-enter-delay-1">{ROOM_AGENTS.map((agent) => renderAgentCard(agent, "runtime"))}</section> : null}
+            <div className="form-grid two-columns top-gap">
+              <label className="field-block" htmlFor="new-agent-id">
+                <span>Agent ID</span>
+                <input id="new-agent-id" className="text-input" value={newAgentId} onChange={(event) => setNewAgentId(event.target.value)} placeholder="market-watcher" />
+              </label>
+              <label className="field-block" htmlFor="new-agent-label">
+                <span>Label</span>
+                <input
+                  id="new-agent-label"
+                  className="text-input"
+                  value={newAgentDraft.label}
+                  onChange={(event) => setNewAgentDraft((current) => ({ ...current, label: event.target.value }))}
+                  placeholder="Market Watcher"
+                />
+              </label>
+              <label className="field-block" htmlFor="new-agent-summary">
+                <span>Summary</span>
+                <textarea
+                  id="new-agent-summary"
+                  className="text-area compact"
+                  value={newAgentDraft.summary}
+                  onChange={(event) => setNewAgentDraft((current) => ({ ...current, summary: event.target.value }))}
+                  placeholder="一句话说明这个 Agent 的主要职责。"
+                />
+              </label>
+              <label className="field-block" htmlFor="new-agent-style">
+                <span>Working Style</span>
+                <textarea
+                  id="new-agent-style"
+                  className="text-area compact"
+                  value={newAgentDraft.workingStyle}
+                  onChange={(event) => setNewAgentDraft((current) => ({ ...current, workingStyle: event.target.value }))}
+                  placeholder="这个 Agent 的风格、节奏和偏好。"
+                />
+              </label>
+            </div>
+
+            <label className="field-block top-gap" htmlFor="new-agent-skills">
+              <span>Skills</span>
+              <input
+                id="new-agent-skills"
+                className="text-input"
+                value={newAgentDraft.skillsText}
+                onChange={(event) => setNewAgentDraft((current) => ({ ...current, skillsText: event.target.value }))}
+                placeholder="Research, Planning, Reporting"
+              />
+            </label>
+
+            <label className="field-block top-gap" htmlFor="new-agent-prompt">
+              <span>Private Prompt</span>
+              <textarea
+                id="new-agent-prompt"
+                className="text-area compact"
+                value={newAgentDraft.instruction}
+                onChange={(event) => setNewAgentDraft((current) => ({ ...current, instruction: event.target.value }))}
+                placeholder="写入这个 Agent workspace 的私有提示词。"
+              />
+            </label>
+
+            {createAgentError ? <p className="muted-copy top-gap danger-text">{createAgentError}</p> : null}
+
+            <div className="card-actions compact-right top-gap">
+              <button type="button" className="ghost-button" onClick={() => void handleCreateAgent()} disabled={creatingAgent}>
+                {creatingAgent ? "创建中..." : "创建 Agent"}
+              </button>
+            </div>
+          </section>
+
+          <section className="settings-grid page-enter page-enter-delay-1">{agents.map((agent) => renderAgentCard(agent, "agents"))}</section>
+        </>
+      ) : null}
+
+      {settingsTab === "runtime" ? <section className="settings-grid page-enter page-enter-delay-1">{agents.map((agent) => renderAgentCard(agent, "runtime"))}</section> : null}
     </div>
   );
 }
