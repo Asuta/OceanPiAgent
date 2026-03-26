@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import {
   ALLOWED_MESSAGE_IMAGE_MIME_TYPES,
   MAX_MESSAGE_IMAGE_ATTACHMENTS,
@@ -456,9 +456,16 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     setUploadError("");
   }, []);
 
-  const handleImageSelection = useCallback(
-    async (event: ChangeEvent<HTMLInputElement>) => {
-      const selectedFiles = Array.from(event.target.files ?? []);
+  const resetPendingAttachments = useCallback(() => {
+    setPendingAttachments([]);
+    setUploadError("");
+    if (imageInputRef.current) {
+      imageInputRef.current.value = "";
+    }
+  }, []);
+
+  const uploadImageFiles = useCallback(
+    async (selectedFiles: File[]) => {
       if (selectedFiles.length === 0) {
         return;
       }
@@ -466,14 +473,21 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
       const remainingSlots = Math.max(0, MAX_MESSAGE_IMAGE_ATTACHMENTS - pendingAttachments.length);
       if (remainingSlots === 0) {
         setUploadError(`最多只能上传 ${MAX_MESSAGE_IMAGE_ATTACHMENTS} 张图片。`);
-        event.target.value = "";
         return;
       }
 
-      const filesToUpload = selectedFiles.slice(0, remainingSlots);
+      const imageFiles = selectedFiles.filter((file) => ALLOWED_MESSAGE_IMAGE_MIME_TYPES.includes(file.type as (typeof ALLOWED_MESSAGE_IMAGE_MIME_TYPES)[number]));
+      if (imageFiles.length === 0) {
+        setUploadError("只支持 PNG / JPEG / WebP 图片。");
+        return;
+      }
+
+      const filesToUpload = imageFiles.slice(0, remainingSlots);
       setIsUploadingImages(true);
       setUploadError(
-        filesToUpload.length < selectedFiles.length ? `最多只能上传 ${MAX_MESSAGE_IMAGE_ATTACHMENTS} 张图片，已忽略多余文件。` : "",
+        filesToUpload.length < imageFiles.length || imageFiles.length < selectedFiles.length
+          ? `最多只能上传 ${MAX_MESSAGE_IMAGE_ATTACHMENTS} 张图片，已忽略不支持或超出的文件。`
+          : "",
       );
 
       try {
@@ -498,10 +512,38 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
         setUploadError(error instanceof Error ? error.message : "图片上传失败。");
       } finally {
         setIsUploadingImages(false);
-        event.target.value = "";
       }
     },
     [pendingAttachments.length],
+  );
+
+  const handleImageSelection = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const selectedFiles = Array.from(event.target.files ?? []);
+      try {
+        await uploadImageFiles(selectedFiles);
+      } finally {
+        event.target.value = "";
+      }
+    },
+    [uploadImageFiles],
+  );
+
+  const handleComposerPaste = useCallback(
+    (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = Array.from(event.clipboardData.items ?? []);
+      const pastedImageFiles = items
+        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
+
+      if (pastedImageFiles.length === 0) {
+        return;
+      }
+
+      void uploadImageFiles(pastedImageFiles);
+    },
+    [uploadImageFiles],
   );
 
   const submitMessage = useCallback(async () => {
@@ -509,19 +551,23 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
       return;
     }
 
+    const contentToSend = roomDraft;
+    const attachmentsToSend = [...pendingAttachments];
+    resetPendingAttachments();
+
     try {
       await sendMessage({
         roomId: room.id,
-        content: roomDraft,
-        attachments: pendingAttachments,
+        content: contentToSend,
+        attachments: attachmentsToSend,
         senderId: selectedSender.id,
       });
-      setPendingAttachments([]);
-      setUploadError("");
     } catch (error) {
+      setPendingAttachments(attachmentsToSend);
+      setDraft(room.id, contentToSend);
       setUploadError(error instanceof Error ? error.message : "发送消息失败。");
     }
-  }, [canSend, pendingAttachments, room, roomDraft, selectedSender, sendMessage]);
+  }, [canSend, pendingAttachments, resetPendingAttachments, room, roomDraft, selectedSender, sendMessage, setDraft]);
 
   function renderTurnCard(turn: (typeof visibleConsoleTurns)[number], index: number, total: number, groupRoomId: string) {
     const toolStats = getToolStats(turn.tools);
@@ -820,7 +866,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                 {isUploadingImages ? "上传中..." : "添加图片"}
               </button>
               <span className="composer-note">
-                最多 {MAX_MESSAGE_IMAGE_ATTACHMENTS} 张，支持 PNG / JPEG / WebP，单张不超过 {Math.floor(MAX_MESSAGE_IMAGE_BYTES / (1024 * 1024))} MB。
+                最多 {MAX_MESSAGE_IMAGE_ATTACHMENTS} 张，支持 PNG / JPEG / WebP，单张不超过 {Math.floor(MAX_MESSAGE_IMAGE_BYTES / (1024 * 1024))} MB，也可直接粘贴截图。
               </span>
             </div>
 
@@ -851,6 +897,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               className="text-area"
               value={roomDraft}
               onChange={(event) => setDraft(room.id, event.target.value)}
+              onPaste={handleComposerPaste}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
