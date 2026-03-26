@@ -13,14 +13,10 @@ import {
 import {
   ROOM_AGENTS,
   formatTimestamp,
-  getCompatibilityDetailPills,
-  getCompatibilityModeLabel,
   getHumanParticipants,
   getPrimaryRoomAgentId,
   getReceiptInlineNote,
   getRoomAgent,
-  getRoomAgentSummary,
-  getRoomHumanSummary,
   getToolStats,
   useWorkspace,
 } from "@/components/workspace-provider";
@@ -256,7 +252,8 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     resetAgentContext,
   } = useWorkspace();
 
-  const [inspectorTab, setInspectorTab] = useState<"summary" | "console" | "room">("summary");
+  const [inspectorTab, setInspectorTab] = useState<"console" | "room">("console");
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [consoleScope, setConsoleScope] = useState<"room" | "all" | "timeline">("room");
   const [consoleViewMode, setConsoleViewMode] = useState<"formatted" | "raw">("formatted");
   const [newParticipantName, setNewParticipantName] = useState("");
@@ -391,7 +388,6 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const primaryAgentId = room ? getPrimaryRoomAgentId(room) : "concierge";
   const consoleAgentId = (selectedConsoleAgentId ?? primaryAgentId) as RoomAgentId;
   const consoleAgentState = agentStates[consoleAgentId];
-  const compatibilityPills = getCompatibilityDetailPills(consoleAgentState?.compatibility ?? null);
   const titleDraft = room ? titleDraftByRoomId[room.id] ?? room.title : "";
   const activeParticipant = room?.participants.find((participant) => participant.id === room.scheduler.activeParticipantId) ?? null;
   const ownerParticipant = room?.participants.find((participant) => participant.id === room.ownerParticipantId) ?? null;
@@ -409,6 +405,17 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
         : [],
     [consoleAgentState?.agentTurns, room],
   );
+  const roomTurnStats = useMemo(() => {
+    return roomTurns.reduce(
+      (stats, turn) => {
+        stats.turns += 1;
+        stats.tools += turn.tools.length;
+        stats.emissions += turn.emittedMessages.length;
+        return stats;
+      },
+      { turns: 0, tools: 0, emissions: 0 },
+    );
+  }, [roomTurns]);
   const visibleConsoleTurns = useMemo(() => {
     const turns = consoleScope === "room" ? roomTurns : (consoleAgentState?.agentTurns ?? []);
     return [...turns].sort((left, right) => getSortableTime(left.userMessage.createdAt) - getSortableTime(right.userMessage.createdAt));
@@ -686,44 +693,50 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   }
 
   return (
-    <div className="page-stack room-detail-page">
-      <section className="detail-hero surface-panel page-enter">
-        <div>
-          <p className="eyebrow-label">Room Detail</p>
-          <h1>{room.title}</h1>
-          <p>
-            {isRunning ? "房间正在继续轮询 Agent。" : "当前房间已准备就绪，你可以直接继续对话。"} 主要 Agent：{getRoomAgent(primaryAgentId).label}
-          </p>
-        </div>
-
-        <div className="hero-action-group">
-          <div className="meta-chip-row compact">
-            <span className="meta-chip">{getRoomAgentSummary(room)}</span>
-            <span className="meta-chip subtle">{getRoomHumanSummary(room)}</span>
-            <span className="meta-chip subtle">Owner: {ownerParticipant?.name ?? "none"}</span>
-            <span className="meta-chip subtle">{room.roomMessages.length} 条消息</span>
-          </div>
-
-          <div className="card-actions compact-right">
-            <Link href="/settings" className="secondary-button">
-              打开设置
-            </Link>
-            <button type="button" className="ghost-button" onClick={() => clearRoom(room.id)} disabled={isRunning}>
-              清空房间
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <div className="detail-grid page-enter page-enter-delay-1">
-        <section className="surface-panel thread-panel">
-          <div className="thread-panel-header">
-            <div>
-              <p className="section-label">对话</p>
-              <h2>房间消息</h2>
-              <p className="thread-panel-copy">消息区只保留最关键的信息，执行细节在右侧按需展开。</p>
+    <div className="page-stack room-detail-page chat-centric-page">
+      <div className={`room-detail-layout${workbenchOpen ? " sidepanel-open" : ""}`}>
+        <section className="surface-panel thread-panel room-chat-shell page-enter">
+          <div className="room-chat-topbar">
+            <div className="room-chat-titleblock">
+              <div className="room-chat-titleline">
+                <h1>{room.title}</h1>
+                <span className={isRunning ? "thread-status running" : "thread-status idle"}>{isRunning ? "处理中" : "空闲"}</span>
+                <span className="meta-chip subtle">{getRoomAgent(primaryAgentId).label}</span>
+                <span className="meta-chip subtle">{room.roomMessages.length} 条消息</span>
+              </div>
+              <p className="thread-panel-copy">
+                {isRunning ? `${activeParticipant?.name || getRoomAgent(primaryAgentId).label} 正在继续处理这条会话。` : "当前房间已准备就绪，可以直接继续对话。"}
+              </p>
             </div>
-            <span className={isRunning ? "thread-status running" : "thread-status idle"}>{isRunning ? "处理中" : "空闲"}</span>
+
+            <div className="room-chat-toolbar">
+              <button
+                type="button"
+                className={workbenchOpen && inspectorTab === "console" ? "tab-button active" : "tab-button"}
+                onClick={() => {
+                  setInspectorTab("console");
+                  setWorkbenchOpen(true);
+                }}
+              >
+                执行详情
+              </button>
+              <button
+                type="button"
+                className={workbenchOpen && inspectorTab === "room" ? "tab-button active" : "tab-button"}
+                onClick={() => {
+                  setInspectorTab("room");
+                  setWorkbenchOpen(true);
+                }}
+              >
+                房间设置
+              </button>
+              <Link href="/settings" className="secondary-button">
+                打开设置
+              </Link>
+              <button type="button" className="ghost-button" onClick={() => clearRoom(room.id)} disabled={isRunning}>
+                清空房间
+              </button>
+            </div>
           </div>
 
           {isRunning ? (
@@ -937,332 +950,293 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
           </form>
         </section>
 
-        <aside className="surface-panel inspector-panel">
-          <div className="inspector-tabs">
-            <button type="button" className={inspectorTab === "summary" ? "tab-button active" : "tab-button"} onClick={() => setInspectorTab("summary")}>
-              概览
-            </button>
-            <button type="button" className={inspectorTab === "console" ? "tab-button active" : "tab-button"} onClick={() => setInspectorTab("console")}>
-              执行详情
-            </button>
-            <button type="button" className={inspectorTab === "room" ? "tab-button active" : "tab-button"} onClick={() => setInspectorTab("room")}>
-              房间设置
-            </button>
-          </div>
-
-          {inspectorTab === "summary" ? (
-            <div className="inspector-stack">
-              <section className="subtle-panel">
-                <p className="section-label">当前状态</p>
-                <div className="info-list">
-                  <div>
-                    <span>房间状态</span>
-                    <strong>{isRunning ? "处理中" : "空闲"}</strong>
-                  </div>
-                  <div>
-                    <span>主 Agent</span>
-                    <strong>{getRoomAgent(primaryAgentId).label}</strong>
-                  </div>
-                  <div>
-                    <span>房间 Owner</span>
-                    <strong>{ownerParticipant?.name ?? "none"}</strong>
-                  </div>
-                  <div>
-                    <span>最近模型</span>
-                    <strong>{consoleAgentState?.resolvedModel || "尚未请求"}</strong>
-                  </div>
-                </div>
-              </section>
-
-              <section className="subtle-panel">
-                <p className="section-label">参与者</p>
-                <div className="participant-pill-list">
-                  {room.participants.map((participant) => (
-                    <span key={participant.id} className="meta-chip subtle">
-                      {participant.name}{participant.id === room.ownerParticipantId ? " · owner" : ""}
-                    </span>
-                  ))}
-                </div>
-              </section>
-
-              <section className="subtle-panel">
-                <p className="section-label">兼容策略</p>
-                <strong className="panel-lead">{getCompatibilityModeLabel(consoleAgentState?.compatibility ?? null)}</strong>
-                {compatibilityPills.length > 0 ? (
-                  <div className="meta-chip-row compact top-gap">
-                    {compatibilityPills.map((pill) => (
-                      <span key={pill} className="meta-chip subtle">
-                        {pill}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="muted-copy top-gap">第一次请求之后，这里会出现本次上游的兼容策略摘要。</p>
-                )}
-              </section>
-            </div>
-          ) : null}
-
-          {inspectorTab === "console" ? (
-            <div className="inspector-stack">
-              <section className="subtle-panel">
-                <div className="section-heading-row compact-align">
-                  <div>
-                    <p className="section-label">执行视角</p>
-                    <h3>
-                      {consoleScope === "all"
-                        ? "按 Agent 查看全部房间轨迹"
-                        : consoleScope === "timeline"
-                          ? "按执行顺序查看全部房间轨迹"
-                          : "按 Agent 查看当前房间轨迹"}
-                    </h3>
-                  </div>
-                  <select
-                    className="text-input compact-select"
-                    value={consoleAgentId}
-                    onChange={(event) => setSelectedConsoleAgentId(event.target.value as RoomAgentId)}
-                  >
-                    {ROOM_AGENTS.map((agent) => (
-                      <option key={agent.id} value={agent.id}>
-                        {agent.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="segmented-row top-gap">
-                  <button
-                    type="button"
-                    className={consoleScope === "room" ? "tab-button active" : "tab-button"}
-                    onClick={() => setConsoleScope("room")}
-                  >
-                    当前房间
-                  </button>
-                  <button
-                    type="button"
-                    className={consoleScope === "all" ? "tab-button active" : "tab-button"}
-                    onClick={() => setConsoleScope("all")}
-                  >
-                    所有房间
-                  </button>
-                  <button
-                    type="button"
-                    className={consoleScope === "timeline" ? "tab-button active" : "tab-button"}
-                    onClick={() => setConsoleScope("timeline")}
-                  >
-                    执行顺序
-                  </button>
-                </div>
-
-                <div className="segmented-row top-gap">
-                  <button
-                    type="button"
-                    className={consoleViewMode === "formatted" ? "tab-button active" : "tab-button"}
-                    onClick={() => setConsoleViewMode("formatted")}
-                  >
-                    格式化视图
-                  </button>
-                  <button
-                    type="button"
-                    className={consoleViewMode === "raw" ? "tab-button active" : "tab-button"}
-                    onClick={() => setConsoleViewMode("raw")}
-                  >
-                    Raw log
-                  </button>
-                </div>
-
-                <div className="card-actions compact-right top-gap">
-                  <button type="button" className="ghost-button" onClick={() => clearAgentConsole(consoleAgentId)} disabled={isAgentRunning(consoleAgentId)}>
-                    清空显示轨迹
-                  </button>
-                  <button type="button" className="secondary-button" onClick={() => void resetAgentContext(consoleAgentId)} disabled={isAgentRunning(consoleAgentId)}>
-                    重置 Agent 上下文
-                  </button>
-                </div>
-                <p className="composer-note">
-                  清空显示轨迹只移除当前面板记录；重置 Agent 上下文会清空该 Agent 在所有房间共享的服务端记忆。
+        {workbenchOpen ? (
+          <aside className="surface-panel section-panel room-side-panel page-enter page-enter-delay-1">
+            <div className="room-side-panel-header">
+              <div>
+                <p className="section-label">Workbench</p>
+                <h2>{inspectorTab === "console" ? "执行详情" : "房间设置"}</h2>
+                <p className="muted-copy">
+                  {inspectorTab === "console"
+                    ? `当前已记录 ${roomTurnStats.turns} 轮轨迹、${roomTurnStats.tools} 次工具调用。`
+                    : `当前房间有 ${room.participants.length} 位参与者，owner 为 ${ownerParticipant?.name ?? "none"}。`}
                 </p>
-              </section>
-
-              {visibleConsoleTurns.length === 0 ? (
-                <div className="empty-panel">
-                  {consoleScope === "room"
-                    ? "当前房间还没有与这个 Agent 相关的执行记录。"
-                    : "这个 Agent 还没有任何房间执行记录。"}
-                </div>
-              ) : (
-                <div className="stacked-list compact-gap">
-                  {consoleTurnGroups.map((group) => (
-                    <section key={group.roomId} className="subtle-panel">
-                      {consoleScope === "all" ? (
-                        <div className="section-heading-row compact-align">
-                          <div>
-                            <p className="section-label">{group.turns.length} 条轨迹</p>
-                            <h3>{group.roomTitle}</h3>
-                          </div>
-                          <div className="meta-chip-row compact align-end">
-                            {group.roomId === room.id ? <span className="meta-chip">当前房间</span> : null}
-                            {group.roomId !== room.id ? (
-                              <Link href={`/rooms/${group.roomId}`} className="secondary-button">
-                                打开房间
-                              </Link>
-                            ) : null}
-                          </div>
-                        </div>
-                      ) : null}
-
-                      <div className="trace-list top-gap">
-                        {group.turns.map((turn, index) => renderTurnCard(turn, index, group.turns.length, group.roomId))}
-                      </div>
-                    </section>
-                  ))}
-                </div>
-              )}
+              </div>
+              <div className="inspector-tabs">
+                <button type="button" className={inspectorTab === "console" ? "tab-button active" : "tab-button"} onClick={() => setInspectorTab("console")}>
+                  执行详情
+                </button>
+                <button type="button" className={inspectorTab === "room" ? "tab-button active" : "tab-button"} onClick={() => setInspectorTab("room")}>
+                  房间设置
+                </button>
+                <button type="button" className="ghost-button" onClick={() => setWorkbenchOpen(false)}>
+                  收起
+                </button>
+              </div>
             </div>
-          ) : null}
 
-          {inspectorTab === "room" ? (
-            <div className="inspector-stack">
-              <section className="subtle-panel">
-                <p className="section-label">房间标题</p>
-                <div className="inline-action-row stretch">
-                  <input
-                    className="text-input"
-                    value={titleDraft}
-                    onChange={(event) =>
-                      setTitleDraftByRoomId((current) => ({
-                        ...current,
-                        [room.id]: event.target.value,
-                      }))
-                    }
-                  />
-                  <button type="button" className="secondary-button" onClick={() => renameRoom(room.id, titleDraft)} disabled={!titleDraft.trim() || isRunning}>
-                    保存
-                  </button>
-                </div>
-              </section>
-
-              <RoomCronPanel room={room} className="subtle-panel" />
-
-              <section className="subtle-panel">
-                <div className="section-heading-row compact-align">
-                  <div>
-                    <p className="section-label">参与者</p>
-                    <h3>管理当前房间</h3>
-                  </div>
-                </div>
-
-                <div className="stacked-list compact-gap top-gap">
-                  {room.participants.map((participant) => {
-                    const isAgent = participant.runtimeKind === "agent";
-                    const isOwner = participant.id === room.ownerParticipantId;
-                    return (
-                      <div key={participant.id} className="participant-row-card">
-                        <div>
-                          <strong>{participant.name}</strong>
-                          <p>
-                            {isAgent ? `${getRoomAgent(participant.agentId ?? primaryAgentId).summary}` : "人工参与者"}
-                          </p>
-                        </div>
-                        <div className="participant-actions">
-                          {isOwner ? <span className="meta-chip">owner</span> : null}
-                          <span className="meta-chip subtle">{participant.runtimeKind}</span>
-                          {isAgent ? (
-                            <>
-                              <button type="button" className="mini-button" onClick={() => moveAgentParticipant(room.id, participant.id, -1)} disabled={isRunning}>
-                                上移
-                              </button>
-                              <button type="button" className="mini-button" onClick={() => moveAgentParticipant(room.id, participant.id, 1)} disabled={isRunning}>
-                                下移
-                              </button>
-                              <button type="button" className="mini-button" onClick={() => toggleAgentParticipant(room.id, participant.id)} disabled={isRunning}>
-                                {participant.enabled ? "停用" : "启用"}
-                              </button>
-                            </>
-                          ) : null}
-                          {participant.id !== "local-operator" ? (
-                            <button type="button" className="mini-button danger-text" onClick={() => removeParticipant(room.id, participant.id)} disabled={isRunning}>
-                              移除
-                            </button>
-                          ) : null}
-                        </div>
+            <div className="room-side-panel-body inspector-stack">
+              {inspectorTab === "console" ? (
+                <div className="inspector-stack">
+                  <section className="subtle-panel">
+                    <div className="section-heading-row compact-align">
+                      <div>
+                        <p className="section-label">执行视角</p>
+                        <h3>
+                          {consoleScope === "all"
+                            ? "按 Agent 查看全部房间轨迹"
+                            : consoleScope === "timeline"
+                              ? "按执行顺序查看全部房间轨迹"
+                              : "按 Agent 查看当前房间轨迹"}
+                        </h3>
                       </div>
-                    );
-                  })}
-                </div>
-
-                <div className="inline-action-row stretch top-gap">
-                  <input
-                    className="text-input"
-                    value={newParticipantName}
-                    onChange={(event) => setNewParticipantName(event.target.value)}
-                    placeholder="新增人工参与者"
-                  />
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => {
-                      addHumanParticipant(room.id, newParticipantName);
-                      setNewParticipantName("");
-                    }}
-                    disabled={!newParticipantName.trim() || isRunning}
-                  >
-                    添加
-                  </button>
-                </div>
-
-                <div className="agent-preset-row top-gap">
-                  {ROOM_AGENTS.map((agent) => {
-                    const exists = room.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === agent.id);
-                    return (
-                      <button
-                        key={agent.id}
-                        type="button"
-                        className={exists ? "preset-chip active" : "preset-chip"}
-                        onClick={() => addAgentParticipant(room.id, agent.id)}
-                        disabled={exists || isRunning}
+                      <select
+                        className="text-input compact-select"
+                        value={consoleAgentId}
+                        onChange={(event) => setSelectedConsoleAgentId(event.target.value as RoomAgentId)}
                       >
-                        <strong>{agent.label}</strong>
-                        <span>{exists ? "已加入该房间" : "添加到当前房间"}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
+                        {ROOM_AGENTS.map((agent) => (
+                          <option key={agent.id} value={agent.id}>
+                            {agent.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
 
-              <section className="subtle-panel danger-panel">
-                <p className="section-label">危险操作</p>
-                <div className="card-actions wrap-actions">
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={() => {
-                      archiveRoom(room.id);
-                      router.push("/rooms");
-                    }}
-                    disabled={isRunning}
-                  >
-                    归档房间
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost-button danger-text"
-                    onClick={() => {
-                      if (window.confirm(`确认永久删除“${room.title}”吗？此操作不可恢复。`)) {
-                        const fallback = activeRooms.find((entry) => entry.id !== room.id)?.id;
-                        deleteRoom(room.id);
-                        router.push(fallback ? `/rooms/${fallback}` : "/rooms");
-                      }
-                    }}
-                    disabled={isRunning}
-                  >
-                    删除房间
-                  </button>
+                    <div className="segmented-row top-gap">
+                      <button
+                        type="button"
+                        className={consoleScope === "room" ? "tab-button active" : "tab-button"}
+                        onClick={() => setConsoleScope("room")}
+                      >
+                        当前房间
+                      </button>
+                      <button
+                        type="button"
+                        className={consoleScope === "all" ? "tab-button active" : "tab-button"}
+                        onClick={() => setConsoleScope("all")}
+                      >
+                        所有房间
+                      </button>
+                      <button
+                        type="button"
+                        className={consoleScope === "timeline" ? "tab-button active" : "tab-button"}
+                        onClick={() => setConsoleScope("timeline")}
+                      >
+                        执行顺序
+                      </button>
+                    </div>
+
+                    <div className="segmented-row top-gap">
+                      <button
+                        type="button"
+                        className={consoleViewMode === "formatted" ? "tab-button active" : "tab-button"}
+                        onClick={() => setConsoleViewMode("formatted")}
+                      >
+                        格式化视图
+                      </button>
+                      <button
+                        type="button"
+                        className={consoleViewMode === "raw" ? "tab-button active" : "tab-button"}
+                        onClick={() => setConsoleViewMode("raw")}
+                      >
+                        Raw log
+                      </button>
+                    </div>
+
+                    <div className="card-actions compact-right top-gap">
+                      <button type="button" className="ghost-button" onClick={() => clearAgentConsole(consoleAgentId)} disabled={isAgentRunning(consoleAgentId)}>
+                        清空显示轨迹
+                      </button>
+                      <button type="button" className="secondary-button" onClick={() => void resetAgentContext(consoleAgentId)} disabled={isAgentRunning(consoleAgentId)}>
+                        重置 Agent 上下文
+                      </button>
+                    </div>
+                    <p className="composer-note">
+                      清空显示轨迹只移除当前面板记录；重置 Agent 上下文会清空该 Agent 在所有房间共享的服务端记忆。
+                    </p>
+                  </section>
+
+                  {visibleConsoleTurns.length === 0 ? (
+                    <div className="empty-panel">
+                      {consoleScope === "room"
+                        ? "当前房间还没有与这个 Agent 相关的执行记录。"
+                        : "这个 Agent 还没有任何房间执行记录。"}
+                    </div>
+                  ) : (
+                    <div className="stacked-list compact-gap">
+                      {consoleTurnGroups.map((group) => (
+                        <section key={group.roomId} className="subtle-panel">
+                          {consoleScope === "all" ? (
+                            <div className="section-heading-row compact-align">
+                              <div>
+                                <p className="section-label">{group.turns.length} 条轨迹</p>
+                                <h3>{group.roomTitle}</h3>
+                              </div>
+                              <div className="meta-chip-row compact align-end">
+                                {group.roomId === room.id ? <span className="meta-chip">当前房间</span> : null}
+                                {group.roomId !== room.id ? (
+                                  <Link href={`/rooms/${group.roomId}`} className="secondary-button">
+                                    打开房间
+                                  </Link>
+                                ) : null}
+                              </div>
+                            </div>
+                          ) : null}
+
+                          <div className="trace-list top-gap">
+                            {group.turns.map((turn, index) => renderTurnCard(turn, index, group.turns.length, group.roomId))}
+                          </div>
+                        </section>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              </section>
+              ) : null}
+
+              {inspectorTab === "room" ? (
+                <div className="inspector-stack">
+                  <section className="subtle-panel">
+                    <p className="section-label">房间标题</p>
+                    <div className="inline-action-row stretch">
+                      <input
+                        className="text-input"
+                        value={titleDraft}
+                        onChange={(event) =>
+                          setTitleDraftByRoomId((current) => ({
+                            ...current,
+                            [room.id]: event.target.value,
+                          }))
+                        }
+                      />
+                      <button type="button" className="secondary-button" onClick={() => renameRoom(room.id, titleDraft)} disabled={!titleDraft.trim() || isRunning}>
+                        保存
+                      </button>
+                    </div>
+                  </section>
+                  <RoomCronPanel room={room} className="subtle-panel" />
+
+                  <section className="subtle-panel">
+                    <div className="section-heading-row compact-align">
+                      <div>
+                        <p className="section-label">参与者</p>
+                        <h3>管理当前房间</h3>
+                      </div>
+                    </div>
+
+                    <div className="stacked-list compact-gap top-gap">
+                      {room.participants.map((participant) => {
+                        const isAgent = participant.runtimeKind === "agent";
+                        const isOwner = participant.id === room.ownerParticipantId;
+                        return (
+                          <div key={participant.id} className="participant-row-card">
+                            <div className="participant-meta">
+                              <strong>{participant.name}</strong>
+                              <p>
+                                {isAgent ? `${getRoomAgent(participant.agentId ?? primaryAgentId).summary}` : "人工参与者"}
+                              </p>
+                            </div>
+                            <div className="participant-actions">
+                              {isOwner ? <span className="meta-chip">owner</span> : null}
+                              <span className="meta-chip subtle">{participant.runtimeKind}</span>
+                              {isAgent ? (
+                                <>
+                                  <button type="button" className="mini-button" onClick={() => moveAgentParticipant(room.id, participant.id, -1)} disabled={isRunning}>
+                                    上移
+                                  </button>
+                                  <button type="button" className="mini-button" onClick={() => moveAgentParticipant(room.id, participant.id, 1)} disabled={isRunning}>
+                                    下移
+                                  </button>
+                                  <button type="button" className="mini-button" onClick={() => toggleAgentParticipant(room.id, participant.id)} disabled={isRunning}>
+                                    {participant.enabled ? "停用" : "启用"}
+                                  </button>
+                                </>
+                              ) : null}
+                              {participant.id !== "local-operator" ? (
+                                <button type="button" className="mini-button danger-text" onClick={() => removeParticipant(room.id, participant.id)} disabled={isRunning}>
+                                  移除
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="inline-action-row stretch top-gap">
+                      <input
+                        className="text-input"
+                        value={newParticipantName}
+                        onChange={(event) => setNewParticipantName(event.target.value)}
+                        placeholder="新增人工参与者"
+                      />
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => {
+                          addHumanParticipant(room.id, newParticipantName);
+                          setNewParticipantName("");
+                        }}
+                        disabled={!newParticipantName.trim() || isRunning}
+                      >
+                        添加
+                      </button>
+                    </div>
+
+                    <div className="agent-preset-row top-gap">
+                      {ROOM_AGENTS.map((agent) => {
+                        const exists = room.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === agent.id);
+                        return (
+                          <button
+                            key={agent.id}
+                            type="button"
+                            className={exists ? "preset-chip active" : "preset-chip"}
+                            onClick={() => addAgentParticipant(room.id, agent.id)}
+                            disabled={exists || isRunning}
+                          >
+                            <strong>{agent.label}</strong>
+                            <span>{exists ? "已加入该房间" : "添加到当前房间"}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+
+                  <section className="subtle-panel danger-panel">
+                    <p className="section-label">危险操作</p>
+                    <div className="card-actions wrap-actions">
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() => {
+                          archiveRoom(room.id);
+                          router.push("/rooms");
+                        }}
+                        disabled={isRunning}
+                      >
+                        归档房间
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button danger-text"
+                        onClick={() => {
+                          if (window.confirm(`确认永久删除“${room.title}”吗？此操作不可恢复。`)) {
+                            const fallback = activeRooms.find((entry) => entry.id !== room.id)?.id;
+                            deleteRoom(room.id);
+                            router.push(fallback ? `/rooms/${fallback}` : "/rooms");
+                          }
+                        }}
+                        disabled={isRunning}
+                      >
+                        删除房间
+                      </button>
+                    </div>
+                  </section>
+                </div>
+              ) : null}
             </div>
-          ) : null}
-        </aside>
+          </aside>
+        ) : null}
       </div>
     </div>
   );

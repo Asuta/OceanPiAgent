@@ -209,6 +209,7 @@ export function SettingsPage() {
     compactAgentContext,
     updateAgentSettings,
   } = useWorkspace();
+  const [settingsTab, setSettingsTab] = useState<"models" | "agents" | "runtime">("models");
   const [availableSkills, setAvailableSkills] = useState<WorkspaceSkillSummary[]>([]);
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [selectedModelConfigId, setSelectedModelConfigId] = useState<string>(NEW_MODEL_CONFIG_ID);
@@ -405,548 +406,598 @@ export function SettingsPage() {
     }
   };
 
+  const selectedModelConfig = modelConfigs.find((modelConfig) => modelConfig.id === selectedModelConfigId) ?? null;
+
+  const renderAgentCard = (agent: (typeof ROOM_AGENTS)[number], view: "agents" | "runtime") => {
+    const state = agentStates[agent.id];
+    const compactionFeedback = agentCompactionFeedback[agent.id];
+    const isRunning = isAgentRunning(agent.id);
+    const isCompacting = isAgentCompacting(agent.id);
+    const compatibilityPills = getCompatibilityDetailPills(state.compatibility);
+    const selectedConfig = modelConfigs.find((modelConfig) => modelConfig.id === state.settings.modelConfigId) ?? null;
+    const effectiveModelRef = selectedConfig?.model ?? state.settings.model;
+    const effectiveApiFormat = selectedConfig?.apiFormat ?? state.settings.apiFormat;
+    const effectiveProviderId = getPiProviderForModelValue(effectiveModelRef);
+    const effectiveProviderOption = getPiProviderOption(effectiveProviderId);
+    const selectedModelOption = getPiModelOptionByValue(effectiveModelRef);
+    const capability = getPiThinkingCapability(effectiveModelRef);
+    const actualThinkingLevel = resolveActualThinkingLevel(state.settings.thinkingLevel, capability);
+    const configuredApiLabel = selectedConfig ? getModelConfigApiLabel(selectedConfig) : getPiConfiguredApiLabel(effectiveModelRef, effectiveApiFormat);
+
+    if (view === "agents") {
+      return (
+        <article key={agent.id} className="surface-panel settings-card">
+          <div className="settings-card-header">
+            <div>
+              <p className="section-label">Agent Preset</p>
+              <h2>{agent.label}</h2>
+              <p>{agent.summary}</p>
+            </div>
+            <div className="meta-chip-row compact align-end">
+              <span className="meta-chip">{selectedConfig?.name || "未选择模型配置"}</span>
+              <span className="meta-chip subtle">{configuredApiLabel}</span>
+              <span className="meta-chip subtle">{isRunning ? "运行中" : "空闲"}</span>
+            </div>
+          </div>
+
+          <div className="form-grid two-columns">
+            <label className="field-block" htmlFor={`${agent.id}-model-config`}>
+              <span>模型配置</span>
+              <select
+                id={`${agent.id}-model-config`}
+                className="text-input"
+                value={state.settings.modelConfigId ?? ""}
+                onChange={(event) => {
+                  const nextModelConfigId = event.target.value || null;
+                  if (!nextModelConfigId) {
+                    updateAgentSettings(agent.id, { modelConfigId: null });
+                    return;
+                  }
+
+                  const nextModelConfig = modelConfigs.find((modelConfig) => modelConfig.id === nextModelConfigId);
+                  if (!nextModelConfig) {
+                    return;
+                  }
+
+                  updateAgentSettings(agent.id, applyModelConfigToSettings(state.settings, nextModelConfig));
+                }}
+                disabled={isRunning}
+              >
+                <option value="">未选择</option>
+                {modelConfigs.map((modelConfig) => (
+                  <option key={modelConfig.id} value={modelConfig.id}>
+                    {modelConfig.name}
+                  </option>
+                ))}
+              </select>
+              <p className="muted-copy">选择上方已经保存好的模型配置。没有的话先在“模型配置”里创建。</p>
+            </label>
+
+            <div className="field-block static-field">
+              <span>当前模型目标</span>
+              <div className="info-badge">{effectiveModelRef || "未配置"}</div>
+            </div>
+
+            <label className="field-block" htmlFor={`${agent.id}-thinking`}>
+              <span>Thinking Level</span>
+              <select
+                id={`${agent.id}-thinking`}
+                className="text-input"
+                value={state.settings.thinkingLevel}
+                onChange={(event) => updateAgentSettings(agent.id, { thinkingLevel: event.target.value as ThinkingLevel })}
+                disabled={isRunning}
+              >
+                {THINKING_LEVELS.map((level) => (
+                  <option key={level} value={level}>
+                    {THINKING_LEVEL_LABELS[level]}
+                  </option>
+                ))}
+              </select>
+              <p className="muted-copy">
+                {getThinkingNote({
+                  modelRef: effectiveModelRef,
+                  requestedThinkingLevel: state.settings.thinkingLevel,
+                  actualThinkingLevel,
+                })}
+              </p>
+            </label>
+
+            <label className="field-block" htmlFor={`${agent.id}-steps`}>
+              <span>最大 Tool Loop</span>
+              <input
+                id={`${agent.id}-steps`}
+                type="number"
+                min={MIN_MAX_TOOL_LOOP_STEPS}
+                max={MAX_MAX_TOOL_LOOP_STEPS}
+                step={1}
+                className="text-input"
+                value={state.settings.maxToolLoopSteps}
+                onChange={(event) => updateAgentSettings(agent.id, { maxToolLoopSteps: event.target.valueAsNumber })}
+                disabled={isRunning}
+              />
+            </label>
+          </div>
+
+          <label className="field-block" htmlFor={`${agent.id}-prompt`}>
+            <span>System Prompt</span>
+            <textarea
+              id={`${agent.id}-prompt`}
+              className="text-area compact"
+              value={state.settings.systemPrompt}
+              onChange={(event) => updateAgentSettings(agent.id, { systemPrompt: event.target.value })}
+              placeholder="为这个 Agent 增加额外的行为约束。"
+              disabled={isRunning}
+            />
+          </label>
+
+          <section className="subtle-panel top-gap">
+            <p className="section-label">Workspace Skills</p>
+            {availableSkills.length > 0 ? (
+              <>
+                <div className="meta-chip-row compact top-gap">
+                  {availableSkills.map((skill) => {
+                    const active = state.settings.enabledSkillIds.includes(skill.id);
+                    return (
+                      <button
+                        key={skill.id}
+                        type="button"
+                        className={active ? "tab-button active" : "tab-button"}
+                        onClick={() =>
+                          updateAgentSettings(agent.id, {
+                            enabledSkillIds: active
+                              ? state.settings.enabledSkillIds.filter((skillId) => skillId !== skill.id)
+                              : [...state.settings.enabledSkillIds, skill.id],
+                          })
+                        }
+                        disabled={isRunning}
+                      >
+                        {skill.title}
+                      </button>
+                    );
+                  })}
+                </div>
+                <ul className="notes-list top-gap">
+                  {availableSkills.map((skill) => (
+                    <li key={skill.id}>
+                      <strong>{skill.title}:</strong> {skill.summary}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p className="muted-copy top-gap">当前没有发现 `skills/*/SKILL.md`。你可以在项目根目录里新增技能文件夹来扩展 prompt。</p>
+            )}
+          </section>
+        </article>
+      );
+    }
+
+    return (
+      <article key={agent.id} className="surface-panel settings-card">
+        <div className="settings-card-header">
+          <div>
+            <p className="section-label">Runtime</p>
+            <h2>{agent.label}</h2>
+            <p>把模型路由、兼容策略和上下文维护集中在这一屏查看。</p>
+          </div>
+          <div className="meta-chip-row compact align-end">
+            <span className="meta-chip">{selectedConfig?.name || effectiveProviderOption.label}</span>
+            <span className="meta-chip subtle">{state.resolvedModel || "尚未请求"}</span>
+            <span className="meta-chip subtle">{isRunning ? "运行中" : "空闲"}</span>
+          </div>
+        </div>
+
+        <section className="subtle-panel">
+          <p className="section-label">当前运行摘要</p>
+          <div className="info-list">
+            <div>
+              <span>Provider path</span>
+              <strong>{configuredApiLabel}</strong>
+            </div>
+            <div>
+              <span>Resolved model</span>
+              <strong>{state.resolvedModel || "尚未请求"}</strong>
+            </div>
+            <div>
+              <span>Thinking</span>
+              <strong>{capability.reasoning ? THINKING_LEVEL_LABELS[actualThinkingLevel] : "Off"}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section className="subtle-panel top-gap">
+          <p className="section-label">Model Routing</p>
+          <strong className="panel-lead">{selectedConfig?.name || effectiveProviderOption.label}</strong>
+          <p className="muted-copy top-gap">
+            {selectedConfig
+              ? selectedConfig.kind === "openai_compatible"
+                ? "Runs through the saved OpenAI-compatible endpoint config."
+                : `Runs through pi-ai native routing for ${effectiveProviderOption.label}.`
+              : "No reusable model config selected yet. The agent falls back to its legacy direct model fields."}
+          </p>
+          <div className="meta-chip-row compact top-gap">
+            <span className="meta-chip subtle">{selectedConfig ? getModelConfigKindLabel(selectedConfig.kind) : effectiveProviderOption.label}</span>
+            <span className="meta-chip subtle">{configuredApiLabel}</span>
+            <span className="meta-chip subtle">{capability.reasoning ? `Thinking ${THINKING_LEVEL_LABELS[actualThinkingLevel]}` : "Thinking Off"}</span>
+          </div>
+          {selectedModelOption ? <p className="muted-copy top-gap">{selectedModelOption.summary}</p> : null}
+        </section>
+
+        <section className="subtle-panel top-gap">
+          <p className="section-label">兼容策略</p>
+          <strong className="panel-lead">{getCompatibilityModeLabel(state.compatibility)}</strong>
+          {compatibilityPills.length > 0 ? (
+            <div className="meta-chip-row compact top-gap">
+              {compatibilityPills.map((pill) => (
+                <span key={pill} className="meta-chip subtle">
+                  {pill}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="muted-copy top-gap">首次请求后, 这里会记录当前模型路径、thinking 映射和 provider 兼容性判断。</p>
+          )}
+          {state.compatibility?.notes?.length ? (
+            <ul className="notes-list top-gap">
+              {state.compatibility.notes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+
+        <div className="card-actions compact-right top-gap">
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => void compactAgentContext(agent.id)}
+            disabled={isRunning || isCompacting}
+          >
+            {isCompacting ? "压缩中..." : "压缩隐藏上下文"}
+          </button>
+          <button type="button" className="ghost-button" onClick={() => clearAgentConsole(agent.id)} disabled={isRunning}>
+            清空内部轨迹
+          </button>
+        </div>
+
+        {isCompacting || compactionFeedback ? (
+          <section className="subtle-panel top-gap">
+            <p className="section-label">上下文压缩</p>
+            <strong className="panel-lead">{isCompacting ? "正在压缩隐藏上下文" : compactionFeedback?.message}</strong>
+            {compactionFeedback ? <p className="muted-copy top-gap">最近更新于 {formatTimestamp(compactionFeedback.updatedAt)}</p> : null}
+            {!isCompacting && compactionFeedback?.summary ? (
+              <>
+                <p className="muted-copy top-gap">最近一次压缩生成的摘要如下。</p>
+                <pre className="top-gap">{compactionFeedback.summary}</pre>
+              </>
+            ) : null}
+            {!isCompacting && compactionFeedback && !compactionFeedback.summary ? <p className="muted-copy top-gap">这次没有返回可展示的压缩文本。</p> : null}
+          </section>
+        ) : null}
+      </article>
+    );
+  };
+
   return (
     <div className="page-stack settings-page">
       <section className="hero-panel surface-panel page-enter">
         <div className="hero-copy">
           <p className="eyebrow-label">Advanced</p>
-          <h1>先配模型, 再给 agent 选择</h1>
-          <p>模型连接现在集中管理。Agent 页面只保留行为参数和模型配置选择, 不再在每张卡片里重复填写 URL、API key 和接口格式。</p>
+          <h1>把配置、行为和运行诊断拆开看</h1>
+          <p>设置页改成更像正式后台: 先维护模型连接, 再为 Agent 指派配置, 最后单独检查运行路径与兼容策略。</p>
+        </div>
+        <div className="hero-actions">
+          <button type="button" className={settingsTab === "models" ? "tab-button active" : "tab-button"} onClick={() => setSettingsTab("models")}>
+            模型配置
+          </button>
+          <button type="button" className={settingsTab === "agents" ? "tab-button active" : "tab-button"} onClick={() => setSettingsTab("agents")}>
+            Agent 预设
+          </button>
+          <button type="button" className={settingsTab === "runtime" ? "tab-button active" : "tab-button"} onClick={() => setSettingsTab("runtime")}>
+            运行与诊断
+          </button>
         </div>
       </section>
 
-      <section className="surface-panel page-enter page-enter-delay-1">
-        <div className="settings-card-header">
-          <div>
-            <p className="section-label">Model Configs</p>
-            <h2>独立模型配置</h2>
-            <p>在这里保存可复用的模型连接。API key 只保存在服务端, 不进入 workspace state 和浏览器本地缓存。</p>
+      {settingsTab === "models" ? (
+        <section className="surface-panel page-enter page-enter-delay-1">
+          <div className="settings-card-header">
+            <div>
+              <p className="section-label">Model Configs</p>
+              <h2>独立模型配置</h2>
+              <p>在这里保存可复用的模型连接。API key 只保存在服务端，不进入 workspace state 和浏览器本地缓存。</p>
+            </div>
+            <div className="meta-chip-row compact align-end">
+              <span className="meta-chip">{loadingModelConfigs ? "Loading" : `${modelConfigs.length} configs`}</span>
+              <span className="meta-chip subtle">Server-side secrets</span>
+            </div>
           </div>
-          <div className="meta-chip-row compact align-end">
-            <span className="meta-chip">{loadingModelConfigs ? "Loading" : `${modelConfigs.length} configs`}</span>
-            <span className="meta-chip subtle">Server-side secrets</span>
-          </div>
-        </div>
 
-        <div className="settings-grid">
-          <section className="subtle-panel">
-            <p className="section-label">Saved Configs</p>
-            <div className="meta-chip-row compact top-gap">
-              <button type="button" className={selectedModelConfigId === NEW_MODEL_CONFIG_ID ? "tab-button active" : "tab-button"} onClick={handleCreateNewModelConfig}>
-                新建配置
-              </button>
-              {modelConfigs.map((modelConfig) => (
-                <button
-                  key={modelConfig.id}
-                  type="button"
-                  className={selectedModelConfigId === modelConfig.id ? "tab-button active" : "tab-button"}
-                  onClick={() => {
-                    setSelectedModelConfigId(modelConfig.id);
-                    setModelConfigError("");
-                  }}
-                >
-                  {modelConfig.name}
-                </button>
-              ))}
-            </div>
-
-            {selectedModelConfigId !== NEW_MODEL_CONFIG_ID ? (
-              (() => {
-                const selectedModelConfig = modelConfigs.find((modelConfig) => modelConfig.id === selectedModelConfigId) ?? null;
-                if (!selectedModelConfig) {
-                  return null;
-                }
-
-                return (
-                  <div className="meta-chip-row compact top-gap">
-                    <span className="meta-chip">{getModelConfigKindLabel(selectedModelConfig.kind)}</span>
-                    <span className="meta-chip subtle">{getModelConfigApiLabel(selectedModelConfig)}</span>
-                    <span className="meta-chip subtle">{selectedModelConfig.hasApiKey ? "API key saved" : "Using env/default"}</span>
-                  </div>
-                );
-              })()
-            ) : (
-              <p className="muted-copy top-gap">新建配置后, 下面的 Agent 卡片就可以直接选择它。</p>
-            )}
-
-            {modelConfigError ? <p className="muted-copy top-gap">{modelConfigError}</p> : null}
-          </section>
-
-          <section className="subtle-panel">
-            <p className="section-label">Editor</p>
-            <div className="form-grid two-columns top-gap">
-              <label className="field-block" htmlFor="model-config-name">
-                <span>名称</span>
-                <input
-                  id="model-config-name"
-                  className="text-input"
-                  value={modelConfigDraft.name}
-                  onChange={(event) => setModelConfigDraft((current) => ({ ...current, name: event.target.value }))}
-                />
-              </label>
-
-              <label className="field-block" htmlFor="model-config-kind">
-                <span>类型</span>
-                <select
-                  id="model-config-kind"
-                  className="text-input"
-                  value={modelConfigDraft.kind}
-                  onChange={(event) => {
-                    const nextKind = event.target.value as ModelConfigKind;
-                    setModelConfigDraft((current) =>
-                      nextKind === "pi_builtin"
-                        ? {
-                            ...current,
-                            kind: nextKind,
-                            model: current.kind === "pi_builtin" ? current.model : getPiDefaultModelValue(DEFAULT_PI_NATIVE_PROVIDER_ID),
-                            baseUrl: "",
-                            providerMode: "auto",
-                            apiKey: "",
-                            clearApiKey: false,
-                            builtInProviderId: current.kind === "pi_builtin" ? current.builtInProviderId : DEFAULT_PI_NATIVE_PROVIDER_ID,
-                          }
-                        : {
-                            ...current,
-                            kind: nextKind,
-                            model: current.kind === "openai_compatible" ? current.model : "",
-                            apiFormat: current.apiFormat,
-                          },
-                    );
-                  }}
-                >
-                  <option value="openai_compatible">OpenAI-Compatible</option>
-                  <option value="pi_builtin">Pi Native</option>
-                </select>
-              </label>
-            </div>
-
-            {modelConfigDraft.kind === "openai_compatible" ? (
-              <>
-                <div className="form-grid two-columns top-gap">
-                  <label className="field-block" htmlFor="model-config-base-url">
-                    <span>URL</span>
-                    <input
-                      id="model-config-base-url"
-                      className="text-input"
-                      value={modelConfigDraft.baseUrl}
-                      onChange={(event) => setModelConfigDraft((current) => ({ ...current, baseUrl: event.target.value }))}
-                      placeholder="https://api.openai.com/v1"
-                    />
-                    <p className="muted-copy">留空时会使用 `OPENAI_BASE_URL`, 再退回默认 OpenAI 地址。</p>
-                  </label>
-
-                  <label className="field-block" htmlFor="model-config-api-key">
-                    <span>API Key</span>
-                    <input
-                      id="model-config-api-key"
-                      type="password"
-                      className="text-input"
-                      value={modelConfigDraft.apiKey}
-                      onChange={(event) => setModelConfigDraft((current) => ({ ...current, apiKey: event.target.value, clearApiKey: false }))}
-                      placeholder="留空则保持当前值或使用 OPENAI_API_KEY"
-                    />
-                    <p className="muted-copy">API key 只保存在服务端。留空时会保留当前值; 如果本来没有, 就使用环境变量。</p>
-                  </label>
-                </div>
-
-                <div className="form-grid two-columns top-gap">
-                  <label className="field-block" htmlFor="model-config-model">
-                    <span>模型名称</span>
-                    <input
-                      id="model-config-model"
-                      className="text-input"
-                      value={modelConfigDraft.model}
-                      onChange={(event) => setModelConfigDraft((current) => ({ ...current, model: event.target.value }))}
-                      placeholder="gpt-5.4"
-                    />
-                    <p className="muted-copy">可以直接填写原始 model id, 留空时运行会读取 `OPENAI_MODEL`。</p>
-                  </label>
-
-                  <label className="field-block" htmlFor="model-config-provider-mode">
-                    <span>兼容预设</span>
-                    <select
-                      id="model-config-provider-mode"
-                      className="text-input"
-                      value={modelConfigDraft.providerMode}
-                      onChange={(event) => setModelConfigDraft((current) => ({ ...current, providerMode: event.target.value as ProviderMode }))}
-                    >
-                      {PROVIDER_MODE_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-
-                <div className="segmented-row top-gap">
-                  <button
-                    type="button"
-                    className={modelConfigDraft.apiFormat === "chat_completions" ? "tab-button active" : "tab-button"}
-                    onClick={() => setModelConfigDraft((current) => ({ ...current, apiFormat: "chat_completions" }))}
-                  >
-                    OpenAI Chat Completions
-                  </button>
-                  <button
-                    type="button"
-                    className={modelConfigDraft.apiFormat === "responses" ? "tab-button active" : "tab-button"}
-                    onClick={() => setModelConfigDraft((current) => ({ ...current, apiFormat: "responses" }))}
-                  >
-                    OpenAI Responses
-                  </button>
-                  <button
-                    type="button"
-                    className={modelConfigDraft.clearApiKey ? "tab-button active" : "tab-button"}
-                    onClick={() => setModelConfigDraft((current) => ({ ...current, clearApiKey: !current.clearApiKey, apiKey: current.clearApiKey ? current.apiKey : "" }))}
-                  >
-                    Clear stored key
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="form-grid two-columns top-gap">
-                  <label className="field-block" htmlFor="model-config-provider-family">
-                    <span>Provider</span>
-                    <select
-                      id="model-config-provider-family"
-                      className="text-input"
-                      value={modelConfigDraft.builtInProviderId}
-                      onChange={(event) => {
-                        const nextProviderId = event.target.value as PiProviderId;
-                        setModelConfigDraft((current) => ({
-                          ...current,
-                          builtInProviderId: nextProviderId,
-                          model: getPiDefaultModelValue(nextProviderId),
-                        }));
-                      }}
-                    >
-                      {PI_NATIVE_PROVIDER_OPTIONS.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <label className="field-block" htmlFor="model-config-model-preset">
-                    <span>模型预设</span>
-                    <select
-                      id="model-config-model-preset"
-                      className="text-input"
-                      value={
-                        getPiProviderForModelValue(modelConfigDraft.model) === modelConfigDraft.builtInProviderId
-                        && getPiModelOptionByValue(modelConfigDraft.model)
-                          ? modelConfigDraft.model
-                          : CUSTOM_MODEL_OPTION
-                      }
-                      onChange={(event) => {
-                        if (event.target.value === CUSTOM_MODEL_OPTION) {
-                          return;
-                        }
-
-                        setModelConfigDraft((current) => ({ ...current, model: event.target.value }));
-                      }}
-                    >
-                      {getPiModelOptions(modelConfigDraft.builtInProviderId).map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                      <option value={CUSTOM_MODEL_OPTION}>自定义模型引用</option>
-                    </select>
-                  </label>
-                </div>
-
-                <label className="field-block top-gap" htmlFor="model-config-pi-model">
-                  <span>模型名称</span>
-                  <input
-                    id="model-config-pi-model"
-                    className="text-input"
-                    value={modelConfigDraft.model}
-                    onChange={(event) => setModelConfigDraft((current) => ({ ...current, model: event.target.value }))}
-                    placeholder={`${modelConfigDraft.builtInProviderId}/model-id`}
-                  />
-                  <p className="muted-copy">
-                    使用 `provider/model-id` 形式的 pi 模型引用; 保存后 agent 运行时会走 pi-ai 的原生 provider 解析。
-                  </p>
-                </label>
-
-                <div className="meta-chip-row compact top-gap">
-                  <span className="meta-chip">{getPiProviderOption(modelConfigDraft.builtInProviderId).label}</span>
-                  <span className="meta-chip subtle">{getPiProviderOption(modelConfigDraft.builtInProviderId).envHint}</span>
-                  <span className="meta-chip subtle">{getPiProviderOption(modelConfigDraft.builtInProviderId).apiLabel}</span>
-                </div>
-
-                {getPiModelOptionByValue(modelConfigDraft.model) ? (
-                  <p className="muted-copy top-gap">{getPiModelOptionByValue(modelConfigDraft.model)?.summary}</p>
-                ) : null}
-              </>
-            )}
-
-            <div className="card-actions compact-right top-gap">
-              {selectedModelConfigId !== NEW_MODEL_CONFIG_ID ? (
-                <button type="button" className="ghost-button" onClick={() => void handleDeleteModelConfig()} disabled={savingModelConfig}>
-                  删除配置
-                </button>
-              ) : null}
-              <button type="button" className="ghost-button" onClick={() => void handleSaveModelConfig()} disabled={savingModelConfig}>
-                {savingModelConfig ? "保存中..." : selectedModelConfigId === NEW_MODEL_CONFIG_ID ? "创建配置" : "保存修改"}
-              </button>
-            </div>
-          </section>
-        </div>
-      </section>
-
-      <section className="settings-grid page-enter page-enter-delay-1">
-        {ROOM_AGENTS.map((agent) => {
-          const state = agentStates[agent.id];
-          const compactionFeedback = agentCompactionFeedback[agent.id];
-          const isRunning = isAgentRunning(agent.id);
-          const isCompacting = isAgentCompacting(agent.id);
-          const compatibilityPills = getCompatibilityDetailPills(state.compatibility);
-          const selectedModelConfig = modelConfigs.find((modelConfig) => modelConfig.id === state.settings.modelConfigId) ?? null;
-          const effectiveModelRef = selectedModelConfig?.model ?? state.settings.model;
-          const effectiveApiFormat = selectedModelConfig?.apiFormat ?? state.settings.apiFormat;
-          const effectiveProviderId = getPiProviderForModelValue(effectiveModelRef);
-          const effectiveProviderOption = getPiProviderOption(effectiveProviderId);
-          const selectedModelOption = getPiModelOptionByValue(effectiveModelRef);
-          const capability = getPiThinkingCapability(effectiveModelRef);
-          const actualThinkingLevel = resolveActualThinkingLevel(state.settings.thinkingLevel, capability);
-          const configuredApiLabel = selectedModelConfig
-            ? getModelConfigApiLabel(selectedModelConfig)
-            : getPiConfiguredApiLabel(effectiveModelRef, effectiveApiFormat);
-
-          return (
-            <article key={agent.id} className="surface-panel settings-card">
-              <div className="settings-card-header">
+          <div className="settings-split-grid">
+            <section className="subtle-panel config-list-panel">
+              <div className="section-heading-row compact-align">
                 <div>
-                  <p className="section-label">Agent Preset</p>
-                  <h2>{agent.label}</h2>
-                  <p>{agent.summary}</p>
+                  <p className="section-label">Saved Configs</p>
+                  <h3>选择一个配置开始编辑</h3>
+                </div>
+                <button type="button" className={selectedModelConfigId === NEW_MODEL_CONFIG_ID ? "tab-button active" : "tab-button"} onClick={handleCreateNewModelConfig}>
+                  新建配置
+                </button>
+              </div>
+
+              <div className="stacked-list compact-gap top-gap">
+                {modelConfigs.map((modelConfig) => (
+                  <button
+                    key={modelConfig.id}
+                    type="button"
+                    className={selectedModelConfigId === modelConfig.id ? "config-list-button active" : "config-list-button"}
+                    onClick={() => {
+                      setSelectedModelConfigId(modelConfig.id);
+                      setModelConfigError("");
+                    }}
+                  >
+                    <strong>{modelConfig.name}</strong>
+                    <span>{getModelConfigKindLabel(modelConfig.kind)}</span>
+                    <span>{getModelConfigApiLabel(modelConfig)}</span>
+                  </button>
+                ))}
+              </div>
+
+              {selectedModelConfig ? (
+                <div className="meta-chip-row compact top-gap">
+                  <span className="meta-chip">{getModelConfigKindLabel(selectedModelConfig.kind)}</span>
+                  <span className="meta-chip subtle">{getModelConfigApiLabel(selectedModelConfig)}</span>
+                  <span className="meta-chip subtle">{selectedModelConfig.hasApiKey ? "API key saved" : "Using env/default"}</span>
+                </div>
+              ) : (
+                <p className="muted-copy top-gap">新建配置后，下面的 Agent 卡片就可以直接选择它。</p>
+              )}
+
+              {modelConfigError ? <p className="muted-copy top-gap">{modelConfigError}</p> : null}
+            </section>
+
+            <section className="subtle-panel">
+              <div className="section-heading-row compact-align">
+                <div>
+                  <p className="section-label">Editor</p>
+                  <h3>{selectedModelConfigId === NEW_MODEL_CONFIG_ID ? "创建新配置" : `编辑 ${selectedModelConfig?.name || "配置"}`}</h3>
                 </div>
                 <div className="meta-chip-row compact align-end">
-                  <span className="meta-chip">{selectedModelConfig?.name || "未选择模型配置"}</span>
-                  <span className="meta-chip subtle">{configuredApiLabel}</span>
-                  <span className="meta-chip subtle">{isRunning ? "运行中" : "空闲"}</span>
+                  <span className="meta-chip subtle">{modelConfigDraft.kind === "openai_compatible" ? "Custom endpoint" : "Pi native"}</span>
                 </div>
               </div>
 
-              <div className="form-grid two-columns">
-                <label className="field-block" htmlFor={`${agent.id}-model-config`}>
-                  <span>模型配置</span>
-                  <select
-                    id={`${agent.id}-model-config`}
-                    className="text-input"
-                    value={state.settings.modelConfigId ?? ""}
-                    onChange={(event) => {
-                      const nextModelConfigId = event.target.value || null;
-                      if (!nextModelConfigId) {
-                        updateAgentSettings(agent.id, { modelConfigId: null });
-                        return;
-                      }
+              <form
+                className="stacked-list compact-gap top-gap"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleSaveModelConfig();
+                }}
+              >
+                <div className="form-grid two-columns">
+                  <label className="field-block" htmlFor="model-config-name">
+                    <span>名称</span>
+                    <input
+                      id="model-config-name"
+                      className="text-input"
+                      value={modelConfigDraft.name}
+                      onChange={(event) => setModelConfigDraft((current) => ({ ...current, name: event.target.value }))}
+                    />
+                  </label>
 
-                      const nextModelConfig = modelConfigs.find((modelConfig) => modelConfig.id === nextModelConfigId);
-                      if (!nextModelConfig) {
-                        return;
-                      }
-
-                      updateAgentSettings(agent.id, applyModelConfigToSettings(state.settings, nextModelConfig));
-                    }}
-                    disabled={isRunning}
-                  >
-                    <option value="">未选择</option>
-                    {modelConfigs.map((modelConfig) => (
-                      <option key={modelConfig.id} value={modelConfig.id}>
-                        {modelConfig.name}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="muted-copy">选择上方已经保存好的模型配置。没有的话先在上面的 Model Configs 里创建。</p>
-                </label>
-
-                <div className="field-block static-field">
-                  <span>当前模型目标</span>
-                  <div className="info-badge">{effectiveModelRef || "未配置"}</div>
-                </div>
-
-                <label className="field-block" htmlFor={`${agent.id}-thinking`}>
-                  <span>Thinking Level</span>
-                  <select
-                    id={`${agent.id}-thinking`}
-                    className="text-input"
-                    value={state.settings.thinkingLevel}
-                    onChange={(event) => updateAgentSettings(agent.id, { thinkingLevel: event.target.value as ThinkingLevel })}
-                    disabled={isRunning}
-                  >
-                    {THINKING_LEVELS.map((level) => (
-                      <option key={level} value={level}>
-                        {THINKING_LEVEL_LABELS[level]}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="muted-copy">
-                    {getThinkingNote({
-                      modelRef: effectiveModelRef,
-                      requestedThinkingLevel: state.settings.thinkingLevel,
-                      actualThinkingLevel,
-                    })}
-                  </p>
-                </label>
-
-                <label className="field-block" htmlFor={`${agent.id}-steps`}>
-                  <span>最大 Tool Loop</span>
-                  <input
-                    id={`${agent.id}-steps`}
-                    type="number"
-                    min={MIN_MAX_TOOL_LOOP_STEPS}
-                    max={MAX_MAX_TOOL_LOOP_STEPS}
-                    step={1}
-                    className="text-input"
-                    value={state.settings.maxToolLoopSteps}
-                    onChange={(event) => updateAgentSettings(agent.id, { maxToolLoopSteps: event.target.valueAsNumber })}
-                    disabled={isRunning}
-                  />
-                </label>
-
-                <div className="field-block static-field">
-                  <span>最近解析到的模型</span>
-                  <div className="info-badge">{state.resolvedModel || "尚未请求"}</div>
-                </div>
-              </div>
-
-              <label className="field-block" htmlFor={`${agent.id}-prompt`}>
-                <span>System Prompt</span>
-                <textarea
-                  id={`${agent.id}-prompt`}
-                  className="text-area compact"
-                  value={state.settings.systemPrompt}
-                  onChange={(event) => updateAgentSettings(agent.id, { systemPrompt: event.target.value })}
-                  placeholder="为这个 Agent 增加额外的行为约束。"
-                  disabled={isRunning}
-                />
-              </label>
-
-              <section className="subtle-panel top-gap">
-                <p className="section-label">Workspace Skills</p>
-                {availableSkills.length > 0 ? (
-                  <>
-                    <div className="meta-chip-row compact top-gap">
-                      {availableSkills.map((skill) => {
-                        const active = state.settings.enabledSkillIds.includes(skill.id);
-                        return (
-                          <button
-                            key={skill.id}
-                            type="button"
-                            className={active ? "tab-button active" : "tab-button"}
-                            onClick={() =>
-                              updateAgentSettings(agent.id, {
-                                enabledSkillIds: active
-                                  ? state.settings.enabledSkillIds.filter((skillId) => skillId !== skill.id)
-                                  : [...state.settings.enabledSkillIds, skill.id],
-                              })
-                            }
-                            disabled={isRunning}
-                          >
-                            {skill.title}
-                          </button>
+                  <label className="field-block" htmlFor="model-config-kind">
+                    <span>类型</span>
+                    <select
+                      id="model-config-kind"
+                      className="text-input"
+                      value={modelConfigDraft.kind}
+                      onChange={(event) => {
+                        const nextKind = event.target.value as ModelConfigKind;
+                        setModelConfigDraft((current) =>
+                          nextKind === "pi_builtin"
+                            ? {
+                                ...current,
+                                kind: nextKind,
+                                model: current.kind === "pi_builtin" ? current.model : getPiDefaultModelValue(DEFAULT_PI_NATIVE_PROVIDER_ID),
+                                baseUrl: "",
+                                providerMode: "auto",
+                                apiKey: "",
+                                clearApiKey: false,
+                                builtInProviderId: current.kind === "pi_builtin" ? current.builtInProviderId : DEFAULT_PI_NATIVE_PROVIDER_ID,
+                              }
+                            : {
+                                ...current,
+                                kind: nextKind,
+                                model: current.kind === "openai_compatible" ? current.model : "",
+                                apiFormat: current.apiFormat,
+                              },
                         );
-                      })}
+                      }}
+                    >
+                      <option value="openai_compatible">OpenAI-Compatible</option>
+                      <option value="pi_builtin">Pi Native</option>
+                    </select>
+                  </label>
+                </div>
+
+                {modelConfigDraft.kind === "openai_compatible" ? (
+                  <>
+                    <div className="form-grid two-columns">
+                      <label className="field-block" htmlFor="model-config-base-url">
+                        <span>URL</span>
+                        <input
+                          id="model-config-base-url"
+                          className="text-input"
+                          value={modelConfigDraft.baseUrl}
+                          onChange={(event) => setModelConfigDraft((current) => ({ ...current, baseUrl: event.target.value }))}
+                          placeholder="https://api.openai.com/v1"
+                        />
+                        <p className="muted-copy">留空时会使用 `OPENAI_BASE_URL`，再退回默认 OpenAI 地址。</p>
+                      </label>
+
+                      <label className="field-block" htmlFor="model-config-api-key">
+                        <span>API Key</span>
+                        <input
+                          id="model-config-api-key"
+                          type="password"
+                          className="text-input"
+                          value={modelConfigDraft.apiKey}
+                          onChange={(event) => setModelConfigDraft((current) => ({ ...current, apiKey: event.target.value, clearApiKey: false }))}
+                          placeholder="留空则保持当前值或使用 OPENAI_API_KEY"
+                        />
+                        <p className="muted-copy">API key 只保存在服务端。留空时会保留当前值；如果本来没有，就使用环境变量。</p>
+                      </label>
                     </div>
-                    <ul className="notes-list top-gap">
-                      {availableSkills.map((skill) => (
-                        <li key={skill.id}>
-                          <strong>{skill.title}:</strong> {skill.summary}
-                        </li>
-                      ))}
-                    </ul>
+
+                    <div className="form-grid two-columns">
+                      <label className="field-block" htmlFor="model-config-model">
+                        <span>模型名称</span>
+                        <input
+                          id="model-config-model"
+                          className="text-input"
+                          value={modelConfigDraft.model}
+                          onChange={(event) => setModelConfigDraft((current) => ({ ...current, model: event.target.value }))}
+                          placeholder="gpt-5.4"
+                        />
+                        <p className="muted-copy">可以直接填写原始 model id，留空时运行会读取 `OPENAI_MODEL`。</p>
+                      </label>
+
+                      <label className="field-block" htmlFor="model-config-provider-mode">
+                        <span>兼容预设</span>
+                        <select
+                          id="model-config-provider-mode"
+                          className="text-input"
+                          value={modelConfigDraft.providerMode}
+                          onChange={(event) => setModelConfigDraft((current) => ({ ...current, providerMode: event.target.value as ProviderMode }))}
+                        >
+                          {PROVIDER_MODE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+
+                    <div className="segmented-row">
+                      <button
+                        type="button"
+                        className={modelConfigDraft.apiFormat === "chat_completions" ? "tab-button active" : "tab-button"}
+                        onClick={() => setModelConfigDraft((current) => ({ ...current, apiFormat: "chat_completions" }))}
+                      >
+                        OpenAI Chat Completions
+                      </button>
+                      <button
+                        type="button"
+                        className={modelConfigDraft.apiFormat === "responses" ? "tab-button active" : "tab-button"}
+                        onClick={() => setModelConfigDraft((current) => ({ ...current, apiFormat: "responses" }))}
+                      >
+                        OpenAI Responses
+                      </button>
+                      <button
+                        type="button"
+                        className={modelConfigDraft.clearApiKey ? "tab-button active" : "tab-button"}
+                        onClick={() => setModelConfigDraft((current) => ({ ...current, clearApiKey: !current.clearApiKey, apiKey: current.clearApiKey ? current.apiKey : "" }))}
+                      >
+                        Clear stored key
+                      </button>
+                    </div>
                   </>
                 ) : (
-                  <p className="muted-copy top-gap">当前没有发现 `skills/*/SKILL.md`。你可以在项目根目录里新增技能文件夹来扩展 prompt。</p>
-                )}
-              </section>
+                  <>
+                    <div className="form-grid two-columns">
+                      <label className="field-block" htmlFor="model-config-provider-family">
+                        <span>Provider</span>
+                        <select
+                          id="model-config-provider-family"
+                          className="text-input"
+                          value={modelConfigDraft.builtInProviderId}
+                          onChange={(event) => {
+                            const nextProviderId = event.target.value as PiProviderId;
+                            setModelConfigDraft((current) => ({
+                              ...current,
+                              builtInProviderId: nextProviderId,
+                              model: getPiDefaultModelValue(nextProviderId),
+                            }));
+                          }}
+                        >
+                          {PI_NATIVE_PROVIDER_OPTIONS.map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
 
-              <section className="subtle-panel top-gap">
-                <p className="section-label">Model Routing</p>
-                <strong className="panel-lead">{selectedModelConfig?.name || effectiveProviderOption.label}</strong>
-                <p className="muted-copy top-gap">
-                  {selectedModelConfig
-                    ? selectedModelConfig.kind === "openai_compatible"
-                      ? "Runs through the saved OpenAI-compatible endpoint config."
-                      : `Runs through pi-ai native routing for ${effectiveProviderOption.label}.`
-                    : "No reusable model config selected yet. The agent falls back to its legacy direct model fields."}
-                </p>
-                <div className="meta-chip-row compact top-gap">
-                  <span className="meta-chip subtle">{selectedModelConfig ? getModelConfigKindLabel(selectedModelConfig.kind) : effectiveProviderOption.label}</span>
-                  <span className="meta-chip subtle">{configuredApiLabel}</span>
-                  <span className="meta-chip subtle">
-                    {capability.reasoning ? `Thinking ${THINKING_LEVEL_LABELS[actualThinkingLevel]}` : "Thinking Off"}
-                  </span>
+                      <label className="field-block" htmlFor="model-config-model-preset">
+                        <span>模型预设</span>
+                        <select
+                          id="model-config-model-preset"
+                          className="text-input"
+                          value={
+                            getPiProviderForModelValue(modelConfigDraft.model) === modelConfigDraft.builtInProviderId && getPiModelOptionByValue(modelConfigDraft.model)
+                              ? modelConfigDraft.model
+                              : CUSTOM_MODEL_OPTION
+                          }
+                          onChange={(event) => {
+                            if (event.target.value === CUSTOM_MODEL_OPTION) {
+                              return;
+                            }
+
+                            setModelConfigDraft((current) => ({ ...current, model: event.target.value }));
+                          }}
+                        >
+                          {getPiModelOptions(modelConfigDraft.builtInProviderId).map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                          <option value={CUSTOM_MODEL_OPTION}>自定义模型引用</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    <label className="field-block" htmlFor="model-config-pi-model">
+                      <span>模型名称</span>
+                      <input
+                        id="model-config-pi-model"
+                        className="text-input"
+                        value={modelConfigDraft.model}
+                        onChange={(event) => setModelConfigDraft((current) => ({ ...current, model: event.target.value }))}
+                        placeholder={`${modelConfigDraft.builtInProviderId}/model-id`}
+                      />
+                      <p className="muted-copy">使用 `provider/model-id` 形式的 pi 模型引用；保存后 agent 运行时会走 pi-ai 的原生 provider 解析。</p>
+                    </label>
+
+                    <div className="meta-chip-row compact">
+                      <span className="meta-chip">{getPiProviderOption(modelConfigDraft.builtInProviderId).label}</span>
+                      <span className="meta-chip subtle">{getPiProviderOption(modelConfigDraft.builtInProviderId).envHint}</span>
+                      <span className="meta-chip subtle">{getPiProviderOption(modelConfigDraft.builtInProviderId).apiLabel}</span>
+                    </div>
+
+                    {getPiModelOptionByValue(modelConfigDraft.model) ? <p className="muted-copy">{getPiModelOptionByValue(modelConfigDraft.model)?.summary}</p> : null}
+                  </>
+                )}
+
+                <div className="card-actions compact-right">
+                  {selectedModelConfigId !== NEW_MODEL_CONFIG_ID ? (
+                    <button type="button" className="ghost-button" onClick={() => void handleDeleteModelConfig()} disabled={savingModelConfig}>
+                      删除配置
+                    </button>
+                  ) : null}
+                  <button type="submit" className="primary-button" disabled={savingModelConfig}>
+                    {savingModelConfig ? "保存中..." : selectedModelConfigId === NEW_MODEL_CONFIG_ID ? "创建配置" : "保存修改"}
+                  </button>
                 </div>
-                {selectedModelOption ? <p className="muted-copy top-gap">{selectedModelOption.summary}</p> : null}
-              </section>
+              </form>
+            </section>
+          </div>
+        </section>
+      ) : null}
 
-              <section className="subtle-panel top-gap">
-                <p className="section-label">兼容策略</p>
-                <strong className="panel-lead">{getCompatibilityModeLabel(state.compatibility)}</strong>
-                {compatibilityPills.length > 0 ? (
-                  <div className="meta-chip-row compact top-gap">
-                    {compatibilityPills.map((pill) => (
-                      <span key={pill} className="meta-chip subtle">
-                        {pill}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="muted-copy top-gap">首次请求后, 这里会记录当前模型路径、thinking 映射和 provider 兼容性判断。</p>
-                )}
-                {state.compatibility?.notes?.length ? (
-                  <ul className="notes-list top-gap">
-                    {state.compatibility.notes.map((note) => (
-                      <li key={note}>{note}</li>
-                    ))}
-                  </ul>
-                ) : null}
-              </section>
+      {settingsTab === "agents" ? <section className="settings-grid page-enter page-enter-delay-1">{ROOM_AGENTS.map((agent) => renderAgentCard(agent, "agents"))}</section> : null}
 
-              <div className="card-actions compact-right top-gap">
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => void compactAgentContext(agent.id)}
-                  disabled={isRunning || isCompacting}
-                >
-                  {isCompacting ? "压缩中..." : "压缩隐藏上下文"}
-                </button>
-                <button type="button" className="ghost-button" onClick={() => clearAgentConsole(agent.id)} disabled={isRunning}>
-                  清空内部轨迹
-                </button>
-              </div>
-
-              {isCompacting || compactionFeedback ? (
-                <section className="subtle-panel top-gap">
-                  <p className="section-label">上下文压缩</p>
-                  <strong className="panel-lead">{isCompacting ? "正在压缩隐藏上下文" : compactionFeedback?.message}</strong>
-                  {compactionFeedback ? (
-                    <p className="muted-copy top-gap">
-                      最近更新于 {formatTimestamp(compactionFeedback.updatedAt)}
-                    </p>
-                  ) : null}
-                  {!isCompacting && compactionFeedback?.summary ? (
-                    <>
-                      <p className="muted-copy top-gap">最近一次压缩生成的摘要如下。</p>
-                      <pre className="top-gap">{compactionFeedback.summary}</pre>
-                    </>
-                  ) : null}
-                  {!isCompacting && compactionFeedback && !compactionFeedback.summary ? (
-                    <p className="muted-copy top-gap">这次没有返回可展示的压缩文本。</p>
-                  ) : null}
-                </section>
-              ) : null}
-            </article>
-          );
-        })}
-      </section>
+      {settingsTab === "runtime" ? <section className="settings-grid page-enter page-enter-delay-1">{ROOM_AGENTS.map((agent) => renderAgentCard(agent, "runtime"))}</section> : null}
     </div>
   );
 }
