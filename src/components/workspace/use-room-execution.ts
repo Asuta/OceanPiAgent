@@ -46,10 +46,14 @@ function updateTurn(
   return turns.map((turn) => (turn.id === turnId ? updater(turn) : turn));
 }
 
-function appendMissingRoomMessages(room: RoomSession, messages: RoomMessage[]): RoomSession {
+export function appendMissingMatchingRoomMessages(room: RoomSession, messages: RoomMessage[]): RoomSession {
   let nextRoom = room;
 
   for (const message of messages) {
+    if (message.roomId !== room.id) {
+      continue;
+    }
+
     if (nextRoom.roomMessages.some((entry) => entry.id === message.id)) {
       continue;
     }
@@ -98,6 +102,24 @@ export function useRoomExecution(args: {
     mergeAgentTurns,
     normalizeAssistantMeta,
   } = args;
+
+  const applyMissingEmittedMessages = useCallback((messages: RoomMessage[]) => {
+    for (const message of messages) {
+      let appended = false;
+      updateRoomState(message.roomId, (room) => {
+        if (room.roomMessages.some((entry) => entry.id === message.id)) {
+          return room;
+        }
+
+        appended = true;
+        return appendMessageToRoom(room, message);
+      });
+
+      if (appended) {
+        maybeStartSchedulerForRoomMessage(message.roomId, message);
+      }
+    }
+  }, [maybeStartSchedulerForRoomMessage, updateRoomState]);
 
   const getActiveAgentRun = useCallback((agentId: RoomAgentId): ActiveRoomRun | null => {
     return activeRunsRef.current[agentId] ?? null;
@@ -207,20 +229,17 @@ export function useRoomExecution(args: {
         },
         onDone: (event) => {
           updateRoomState(initiatingRoomId, (room) => {
-            const nextRoom = appendMissingRoomMessages(
-              {
-                ...room,
-                roomMessages: room.roomMessages.map((message) =>
-                  message.id === event.turn.userMessage.id ? event.turn.userMessage : message,
-                ),
-                error: "",
-                updatedAt: createTimestamp(),
-              },
-              event.turn.emittedMessages,
-            );
-
-            return nextRoom;
+            return {
+              ...room,
+              roomMessages: room.roomMessages.map((message) =>
+                message.id === event.turn.userMessage.id ? event.turn.userMessage : message,
+              ),
+              error: "",
+              updatedAt: createTimestamp(),
+            };
           });
+
+          applyMissingEmittedMessages(event.turn.emittedMessages);
 
           updateAgentTurns(agentId, (turns) =>
             updateTurn(turns, turnId, (turn) => ({
@@ -254,6 +273,7 @@ export function useRoomExecution(args: {
     },
     [
       applyReceiptUpdateToAllAgentConsoles,
+      applyMissingEmittedMessages,
       applyRoomToolActions,
       isCurrentAgentRun,
       maybeStartSchedulerForRoomMessage,
@@ -398,16 +418,10 @@ export function useRoomExecution(args: {
               }
             }
 
-            for (const emittedMessage of emittedMessages) {
-              nextRoom = appendMessageToRoom(nextRoom, emittedMessage);
-            }
-
             return nextRoom;
           });
 
-          for (const emittedMessage of emittedMessages) {
-            maybeStartSchedulerForRoomMessage(emittedMessage.roomId, emittedMessage);
-          }
+          applyMissingEmittedMessages(emittedMessages);
           for (const receiptUpdate of receiptUpdates) {
             applyReceiptUpdateToAllAgentConsoles(receiptUpdate);
           }
@@ -482,8 +496,8 @@ export function useRoomExecution(args: {
       getAttachedRoomsForAgent,
       getKnownAgentsForToolContext,
       getRoomHistoryByIdForAgent,
+      applyMissingEmittedMessages,
       isCurrentAgentRun,
-      maybeStartSchedulerForRoomMessage,
       mergeAgentTurns,
       readRoomStream,
       roomsRef,
