@@ -6,14 +6,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import {
   ROOM_AGENTS,
   formatTimestamp,
-  getCompatibilityDetailPills,
-  getCompatibilityModeLabel,
   getHumanParticipants,
   getPrimaryRoomAgentId,
   getReceiptInlineNote,
   getRoomAgent,
-  getRoomAgentSummary,
-  getRoomHumanSummary,
   getToolStats,
   useWorkspace,
 } from "@/components/workspace-provider";
@@ -249,7 +245,8 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     resetAgentContext,
   } = useWorkspace();
 
-  const [inspectorTab, setInspectorTab] = useState<"summary" | "console" | "room">("summary");
+  const [inspectorTab, setInspectorTab] = useState<"console" | "room">("console");
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [consoleScope, setConsoleScope] = useState<"room" | "all" | "timeline">("room");
   const [consoleViewMode, setConsoleViewMode] = useState<"formatted" | "raw">("formatted");
   const [newParticipantName, setNewParticipantName] = useState("");
@@ -371,7 +368,6 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const primaryAgentId = room ? getPrimaryRoomAgentId(room) : "concierge";
   const consoleAgentId = (selectedConsoleAgentId ?? primaryAgentId) as RoomAgentId;
   const consoleAgentState = agentStates[consoleAgentId];
-  const compatibilityPills = getCompatibilityDetailPills(consoleAgentState?.compatibility ?? null);
   const titleDraft = room ? titleDraftByRoomId[room.id] ?? room.title : "";
   const activeParticipant = room?.participants.find((participant) => participant.id === room.scheduler.activeParticipantId) ?? null;
   const ownerParticipant = room?.participants.find((participant) => participant.id === room.ownerParticipantId) ?? null;
@@ -389,6 +385,17 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
         : [],
     [consoleAgentState?.agentTurns, room],
   );
+  const roomTurnStats = useMemo(() => {
+    return roomTurns.reduce(
+      (stats, turn) => {
+        stats.turns += 1;
+        stats.tools += turn.tools.length;
+        stats.emissions += turn.emittedMessages.length;
+        return stats;
+      },
+      { turns: 0, tools: 0, emissions: 0 },
+    );
+  }, [roomTurns]);
   const visibleConsoleTurns = useMemo(() => {
     const turns = consoleScope === "room" ? roomTurns : (consoleAgentState?.agentTurns ?? []);
     return [...turns].sort((left, right) => getSortableTime(left.userMessage.createdAt) - getSortableTime(right.userMessage.createdAt));
@@ -531,25 +538,42 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   }
 
   return (
-    <div className="page-stack room-detail-page">
-      <section className="detail-hero surface-panel page-enter">
-        <div>
-          <p className="eyebrow-label">Room Detail</p>
-          <h1>{room.title}</h1>
-          <p>
-            {isRunning ? "房间正在继续轮询 Agent。" : "当前房间已准备就绪，你可以直接继续对话。"} 主要 Agent：{getRoomAgent(primaryAgentId).label}
-          </p>
-        </div>
-
-        <div className="hero-action-group">
-          <div className="meta-chip-row compact">
-            <span className="meta-chip">{getRoomAgentSummary(room)}</span>
-            <span className="meta-chip subtle">{getRoomHumanSummary(room)}</span>
-            <span className="meta-chip subtle">Owner: {ownerParticipant?.name ?? "none"}</span>
-            <span className="meta-chip subtle">{room.roomMessages.length} 条消息</span>
+    <div className="page-stack room-detail-page chat-centric-page">
+      <section className="surface-panel thread-panel room-chat-shell page-enter">
+        <div className="room-chat-topbar">
+          <div className="room-chat-titleblock">
+            <div className="room-chat-titleline">
+              <h1>{room.title}</h1>
+              <span className={isRunning ? "thread-status running" : "thread-status idle"}>{isRunning ? "处理中" : "空闲"}</span>
+              <span className="meta-chip subtle">{getRoomAgent(primaryAgentId).label}</span>
+              <span className="meta-chip subtle">{room.roomMessages.length} 条消息</span>
+            </div>
+            <p className="thread-panel-copy">
+              {isRunning ? `${activeParticipant?.name || getRoomAgent(primaryAgentId).label} 正在继续处理这条会话。` : "当前房间已准备就绪，可以直接继续对话。"}
+            </p>
           </div>
 
-          <div className="card-actions compact-right">
+          <div className="room-chat-toolbar">
+            <button
+              type="button"
+              className={workbenchOpen && inspectorTab === "console" ? "tab-button active" : "tab-button"}
+              onClick={() => {
+                setInspectorTab("console");
+                setWorkbenchOpen(true);
+              }}
+            >
+              执行详情
+            </button>
+            <button
+              type="button"
+              className={workbenchOpen && inspectorTab === "room" ? "tab-button active" : "tab-button"}
+              onClick={() => {
+                setInspectorTab("room");
+                setWorkbenchOpen(true);
+              }}
+            >
+              房间设置
+            </button>
             <Link href="/settings" className="secondary-button">
               打开设置
             </Link>
@@ -558,237 +582,184 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
             </button>
           </div>
         </div>
-      </section>
 
-      <div className="detail-grid page-enter page-enter-delay-1">
-        <section className="surface-panel thread-panel">
-          <div className="thread-panel-header">
-            <div>
-              <p className="section-label">对话</p>
-              <h2>房间消息</h2>
-              <p className="thread-panel-copy">消息区只保留最关键的信息，执行细节在右侧按需展开。</p>
+        {isRunning ? (
+          <div className="thread-live-banner" role="status" aria-live="polite">
+            <div className="thread-live-copy">
+              <strong>{activeParticipant?.name || getRoomAgent(primaryAgentId).label} 正在继续处理这条会话</strong>
+              <p>如果你现在发送新消息，会中断当前轮询并接管为新的上下文。</p>
             </div>
-            <span className={isRunning ? "thread-status running" : "thread-status idle"}>{isRunning ? "处理中" : "空闲"}</span>
+            <span className="thread-live-badge">live</span>
           </div>
+        ) : null}
 
-          {isRunning ? (
-            <div className="thread-live-banner" role="status" aria-live="polite">
-              <div className="thread-live-copy">
-                <strong>{activeParticipant?.name || getRoomAgent(primaryAgentId).label} 正在继续处理这条会话</strong>
-                <p>如果你现在发送新消息，会中断当前轮询并接管为新的上下文。</p>
+        <div ref={threadListRef} className="thread-list">
+          {room.roomMessages.length === 0 ? (
+            <div className="empty-panel thread-empty rich-empty-state">
+              <div className="empty-orbit" aria-hidden="true">
+                <span className="empty-orbit-ring large" />
+                <span className="empty-orbit-ring small" />
+                <span className="empty-orbit-core" />
               </div>
-              <span className="thread-live-badge">live</span>
-            </div>
-          ) : null}
-
-          <div ref={threadListRef} className="thread-list">
-            {room.roomMessages.length === 0 ? (
-              <div className="empty-panel thread-empty rich-empty-state">
-                <div className="empty-orbit" aria-hidden="true">
-                  <span className="empty-orbit-ring large" />
-                  <span className="empty-orbit-ring small" />
-                  <span className="empty-orbit-core" />
-                </div>
-                <div className="empty-copy-stack">
-                  <p className="section-label">准备开始</p>
-                  <h3>这个房间还没有第一条消息</h3>
-                  <p>先发一条清晰的目标描述，房间会在内部完成调度，再把适合展示给你的内容投递回来。</p>
-                </div>
-                <div className="starter-prompt-grid">
-                  {STARTER_PROMPTS.map((prompt) => (
-                    <button key={prompt} type="button" className="starter-prompt" onClick={() => setDraft(room.id, prompt)}>
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
+              <div className="empty-copy-stack">
+                <p className="section-label">准备开始</p>
+                <h3>这个房间还没有第一条消息</h3>
+                <p>先发一条清晰的目标描述，房间会在内部完成调度，再把适合展示给你的内容投递回来。</p>
               </div>
-            ) : (
-              room.roomMessages.map((message, index) => {
-                const shouldShowState = message.role === "assistant" && (message.kind !== "answer" || message.status !== "completed");
-                const isLatestMessage = index === room.roomMessages.length - 1;
-                return (
-                  <article
-                    key={message.id}
-                    className={`${getMessageCardClass(message)}${isLatestMessage ? " is-latest" : ""}`}
-                    style={isLatestMessage ? undefined : { animationDelay: `${Math.min(index * 34, 180)}ms` }}
-                  >
-                    <div className={`message-avatar ${message.role}`} aria-hidden="true">
-                      {getSenderMonogram(message.sender.name)}
-                    </div>
-                    <div className="thread-message-content">
-                      <div className="thread-message-topline">
-                        <div className="thread-message-heading">
-                          <span className="thread-message-kicker">{getMessageKicker(message)}</span>
-                          <strong>{message.sender.name}</strong>
-                        </div>
-                        <span>{formatTimestamp(message.createdAt)}</span>
-                      </div>
-
-                      {(shouldShowState || message.receipts.length > 0) && (
-                        <div className="message-state-row">
-                          {shouldShowState ? <span className="meta-chip subtle">{ROOM_KIND_LABELS[message.kind]}</span> : null}
-                          {shouldShowState ? <span className="meta-chip subtle">{ROOM_STATUS_LABELS[message.status]}</span> : null}
-                          {message.final === false ? <span className="meta-chip subtle">过程消息</span> : null}
-                          {message.receipts.length > 0 ? <span className="meta-chip subtle">已读不回</span> : null}
-                        </div>
-                      )}
-
-                      <div className="thread-message-body">{message.content}</div>
-
-                      {message.receipts.length > 0 ? (
-                        <div className="message-receipt-note">
-                          {message.receipts.map((receipt) => `✓ ${receipt.participantName}`).join("  ")}
-                        </div>
-                      ) : null}
-                    </div>
-                  </article>
-                );
-              })
-            )}
-          </div>
-
-          <form
-            className="composer-card"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void sendMessage({
-                roomId: room.id,
-                content: roomDraft,
-                senderId: selectedSender?.id,
-              });
-            }}
-          >
-            <div className="composer-topline">
-              <label className="field-block inline-field compact-width" htmlFor="room-sender-select">
-                <span>发送身份</span>
-                <select
-                  id="room-sender-select"
-                  className="text-input"
-                  value={selectedSender?.id ?? ""}
-                  onChange={(event) => setSelectedSender(room.id, event.target.value)}
-                  disabled={availableSenders.length === 0 || isRunning}
-                >
-                  {availableSenders.map((participant) => (
-                    <option key={participant.id} value={participant.id}>
-                      {participant.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="composer-note">按 Enter 发送，Shift + Enter 换行。</div>
-            </div>
-
-            <textarea
-              id="room-draft"
-              name="draft"
-              className="text-area"
-              value={roomDraft}
-              onChange={(event) => setDraft(room.id, event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void sendMessage({
-                    roomId: room.id,
-                    content: roomDraft,
-                    senderId: selectedSender?.id,
-                  });
-                }
-              }}
-              placeholder="输入新的房间消息..."
-            />
-
-            {room.error ? <p className="error-text">{room.error}</p> : null}
-
-            {room.roomMessages.length > 0 ? (
-              <div className="quick-reply-row">
+              <div className="starter-prompt-grid">
                 {STARTER_PROMPTS.map((prompt) => (
-                  <button key={prompt} type="button" className="starter-prompt compact" onClick={() => setDraft(room.id, prompt)}>
+                  <button key={prompt} type="button" className="starter-prompt" onClick={() => setDraft(room.id, prompt)}>
                     {prompt}
                   </button>
                 ))}
               </div>
-            ) : null}
-
-            <div className="composer-actions">
-              <span className="composer-note">
-                {isRunning
-                  ? "当前 Agent 正在处理中；发送新消息会接管当前轮询。"
-                  : localParticipantMissing
-                    ? "你当前不在成员列表里；发送消息会自动重新加入。"
-                    : "房间状态现在会同步到服务端；本地仍保留一份缓存副本。"}
-              </span>
-              <button type="submit" className="primary-button" disabled={!canSend}>
-                发送消息
-              </button>
             </div>
-          </form>
-        </section>
+          ) : (
+            room.roomMessages.map((message, index) => {
+              const shouldShowState = message.role === "assistant" && (message.kind !== "answer" || message.status !== "completed");
+              const isLatestMessage = index === room.roomMessages.length - 1;
+              return (
+                <article
+                  key={message.id}
+                  className={`${getMessageCardClass(message)}${isLatestMessage ? " is-latest" : ""}`}
+                  style={isLatestMessage ? undefined : { animationDelay: `${Math.min(index * 34, 180)}ms` }}
+                >
+                  <div className={`message-avatar ${message.role}`} aria-hidden="true">
+                    {getSenderMonogram(message.sender.name)}
+                  </div>
+                  <div className="thread-message-content">
+                    <div className="thread-message-topline">
+                      <div className="thread-message-heading">
+                        <span className="thread-message-kicker">{getMessageKicker(message)}</span>
+                        <strong>{message.sender.name}</strong>
+                      </div>
+                      <span>{formatTimestamp(message.createdAt)}</span>
+                    </div>
 
-        <aside className="surface-panel inspector-panel">
-          <div className="inspector-tabs">
-            <button type="button" className={inspectorTab === "summary" ? "tab-button active" : "tab-button"} onClick={() => setInspectorTab("summary")}>
-              概览
-            </button>
-            <button type="button" className={inspectorTab === "console" ? "tab-button active" : "tab-button"} onClick={() => setInspectorTab("console")}>
-              执行详情
-            </button>
-            <button type="button" className={inspectorTab === "room" ? "tab-button active" : "tab-button"} onClick={() => setInspectorTab("room")}>
-              房间设置
-            </button>
+                    {(shouldShowState || message.receipts.length > 0) && (
+                      <div className="message-state-row">
+                        {shouldShowState ? <span className="meta-chip subtle">{ROOM_KIND_LABELS[message.kind]}</span> : null}
+                        {shouldShowState ? <span className="meta-chip subtle">{ROOM_STATUS_LABELS[message.status]}</span> : null}
+                        {message.final === false ? <span className="meta-chip subtle">过程消息</span> : null}
+                        {message.receipts.length > 0 ? <span className="meta-chip subtle">已读不回</span> : null}
+                      </div>
+                    )}
+
+                    <div className="thread-message-body">{message.content}</div>
+
+                    {message.receipts.length > 0 ? (
+                      <div className="message-receipt-note">
+                        {message.receipts.map((receipt) => `✓ ${receipt.participantName}`).join("  ")}
+                      </div>
+                    ) : null}
+                  </div>
+                </article>
+              );
+            })
+          )}
+        </div>
+
+        <form
+          className="composer-card"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void sendMessage({
+              roomId: room.id,
+              content: roomDraft,
+              senderId: selectedSender?.id,
+            });
+          }}
+        >
+          <div className="composer-topline">
+            <label className="field-block inline-field compact-width" htmlFor="room-sender-select">
+              <span>发送身份</span>
+              <select
+                id="room-sender-select"
+                className="text-input"
+                value={selectedSender?.id ?? ""}
+                onChange={(event) => setSelectedSender(room.id, event.target.value)}
+                disabled={availableSenders.length === 0 || isRunning}
+              >
+                {availableSenders.map((participant) => (
+                  <option key={participant.id} value={participant.id}>
+                    {participant.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="composer-note">按 Enter 发送，Shift + Enter 换行。</div>
           </div>
 
-          {inspectorTab === "summary" ? (
-            <div className="inspector-stack">
-              <section className="subtle-panel">
-                <p className="section-label">当前状态</p>
-                <div className="info-list">
-                  <div>
-                    <span>房间状态</span>
-                    <strong>{isRunning ? "处理中" : "空闲"}</strong>
-                  </div>
-                  <div>
-                    <span>主 Agent</span>
-                    <strong>{getRoomAgent(primaryAgentId).label}</strong>
-                  </div>
-                  <div>
-                    <span>房间 Owner</span>
-                    <strong>{ownerParticipant?.name ?? "none"}</strong>
-                  </div>
-                  <div>
-                    <span>最近模型</span>
-                    <strong>{consoleAgentState?.resolvedModel || "尚未请求"}</strong>
-                  </div>
-                </div>
-              </section>
+          <textarea
+            id="room-draft"
+            name="draft"
+            className="text-area"
+            value={roomDraft}
+            onChange={(event) => setDraft(room.id, event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void sendMessage({
+                  roomId: room.id,
+                  content: roomDraft,
+                  senderId: selectedSender?.id,
+                });
+              }
+            }}
+            placeholder="输入新的房间消息..."
+          />
 
-              <section className="subtle-panel">
-                <p className="section-label">参与者</p>
-                <div className="participant-pill-list">
-                  {room.participants.map((participant) => (
-                    <span key={participant.id} className="meta-chip subtle">
-                      {participant.name}{participant.id === room.ownerParticipantId ? " · owner" : ""}
-                    </span>
-                  ))}
-                </div>
-              </section>
+          {room.error ? <p className="error-text">{room.error}</p> : null}
 
-              <section className="subtle-panel">
-                <p className="section-label">兼容策略</p>
-                <strong className="panel-lead">{getCompatibilityModeLabel(consoleAgentState?.compatibility ?? null)}</strong>
-                {compatibilityPills.length > 0 ? (
-                  <div className="meta-chip-row compact top-gap">
-                    {compatibilityPills.map((pill) => (
-                      <span key={pill} className="meta-chip subtle">
-                        {pill}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="muted-copy top-gap">第一次请求之后，这里会出现本次上游的兼容策略摘要。</p>
-                )}
-              </section>
+          {room.roomMessages.length > 0 ? (
+            <div className="quick-reply-row">
+              {STARTER_PROMPTS.map((prompt) => (
+                <button key={prompt} type="button" className="starter-prompt compact" onClick={() => setDraft(room.id, prompt)}>
+                  {prompt}
+                </button>
+              ))}
             </div>
           ) : null}
+
+          <div className="composer-actions">
+            <span className="composer-note">
+              {isRunning
+                ? "当前 Agent 正在处理中；发送新消息会接管当前轮询。"
+                : localParticipantMissing
+                  ? "你当前不在成员列表里；发送消息会自动重新加入。"
+                  : "房间状态现在会同步到服务端；本地仍保留一份缓存副本。"}
+            </span>
+            <button type="submit" className="primary-button" disabled={!canSend}>
+              发送消息
+            </button>
+          </div>
+        </form>
+      </section>
+
+      {workbenchOpen ? (
+        <section className="surface-panel section-panel room-workbench page-enter page-enter-delay-1">
+          <div className="section-heading-row">
+            <div>
+              <p className="section-label">Workbench</p>
+              <h2>{inspectorTab === "console" ? "执行详情" : "房间设置"}</h2>
+              <p className="muted-copy">
+                {inspectorTab === "console"
+                  ? `当前已记录 ${roomTurnStats.turns} 轮轨迹、${roomTurnStats.tools} 次工具调用。`
+                  : `当前房间有 ${room.participants.length} 位参与者，owner 为 ${ownerParticipant?.name ?? "none"}。`}
+              </p>
+            </div>
+            <div className="inspector-tabs">
+              <button type="button" className={inspectorTab === "console" ? "tab-button active" : "tab-button"} onClick={() => setInspectorTab("console")}>
+                执行详情
+              </button>
+              <button type="button" className={inspectorTab === "room" ? "tab-button active" : "tab-button"} onClick={() => setInspectorTab("room")}>
+                房间设置
+              </button>
+              <button type="button" className="ghost-button" onClick={() => setWorkbenchOpen(false)}>
+                收起
+              </button>
+            </div>
+          </div>
 
           {inspectorTab === "console" ? (
             <div className="inspector-stack">
@@ -1049,8 +1020,8 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               </section>
             </div>
           ) : null}
-        </aside>
-      </div>
+        </section>
+      ) : null}
     </div>
   );
 }

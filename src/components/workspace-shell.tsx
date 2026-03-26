@@ -33,6 +33,17 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const { activeRooms, archivedRooms, activeRoomId, createRoom, hydrated, setActiveRoomId } = useWorkspace();
 
   const shellTitle = useMemo(() => getShellTitle(pathname), [pathname]);
+  const sidebarRooms = useMemo(() => {
+    if (!hydrated || activeRooms.length === 0) {
+      return [];
+    }
+
+    const currentPathRoomId = pathname.startsWith("/rooms/") ? pathname.split("/")[2] ?? "" : activeRoomId;
+    const pinned = currentPathRoomId ? activeRooms.find((room) => room.id === currentPathRoomId) : null;
+    const recent = activeRooms.filter((room) => room.id !== pinned?.id).slice(0, 3);
+
+    return pinned ? [pinned, ...recent] : activeRooms.slice(0, 4);
+  }, [activeRoomId, activeRooms, hydrated, pathname]);
 
   return (
     <div className={`app-shell${sidebarOpen ? " sidebar-open" : ""}`}>
@@ -72,14 +83,17 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
         <section className="sidebar-section surface-panel">
           <div className="section-heading-row">
             <div>
-              <p className="section-label">活跃房间</p>
-              <strong>{hydrated ? `${activeRooms.length} 个会话` : "加载中"}</strong>
+              <p className="section-label">最近房间</p>
+              <strong>{hydrated ? `${activeRooms.length} 个活跃会话` : "加载中"}</strong>
             </div>
+            <Link href="/rooms" className="mini-button" onClick={() => setSidebarOpen(false)}>
+              查看总览
+            </Link>
           </div>
 
           <div className="sidebar-room-list">
             {hydrated ? (
-              activeRooms.map((room) => {
+              sidebarRooms.map((room) => {
                 const active = pathname === `/rooms/${room.id}` || (pathname === "/rooms" && room.id === activeRoomId);
                 return (
                   <Link
@@ -102,6 +116,8 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
             ) : (
               <div className="sidebar-empty-card">正在恢复本地房间...</div>
             )}
+
+            {hydrated && activeRooms.length > sidebarRooms.length ? <div className="sidebar-empty-card">其余房间可在总览页继续查看。</div> : null}
           </div>
 
           {archivedRooms.length > 0 ? (
