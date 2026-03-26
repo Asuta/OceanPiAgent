@@ -679,6 +679,17 @@ p {
   gap: 14px;
 }
 
+.room-detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.room-detail-layout.sidepanel-open {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+}
+
 .room-chat-shell {
   display: flex;
   flex-direction: column;
@@ -756,6 +767,33 @@ p {
 
 .room-workbench {
   padding: 22px;
+}
+
+.room-side-panel {
+  position: sticky;
+  top: 86px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: calc(100vh - 170px);
+  min-height: 680px;
+  padding: 18px;
+  overflow: hidden;
+}
+
+.room-side-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.room-side-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .thread-panel-copy {
@@ -1487,9 +1525,19 @@ p {
     grid-template-columns: 1fr;
   }
 
+  .room-detail-layout.sidepanel-open {
+    grid-template-columns: 1fr;
+  }
+
   .room-chat-shell {
     height: calc(100vh - 140px);
     min-height: 620px;
+  }
+
+  .room-side-panel {
+    position: static;
+    height: auto;
+    min-height: auto;
   }
 
   .app-sidebar {
