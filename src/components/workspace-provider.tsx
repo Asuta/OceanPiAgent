@@ -18,6 +18,7 @@ import type {
   AgentRoomTurn,
   AgentSharedState,
   ChatSettings,
+  MessageImageAttachment,
   ProviderCompatibility,
   RoomHistoryMessageSummary,
   RoomAgentId,
@@ -68,6 +69,7 @@ import {
   sortRoomsByUpdatedAt,
   upsertRoomMessageReceipt,
 } from "@/lib/chat/workspace-domain";
+import { hasMessagePayload } from "@/lib/chat/message-attachments";
 import {
   clearPersistedWorkspaceState,
   fetchWorkspaceEnvelope,
@@ -147,6 +149,7 @@ function createInitialAgentCompactionFeedback(): Record<RoomAgentId, AgentCompac
 interface SendMessageArgs {
   roomId: string;
   content: string;
+  attachments?: MessageImageAttachment[];
   senderId?: string;
 }
 
@@ -481,6 +484,22 @@ function normalizeRoomToolAction(value: unknown): RoomToolActionUnion | undefine
   return undefined;
 }
 
+function normalizeMessageImageAttachment(value: unknown): MessageImageAttachment | null {
+  if (!isRecord(value) || value.kind !== "image") {
+    return null;
+  }
+
+  return {
+    id: typeof value.id === "string" && value.id ? value.id : createUuid(),
+    kind: "image",
+    mimeType: typeof value.mimeType === "string" ? value.mimeType : "image/png",
+    filename: typeof value.filename === "string" && value.filename ? value.filename : "image",
+    sizeBytes: typeof value.sizeBytes === "number" && Number.isFinite(value.sizeBytes) ? Math.max(0, Math.round(value.sizeBytes)) : 0,
+    storagePath: typeof value.storagePath === "string" ? value.storagePath : "",
+    url: typeof value.url === "string" ? value.url : "",
+  };
+}
+
 function normalizeRoomMessage(
   value: unknown,
   fallbackRole: RoomMessage["role"] = "assistant",
@@ -491,7 +510,12 @@ function normalizeRoomMessage(
   }
 
   const content = value.content.trim();
-  if (!content) {
+  const attachments = Array.isArray(value.attachments)
+    ? value.attachments
+        .map((attachment) => normalizeMessageImageAttachment(attachment))
+        .filter((attachment): attachment is MessageImageAttachment => Boolean(attachment))
+    : [];
+  if (!content && attachments.length === 0) {
     return null;
   }
 
@@ -510,6 +534,7 @@ function normalizeRoomMessage(
     role,
     sender: normalizeRoomSender(value.sender, role, source),
     content,
+    attachments,
     source,
     kind: normalizedKind,
     status: isRoomMessageStatus(value.status) ? value.status : "completed",
@@ -1948,14 +1973,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   );
 
   const sendMessage = useCallback(
-    async ({ roomId, content, senderId }: SendMessageArgs) => {
+    async ({ roomId, content, attachments = [], senderId }: SendMessageArgs) => {
       const roomSnapshot = roomsRef.current.find((room) => room.id === roomId && !room.archivedAt);
       if (!roomSnapshot) {
         return;
       }
 
       const normalizedContent = content.trim();
-      if (!normalizedContent) {
+      if (!hasMessagePayload(normalizedContent, attachments)) {
         return;
       }
 
@@ -1974,7 +1999,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setActiveRoomId(roomId);
       setSelectedSender(roomId, sender.id);
       interruptRoomScheduler(roomId);
-      updateRoomState(roomId, (room) => applyOutgoingUserMessage({ room, content: normalizedContent, sender, nextTitle }));
+      updateRoomState(roomId, (room) => applyOutgoingUserMessage({ room, content: normalizedContent, attachments, sender, nextTitle }));
       clearDraftForRoom(roomId);
       await runRoomScheduler(roomId);
     },

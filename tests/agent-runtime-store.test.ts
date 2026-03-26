@@ -8,6 +8,16 @@ import { pathToFileURL } from "node:url";
 type RuntimeStoreModule = typeof import("../src/lib/server/agent-runtime-store");
 type AgentCompactionModule = typeof import("../src/lib/server/agent-compaction");
 
+const TEST_IMAGE_ATTACHMENT = {
+  id: "img-1",
+  kind: "image" as const,
+  mimeType: "image/jpeg",
+  filename: "test.jpg",
+  sizeBytes: 1234,
+  storagePath: "images/test.jpg",
+  url: "/api/uploads/image/images/test.jpg",
+};
+
 const repoRoot = process.cwd();
 
 async function withRuntimeModules(
@@ -160,6 +170,61 @@ test("compactPersistedAgentRuntime falls back to the local rule summary when LLM
     assert.match(result.history[0]?.content ?? "", /^## Decisions/m);
     assert.match(result.history[0]?.content ?? "", /\[Compacted shared history summary\]/);
     assert.match(result.history[0]?.content ?? "", /^## Exact identifiers/m);
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
+test("compactPersistedAgentRuntime keeps image-bearing messages in persisted history", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction) => {
+    const agentId = "operator";
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => {
+      return [
+        "## Decisions",
+        "- none",
+        "",
+        "## Open TODOs",
+        "- none",
+        "",
+        "## Constraints/Rules",
+        "- none",
+        "",
+        "## Pending user asks",
+        "- none",
+        "",
+        "## Exact identifiers",
+        "- none",
+      ].join("\n");
+    });
+
+    await seedConversation(runtimeStore, agentId);
+    await runtimeStore.appendPersistedHistoryMessage({
+      agentId,
+      message: {
+        role: "user",
+        content: [
+          "[Incoming Chat Room message]",
+          "Room ID: room-alpha",
+          "Room Title: Alpha Room",
+          "Message ID: msg-image",
+          "Sender ID: local-user",
+          "Sender Name: You",
+          "Sender Role: participant",
+          "Visible room message:",
+          "What is in this image?",
+        ].join("\n"),
+        attachments: [TEST_IMAGE_ATTACHMENT],
+      },
+    });
+
+    const result = await runtimeStore.compactPersistedAgentRuntime({
+      agentId,
+      reason: "manual",
+      force: true,
+    });
+
+    assert.equal(result.compacted, true);
+    assert.ok(result.history.some((message) => message.attachments.some((attachment) => attachment.id === TEST_IMAGE_ATTACHMENT.id)));
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });

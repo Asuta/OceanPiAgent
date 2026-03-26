@@ -87,6 +87,16 @@ export interface RoomMessageReceipt {
   createdAt: string;
 }
 
+export interface MessageImageAttachment {
+  id: string;
+  kind: "image";
+  mimeType: string;
+  filename: string;
+  sizeBytes: number;
+  storagePath: string;
+  url: string;
+}
+
 export type RoomSenderRole = "participant" | "system";
 
 export type RoomParticipantRuntimeKind = "human" | "agent";
@@ -152,6 +162,7 @@ export interface RoomHistoryMessageSummary {
   final: boolean;
   createdAt: string;
   content: string;
+  attachments: MessageImageAttachment[];
   receipts: RoomMessageReceipt[];
 }
 
@@ -227,6 +238,7 @@ export interface RoomMessage {
   role: RoomMessageRole;
   sender: RoomSender;
   content: string;
+  attachments: MessageImageAttachment[];
   source: RoomMessageSource;
   kind: RoomMessageKind;
   status: RoomMessageStatus;
@@ -329,6 +341,7 @@ export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
+  attachments: MessageImageAttachment[];
   tools?: ToolExecution[];
   meta?: AssistantMessageMeta;
 }

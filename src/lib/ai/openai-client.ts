@@ -1,9 +1,10 @@
 import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
-import type { Api, AssistantMessage, Message, Model } from "@mariozechner/pi-ai";
+import type { Api, AssistantMessage, Message, Model, UserMessage } from "@mariozechner/pi-ai";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { resolvePiModel } from "@/lib/ai/pi-model-resolver";
 import { getPiAgentTools, type PiToolResultDetails } from "@/lib/ai/pi-agent-tools";
 import { runBeforeModelResolveHooks, runBeforePromptBuildHooks } from "@/lib/ai/runtime-hooks";
+import { readStoredImageAttachment } from "@/lib/server/image-upload-store";
 import { ensureGlobalProxyDispatcherInstalled } from "@/lib/server/proxy-fetch";
 import type {
   ApiFormat,
@@ -20,7 +21,7 @@ import type {
 } from "@/lib/chat/types";
 import { coerceMaxToolLoopSteps } from "@/lib/chat/types";
 
-type VisibleMessage = Pick<ChatMessage, "role" | "content">;
+type VisibleMessage = Pick<ChatMessage, "role" | "content" | "attachments">;
 
 interface RunConversationResult {
   assistantText: string;
@@ -126,20 +127,45 @@ function createHistoricalAssistantMessage(message: VisibleMessage, model: Model<
   };
 }
 
-function createConversationHistory(messages: VisibleMessage[], model: Model<Api>): Message[] {
+async function createUserMessageContent(message: VisibleMessage): Promise<UserMessage["content"]> {
+  const attachments = message.attachments ?? [];
+  if (attachments.length === 0) {
+    return message.content;
+  }
+
+  const blocks: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+  if (message.content.trim()) {
+    blocks.push({
+      type: "text",
+      text: message.content,
+    });
+  }
+
+  const imageBlocks = await Promise.all(
+    attachments.map(async (attachment) => ({
+      type: "image" as const,
+      data: (await readStoredImageAttachment(attachment)).toString("base64"),
+      mimeType: attachment.mimeType,
+    })),
+  );
+
+  return [...blocks, ...imageBlocks];
+}
+
+async function createConversationHistory(messages: VisibleMessage[], model: Model<Api>): Promise<Message[]> {
   const startTimestamp = Date.now() - Math.max(messages.length, 1) * 1_000;
-  return messages.map((message, index) => {
+  return Promise.all(messages.map(async (message, index) => {
     const timestamp = startTimestamp + index * 1_000;
     if (message.role === "user") {
       return {
         role: "user",
-        content: message.content,
+        content: await createUserMessageContent(message),
         timestamp,
       } satisfies Message;
     }
 
     return createHistoricalAssistantMessage(message, model, timestamp);
-  });
+  }));
 }
 
 function isAssistantMessage(message: Message): message is AssistantMessage {
@@ -273,7 +299,7 @@ async function executeConversation(
       model: resolvedModel.model,
       thinkingLevel: resolvedModel.actualThinkingLevel,
       tools: getPiAgentTools(resolvedOptions.toolScope, resolvedOptions.toolContext),
-      messages: createConversationHistory(messages, resolvedModel.model),
+      messages: await createConversationHistory(messages, resolvedModel.model),
     },
     getApiKey: resolvedModel.apiKey
       ? async () => resolvedModel.apiKey

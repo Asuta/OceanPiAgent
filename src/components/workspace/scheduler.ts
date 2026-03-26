@@ -59,6 +59,9 @@ export function buildSchedulerPacketContent(
     latestParticipantMessage
       ? `Latest message: seq ${latestParticipantMessage.seq} | messageId ${latestParticipantMessage.id} | from ${latestParticipantMessage.sender.name} (${latestParticipantMessage.sender.id}, ${latestParticipantMessage.sender.role}) | ${latestParticipantMessage.kind}/${latestParticipantMessage.status}: ${latestParticipantMessage.content}`
       : "Latest message: none",
+    latestParticipantMessage && latestParticipantMessage.attachments.length > 0
+      ? `Latest message attachments: ${latestParticipantMessage.attachments.length} image file(s) included with the original visible room message.`
+      : "Latest message attachments: none",
   ].join("\n");
 }
 
@@ -93,6 +96,8 @@ export function createSchedulerPacket(args: {
   requestId: string;
   hasNewDelta: boolean;
 }): RoomMessage {
+  const visibleTargetMessages = getSchedulerVisibleTargetMessages(args.messages, args.participant);
+  const latestParticipantMessage = visibleTargetMessages[visibleTargetMessages.length - 1] ?? null;
   const packet = createRoomMessage(
     args.room.id,
     "system",
@@ -101,6 +106,7 @@ export function createSchedulerPacket(args: {
     }),
     "system",
     {
+      attachments: latestParticipantMessage ? [...latestParticipantMessage.attachments] : [],
       sender: ROOM_SCHEDULER_SENDER,
       kind: "system",
       status: "completed",

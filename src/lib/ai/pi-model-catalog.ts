@@ -25,6 +25,7 @@ export interface PiModelOption {
   summary: string;
   reasoning: boolean;
   supportsXhigh: boolean;
+  supportsImageInput?: boolean;
 }
 
 interface PiProviderCatalogEntry extends PiProviderOption {
@@ -34,6 +35,11 @@ interface PiProviderCatalogEntry extends PiProviderOption {
 export interface PiThinkingCapability {
   reasoning: boolean;
   supportsXhigh: boolean;
+  knownModel: boolean;
+}
+
+export interface PiInputCapability {
+  supportsImageInput: boolean;
   knownModel: boolean;
 }
 
@@ -53,6 +59,7 @@ const PROVIDER_CATALOG: Record<PiProviderId, PiProviderCatalogEntry> = {
         summary: "Leave the model empty and follow your environment default.",
         reasoning: false,
         supportsXhigh: false,
+        supportsImageInput: false,
       },
       {
         value: "gpt-4.1-mini",
@@ -60,6 +67,7 @@ const PROVIDER_CATALOG: Record<PiProviderId, PiProviderCatalogEntry> = {
         summary: "Balanced default for fast room work on OpenAI-compatible endpoints.",
         reasoning: false,
         supportsXhigh: false,
+        supportsImageInput: true,
       },
       {
         value: "gpt-4.1",
@@ -67,6 +75,7 @@ const PROVIDER_CATALOG: Record<PiProviderId, PiProviderCatalogEntry> = {
         summary: "Higher-quality general model when your endpoint mirrors OpenAI naming.",
         reasoning: false,
         supportsXhigh: false,
+        supportsImageInput: true,
       },
       {
         value: "gpt-5",
@@ -74,6 +83,7 @@ const PROVIDER_CATALOG: Record<PiProviderId, PiProviderCatalogEntry> = {
         summary: "Reasoning-capable model for deeper planning and tool-heavy work.",
         reasoning: true,
         supportsXhigh: false,
+        supportsImageInput: true,
       },
       {
         value: "gpt-5-mini",
@@ -81,6 +91,7 @@ const PROVIDER_CATALOG: Record<PiProviderId, PiProviderCatalogEntry> = {
         summary: "Cheaper reasoning-capable option when available on your endpoint.",
         reasoning: true,
         supportsXhigh: false,
+        supportsImageInput: true,
       },
       {
         value: "o4-mini",
@@ -88,6 +99,7 @@ const PROVIDER_CATALOG: Record<PiProviderId, PiProviderCatalogEntry> = {
         summary: "Compact reasoning model for OpenAI-compatible deployments that expose the o-series.",
         reasoning: true,
         supportsXhigh: false,
+        supportsImageInput: true,
       },
     ],
   },
@@ -428,6 +440,43 @@ export function getPiThinkingCapability(modelValue: string): PiThinkingCapabilit
   return {
     reasoning,
     supportsXhigh,
+    knownModel: false,
+  };
+}
+
+export function getPiInputCapability(modelValue: string): PiInputCapability {
+  const preset = getPiModelOptionByValue(modelValue);
+  if (preset) {
+    return {
+      supportsImageInput: Boolean(preset.supportsImageInput),
+      knownModel: true,
+    };
+  }
+
+  const normalized = normalizeModelValue(modelValue).toLowerCase();
+  if (!normalized) {
+    return {
+      supportsImageInput: false,
+      knownModel: false,
+    };
+  }
+
+  const supportsImageInput =
+    normalized.includes("vision") ||
+    normalized.includes("multimodal") ||
+    normalized.includes("4o") ||
+    normalized.includes("4.1") ||
+    normalized.includes("5") ||
+    normalized.includes("o1") ||
+    normalized.includes("o3") ||
+    normalized.includes("o4") ||
+    normalized.includes("claude") ||
+    normalized.includes("gemini") ||
+    normalized.includes("glm-4.5v") ||
+    normalized.endsWith("-v");
+
+  return {
+    supportsImageInput,
     knownModel: false,
   };
 }

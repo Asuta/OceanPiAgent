@@ -1,8 +1,15 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import {
+  ALLOWED_MESSAGE_IMAGE_MIME_TYPES,
+  MAX_MESSAGE_IMAGE_ATTACHMENTS,
+  MAX_MESSAGE_IMAGE_BYTES,
+  formatMessageForTranscript,
+} from "@/lib/chat/message-attachments";
 import {
   ROOM_AGENTS,
   formatTimestamp,
@@ -18,7 +25,7 @@ import {
   useWorkspace,
 } from "@/components/workspace-provider";
 import { RoomCronPanel } from "@/components/room-cron-panel";
-import type { AgentRoomTurn, RoomAgentId, RoomMessage, RoomParticipant } from "@/lib/chat/types";
+import type { AgentRoomTurn, MessageImageAttachment, RoomAgentId, RoomMessage, RoomParticipant } from "@/lib/chat/types";
 
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
 const LOCAL_PARTICIPANT_NAME = "You";
@@ -41,7 +48,7 @@ function formatRawTurnLog(turn: AgentRoomTurn, roomTitle: string) {
     `createdAt=${turn.userMessage.createdAt}`,
     "",
     "[room-input]",
-    turn.userMessage.content || "",
+    formatMessageForTranscript(turn.userMessage.content, turn.userMessage.attachments) || "",
   ];
 
   if (turn.continuationSnapshot) {
@@ -59,7 +66,7 @@ function formatRawTurnLog(turn: AgentRoomTurn, roomTitle: string) {
     for (const message of turn.emittedMessages) {
       sections.push(
         `- id=${message.id} kind=${message.kind} status=${message.status} final=${message.final ? "true" : "false"} sender=${message.sender.name}`,
-        message.content,
+        formatMessageForTranscript(message.content, message.attachments),
       );
     }
   }
@@ -253,12 +260,25 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const [consoleScope, setConsoleScope] = useState<"room" | "all" | "timeline">("room");
   const [consoleViewMode, setConsoleViewMode] = useState<"formatted" | "raw">("formatted");
   const [newParticipantName, setNewParticipantName] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState<MessageImageAttachment[]>([]);
+  const [uploadError, setUploadError] = useState("");
+  const [isUploadingImages, setIsUploadingImages] = useState(false);
   const [titleDraftByRoomId, setTitleDraftByRoomId] = useState<Record<string, string>>({});
   const threadListRef = useRef<HTMLDivElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const stickThreadToBottomRef = useRef(true);
   const lastThreadRoomIdRef = useRef<string | null>(null);
 
   const room = getRoomById(roomId);
+
+  useEffect(() => {
+    setPendingAttachments([]);
+    setUploadError("");
+    setIsUploadingImages(false);
+    if (imageInputRef.current) {
+      imageInputRef.current.value = "";
+    }
+  }, [room?.id]);
 
   const scrollThreadListToBottom = useCallback(() => {
     const threadList = threadListRef.current;
@@ -305,7 +325,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
 
   const latestMessage = room?.roomMessages.at(-1) ?? null;
   const threadScrollKey = room
-    ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}`
+    ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}:${latestMessage?.attachments.length ?? 0}`
     : "";
 
   useLayoutEffect(() => {
@@ -376,7 +396,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const activeParticipant = room?.participants.find((participant) => participant.id === room.scheduler.activeParticipantId) ?? null;
   const ownerParticipant = room?.participants.find((participant) => participant.id === room.ownerParticipantId) ?? null;
   const localParticipantMissing = room ? !room.participants.some((participant) => participant.id === DEFAULT_LOCAL_PARTICIPANT_ID) : false;
-  const canSend = Boolean(roomDraft.trim() && selectedSender);
+  const canSend = Boolean((roomDraft.trim() || pendingAttachments.length > 0) && selectedSender && !isUploadingImages);
   const currentRoomId = room?.id ?? roomId;
   const currentRoomTitle = room?.title ?? "Unknown room";
   const roomTitleById = useMemo(() => new Map(rooms.map((entry) => [entry.id, entry.title])), [rooms]);
@@ -431,6 +451,78 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     });
   }, [consoleScope, room, roomTitleById, visibleConsoleTurns]);
 
+  const removePendingAttachment = useCallback((attachmentId: string) => {
+    setPendingAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+    setUploadError("");
+  }, []);
+
+  const handleImageSelection = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const selectedFiles = Array.from(event.target.files ?? []);
+      if (selectedFiles.length === 0) {
+        return;
+      }
+
+      const remainingSlots = Math.max(0, MAX_MESSAGE_IMAGE_ATTACHMENTS - pendingAttachments.length);
+      if (remainingSlots === 0) {
+        setUploadError(`最多只能上传 ${MAX_MESSAGE_IMAGE_ATTACHMENTS} 张图片。`);
+        event.target.value = "";
+        return;
+      }
+
+      const filesToUpload = selectedFiles.slice(0, remainingSlots);
+      setIsUploadingImages(true);
+      setUploadError(
+        filesToUpload.length < selectedFiles.length ? `最多只能上传 ${MAX_MESSAGE_IMAGE_ATTACHMENTS} 张图片，已忽略多余文件。` : "",
+      );
+
+      try {
+        const uploadedAttachments = await Promise.all(
+          filesToUpload.map(async (file) => {
+            const formData = new FormData();
+            formData.append("file", file);
+            const response = await fetch("/api/uploads/image", {
+              method: "POST",
+              body: formData,
+            });
+            const payload = (await response.json().catch(() => null)) as { attachment?: MessageImageAttachment; error?: string } | null;
+            if (!response.ok || !payload?.attachment) {
+              throw new Error(payload?.error || `图片 ${file.name} 上传失败。`);
+            }
+            return payload.attachment;
+          }),
+        );
+
+        setPendingAttachments((current) => [...current, ...uploadedAttachments]);
+      } catch (error) {
+        setUploadError(error instanceof Error ? error.message : "图片上传失败。");
+      } finally {
+        setIsUploadingImages(false);
+        event.target.value = "";
+      }
+    },
+    [pendingAttachments.length],
+  );
+
+  const submitMessage = useCallback(async () => {
+    if (!room || !selectedSender || !canSend) {
+      return;
+    }
+
+    try {
+      await sendMessage({
+        roomId: room.id,
+        content: roomDraft,
+        attachments: pendingAttachments,
+        senderId: selectedSender.id,
+      });
+      setPendingAttachments([]);
+      setUploadError("");
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : "发送消息失败。");
+    }
+  }, [canSend, pendingAttachments, room, roomDraft, selectedSender, sendMessage]);
+
   function renderTurnCard(turn: (typeof visibleConsoleTurns)[number], index: number, total: number, groupRoomId: string) {
     const toolStats = getToolStats(turn.tools);
     const turnRoomId = getTurnRoomId(turn) || groupRoomId;
@@ -461,7 +553,24 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
             <>
               <section className="trace-block">
                 <span>房间输入</span>
-                <p>{turn.userMessage.content}</p>
+                {turn.userMessage.content ? <p>{turn.userMessage.content}</p> : null}
+                {turn.userMessage.attachments.length > 0 ? (
+                  <div className="message-image-grid compact">
+                    {turn.userMessage.attachments.map((attachment) => (
+                      <a key={attachment.id} className="message-image-link" href={attachment.url} target="_blank" rel="noreferrer">
+                        <Image
+                          src={attachment.url}
+                          alt={attachment.filename}
+                          className="message-image-preview"
+                          width={240}
+                          height={180}
+                          unoptimized
+                        />
+                        <span>{attachment.filename}</span>
+                      </a>
+                    ))}
+                  </div>
+                ) : null}
                 {turn.userMessage.receiptStatus === "read_no_reply" ? <small>{getReceiptInlineNote(turn.userMessage.receipts)}</small> : null}
               </section>
 
@@ -633,7 +742,25 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                         </div>
                       )}
 
-                      <div className="thread-message-body">{message.content}</div>
+                      {message.content ? <div className="thread-message-body">{message.content}</div> : null}
+
+                      {message.attachments.length > 0 ? (
+                        <div className="message-image-grid">
+                          {message.attachments.map((attachment) => (
+                            <a key={attachment.id} className="message-image-link" href={attachment.url} target="_blank" rel="noreferrer">
+                              <Image
+                                src={attachment.url}
+                                alt={attachment.filename}
+                                className="message-image-preview"
+                                width={240}
+                                height={180}
+                                unoptimized
+                              />
+                              <span>{attachment.filename}</span>
+                            </a>
+                          ))}
+                        </div>
+                      ) : null}
 
                       {message.receipts.length > 0 ? (
                         <div className="message-receipt-note">
@@ -651,11 +778,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
             className="composer-card"
             onSubmit={(event) => {
               event.preventDefault();
-              void sendMessage({
-                roomId: room.id,
-                content: roomDraft,
-                senderId: selectedSender?.id,
-              });
+              void submitMessage();
             }}
           >
             <div className="composer-topline">
@@ -678,6 +801,50 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               <div className="composer-note">按 Enter 发送，Shift + Enter 换行。</div>
             </div>
 
+            <div className="composer-upload-row">
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept={ALLOWED_MESSAGE_IMAGE_MIME_TYPES.join(",")}
+                multiple
+                hidden
+                onChange={handleImageSelection}
+                disabled={isRunning || isUploadingImages || pendingAttachments.length >= MAX_MESSAGE_IMAGE_ATTACHMENTS}
+              />
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => imageInputRef.current?.click()}
+                disabled={isRunning || isUploadingImages || pendingAttachments.length >= MAX_MESSAGE_IMAGE_ATTACHMENTS}
+              >
+                {isUploadingImages ? "上传中..." : "添加图片"}
+              </button>
+              <span className="composer-note">
+                最多 {MAX_MESSAGE_IMAGE_ATTACHMENTS} 张，支持 PNG / JPEG / WebP，单张不超过 {Math.floor(MAX_MESSAGE_IMAGE_BYTES / (1024 * 1024))} MB。
+              </span>
+            </div>
+
+            {pendingAttachments.length > 0 ? (
+              <div className="composer-attachment-list">
+                {pendingAttachments.map((attachment) => (
+                  <div key={attachment.id} className="composer-attachment-chip">
+                    <Image
+                      src={attachment.url}
+                      alt={attachment.filename}
+                      className="composer-attachment-thumb"
+                      width={56}
+                      height={56}
+                      unoptimized
+                    />
+                    <span>{attachment.filename}</span>
+                    <button type="button" className="icon-button" onClick={() => removePendingAttachment(attachment.id)} aria-label={`移除 ${attachment.filename}`}>
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
             <textarea
               id="room-draft"
               name="draft"
@@ -687,17 +854,14 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
-                  void sendMessage({
-                    roomId: room.id,
-                    content: roomDraft,
-                    senderId: selectedSender?.id,
-                  });
+                  void submitMessage();
                 }
               }}
-              placeholder="输入新的房间消息..."
+              placeholder="输入新的房间消息，或只发送图片..."
             />
 
             {room.error ? <p className="error-text">{room.error}</p> : null}
+            {uploadError ? <p className="error-text">{uploadError}</p> : null}
 
             {room.roomMessages.length > 0 ? (
               <div className="quick-reply-row">
@@ -711,7 +875,9 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
 
             <div className="composer-actions">
               <span className="composer-note">
-                {isRunning
+                {isUploadingImages
+                  ? "图片上传完成后即可发送。"
+                  : isRunning
                   ? "当前 Agent 正在处理中；发送新消息会接管当前轮询。"
                   : localParticipantMissing
                     ? "你当前不在成员列表里；发送消息会自动重新加入。"

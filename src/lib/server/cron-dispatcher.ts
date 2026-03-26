@@ -229,6 +229,7 @@ async function runQueuedJob(item: QueuedCronJob): Promise<void> {
       message: {
         id: createUuid(),
         content: buildCronEnvelope(job),
+        attachments: [],
         sender: createCronSender(job),
       },
       settings,

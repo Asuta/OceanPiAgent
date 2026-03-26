@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { extractAssistantMetaFromConversationError, runConversation, streamConversation } from "@/lib/ai/openai-client";
+import { messageImageAttachmentSchema } from "@/lib/chat/schemas";
 import {
   DEFAULT_MAX_TOOL_LOOP_STEPS,
   MAX_MAX_TOOL_LOOP_STEPS,
@@ -19,7 +20,16 @@ const requestSchema = z.object({
       z.object({
         id: z.string().optional(),
         role: z.enum(["user", "assistant"]),
-        content: z.string().trim().min(1).max(20_000),
+        content: z.string().max(20_000),
+        attachments: z.array(messageImageAttachmentSchema).max(3).optional().default([]),
+      }).superRefine((message, ctx) => {
+        if (!message.content.trim() && message.attachments.length === 0) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Message content or at least one image is required.",
+            path: ["content"],
+          });
+        }
       }),
     )
     .min(1),
@@ -46,12 +56,13 @@ function toAssistantResponse(
   result: Awaited<ReturnType<typeof runConversation>>,
 ): ChatResponseBody {
   return {
-    message: {
-      id: createUuid(),
-      role: "assistant",
-      content: result.assistantText,
-      tools: result.toolEvents,
-      meta: {
+      message: {
+        id: createUuid(),
+        role: "assistant",
+        content: result.assistantText,
+        attachments: [],
+        tools: result.toolEvents,
+        meta: {
         apiFormat: result.actualApiFormat,
         compatibility: result.compatibility,
         ...(result.recovery
@@ -132,6 +143,7 @@ export async function POST(request: Request) {
                   id: createUuid(),
                   role: "assistant",
                   content: result.assistantText || assistantText,
+                  attachments: [],
                   tools: toolEvents,
                   meta: {
                     apiFormat: result.actualApiFormat,

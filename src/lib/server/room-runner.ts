@@ -5,6 +5,7 @@ import type {
   AssistantMessageMeta,
   AttachedRoomDefinition,
   ChatSettings,
+  MessageImageAttachment,
   ModelConfigExecutionOverrides,
   RoomAgentId,
   RoomChatResponseBody,
@@ -83,6 +84,7 @@ function createEmittedRoomMessage(message: RoomMessageEmission, agent: AgentRoom
     role: "assistant",
     sender: createAgentSender(agent),
     content: message.content,
+    attachments: [],
     source: "agent_emit",
     kind: message.kind,
     status: message.status,
@@ -99,6 +101,7 @@ function createUserMessage(
   messageId: string,
   sender: RoomSender,
   content: string,
+  attachments: MessageImageAttachment[],
   receipts: RoomMessageReceipt[],
   receiptStatus: RoomMessageReceiptStatus,
   receiptUpdatedAt: string | null,
@@ -112,6 +115,7 @@ function createUserMessage(
     role: "user",
     sender,
     content,
+    attachments: [...attachments],
     source: sender.role === "system" ? "system" : "user",
     kind: sender.role === "system" ? "system" : "user_input",
     status: "completed",
@@ -143,6 +147,7 @@ function createTurn(
   userMessageId: string,
   userSender: RoomSender,
   userContent: string,
+  userAttachments: MessageImageAttachment[],
   userMessageReceipts: RoomMessageReceipt[],
   userMessageReceiptStatus: RoomMessageReceiptStatus,
   userMessageReceiptUpdatedAt: string | null,
@@ -160,10 +165,11 @@ function createTurn(
     agent,
     userMessage: createUserMessage(
       roomId,
-      userMessageId,
-      userSender,
-      userContent,
-      userMessageReceipts,
+        userMessageId,
+        userSender,
+        userContent,
+        userAttachments,
+        userMessageReceipts,
       userMessageReceiptStatus,
       userMessageReceiptUpdatedAt,
     ),
@@ -201,6 +207,7 @@ function createToolContext(args: {
         roomId,
         messages.map((message) => ({
           ...message,
+          attachments: [...message.attachments],
           receipts: [...message.receipts],
         })),
       ]),
@@ -224,7 +231,7 @@ function getRoomHistoryByIdForAgent(workspace: { rooms: RoomSession[] }, agentId
 }
 
 type RoomConversationRunner = (
-  messages: Array<{ role: "user" | "assistant"; content: string }>,
+  messages: Array<{ role: "user" | "assistant"; content: string; attachments?: MessageImageAttachment[] }>,
   settings: ChatSettings,
   callbacks?: {
     onTextDelta?: (delta: string) => void;
@@ -270,6 +277,7 @@ interface BaseRoomTurnInput {
   message: {
     id: string;
     content: string;
+    attachments: MessageImageAttachment[];
     sender: RoomSender;
   };
   settings: ChatSettings;
@@ -320,6 +328,7 @@ class RoomTurnExecutionError extends Error {
     userMessageId: string;
     userSender: RoomSender;
     userContent: string;
+    userAttachments: MessageImageAttachment[];
     toolEvents: ToolExecution[];
     emittedMessages: RoomMessage[];
     receiptUpdates: RoomMessageReceiptUpdate[];
@@ -408,6 +417,7 @@ export async function runPreparedRoomTurn(
     userMessageId: args.message.id,
     userSender: args.message.sender,
     userContent: args.message.content,
+    userAttachments: args.message.attachments,
     requestSignal: args.signal ?? requestController.signal,
   });
 
@@ -419,8 +429,18 @@ export async function runPreparedRoomTurn(
   let currentUserReceipts: RoomMessageReceipt[] = [];
 
   try {
+    const conversationHistory =
+      args.message.attachments.length > 0
+        ? [
+            ...runContext.history.slice(0, -1),
+            {
+              ...runContext.history[runContext.history.length - 1],
+              attachments: [...args.message.attachments],
+            },
+          ]
+        : runContext.history;
     const result = await conversationRunner(
-      runContext.history,
+      conversationHistory,
       args.settings,
       {
         onTextDelta: (delta) => {
@@ -483,6 +503,7 @@ export async function runPreparedRoomTurn(
       args.message.id,
       args.message.sender,
       args.message.content,
+      args.message.attachments,
       currentUserReceipts,
       currentUserReceiptStatus,
       currentUserReceiptUpdatedAt,
@@ -519,6 +540,7 @@ export async function runPreparedRoomTurn(
         userMessageId: args.message.id,
         userSender: args.message.sender,
         userContent: args.message.content,
+        userAttachments: args.message.attachments,
         toolEvents,
         emittedMessages,
         receiptUpdates,
@@ -548,6 +570,7 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
         error.partial.userMessageId,
         error.partial.userSender,
         error.partial.userContent,
+        error.partial.userAttachments,
         error.partial.currentUserReceipts,
         error.partial.currentUserReceiptStatus,
         error.partial.currentUserReceiptUpdatedAt,
