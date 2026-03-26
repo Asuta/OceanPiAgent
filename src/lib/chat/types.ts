@@ -30,7 +30,7 @@ export type ResponsesPayloadMode = "json" | "sse" | "auto";
 
 export type ToolExecutionStatus = "success" | "error";
 
-export type RoomAgentId = "concierge" | "researcher" | "operator";
+export type RoomAgentId = string;
 
 export type RoomMembershipRole = "owner" | "member";
 

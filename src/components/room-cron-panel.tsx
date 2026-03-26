@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CronDeliveryPolicy, RoomAgentId, RoomCronJob, RoomCronRunRecord, RoomCronSchedule, RoomSession } from "@/lib/chat/types";
+import { DEFAULT_AGENT_ID, useWorkspace } from "@/components/workspace-provider";
 
 type Props = {
   room: RoomSession;
@@ -63,6 +64,7 @@ function defaultOnceValue(): string {
 }
 
 export function RoomCronPanel({ room, className }: Props) {
+  const { agents } = useWorkspace();
   const roomAgentIds = useMemo<RoomAgentId[]>(
     () =>
       room.participants
@@ -77,14 +79,15 @@ export function RoomCronPanel({ room, className }: Props) {
   const [error, setError] = useState("");
   const [title, setTitle] = useState("Morning Summary");
   const [prompt, setPrompt] = useState("请总结这个房间最近的重要进展，并给出下一步建议。");
-  const [agentId, setAgentId] = useState<RoomAgentId>(roomAgentIds[0] ?? "concierge");
+  const [agentId, setAgentId] = useState<RoomAgentId>(roomAgentIds[0] ?? DEFAULT_AGENT_ID);
   const [scheduleType, setScheduleType] = useState<ScheduleType>("daily");
   const [onceAt, setOnceAt] = useState(defaultOnceValue());
   const [dailyTime, setDailyTime] = useState("09:00");
   const [weeklyDay, setWeeklyDay] = useState(1);
   const [weeklyTime, setWeeklyTime] = useState("09:00");
   const [deliveryPolicy, setDeliveryPolicy] = useState<CronDeliveryPolicy>("only_on_result");
-  const selectedAgentId = roomAgentIds.includes(agentId) ? agentId : (roomAgentIds[0] ?? "concierge");
+  const selectedAgentId = roomAgentIds.includes(agentId) ? agentId : (roomAgentIds[0] ?? DEFAULT_AGENT_ID);
+  const agentLabelById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent.label])), [agents]);
   const panelClassName = className ?? "surface-panel page-enter page-enter-delay-1";
 
   const refresh = useCallback(async () => {
@@ -202,7 +205,7 @@ export function RoomCronPanel({ room, className }: Props) {
           <select className="text-input" value={selectedAgentId} onChange={(event) => setAgentId(event.target.value as RoomAgentId)}>
             {roomAgentIds.map((id) => (
               <option key={id} value={id}>
-                {id}
+                {agentLabelById.get(id) ?? id}
               </option>
             ))}
           </select>

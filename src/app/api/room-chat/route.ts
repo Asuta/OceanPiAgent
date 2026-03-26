@@ -20,6 +20,8 @@ import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store"
 
 export const runtime = "nodejs";
 
+const agentIdSchema = z.string().trim().min(1).max(120);
+
 const requestSchema = z.object({
   message: z.object({
     id: z.string().max(120),
@@ -77,7 +79,7 @@ const requestSchema = z.object({
               runtimeKind: z.enum(["human", "agent"]),
               membershipRole: z.enum(["owner", "member"]),
               enabled: z.boolean().optional().default(true),
-              agentId: z.enum(["concierge", "researcher", "operator"]).optional(),
+              agentId: agentIdSchema.optional(),
             }),
           )
           .optional()
@@ -91,7 +93,7 @@ const requestSchema = z.object({
   knownAgents: z
     .array(
       z.object({
-        agentId: z.enum(["concierge", "researcher", "operator"]),
+        agentId: agentIdSchema,
         label: z.string().trim().min(1).max(120),
         summary: z.string().trim().min(1).max(500),
         skills: z.array(z.string().trim().min(1).max(120)).max(24).optional().default([]),
@@ -122,7 +124,7 @@ const requestSchema = z.object({
               z.object({
                 participantId: z.string().trim().min(1).max(120),
                 participantName: z.string().trim().min(1).max(120),
-                agentId: z.enum(["concierge", "researcher", "operator"]).optional(),
+                agentId: agentIdSchema.optional(),
                 type: z.literal("read_no_reply"),
                 createdAt: z.string(),
               }),
@@ -135,9 +137,9 @@ const requestSchema = z.object({
     .optional()
     .default({}),
   agent: z.object({
-    id: z.enum(["concierge", "researcher", "operator"]),
+    id: agentIdSchema,
     label: z.string().trim().min(1).max(120),
-    instruction: z.string().max(4_000).optional().default(""),
+    instruction: z.string().max(8_000).optional().default(""),
   }),
   stream: z.boolean().optional().default(true),
 });

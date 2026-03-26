@@ -23,7 +23,7 @@ const scheduleSchema = z.discriminatedUnion("type", [
 ]);
 
 const updateSchema = z.object({
-  agentId: z.enum(["concierge", "researcher", "operator"]).optional(),
+  agentId: z.string().trim().min(1).max(120).optional(),
   targetRoomId: z.string().trim().min(1).max(120).optional(),
   title: z.string().trim().min(1).max(120).optional(),
   prompt: z.string().trim().min(1).max(4000).optional(),

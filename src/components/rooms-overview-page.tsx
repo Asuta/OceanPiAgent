@@ -3,11 +3,11 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { ROOM_AGENTS, formatTimestamp, getRoomAgentSummary, getRoomHumanSummary, getRoomPreview, useWorkspace } from "@/components/workspace-provider";
+import { formatTimestamp, getRoomAgentSummary, getRoomHumanSummary, getRoomPreview, useWorkspace } from "@/components/workspace-provider";
 
 export function RoomsOverviewPage() {
   const router = useRouter();
-  const { activeRooms, archivedRooms, agentStates, createRoom, archiveRoom, restoreRoom, deleteRoom, clearAllWorkspace, hydrated } = useWorkspace();
+  const { agents, activeRooms, archivedRooms, agentStates, createRoom, archiveRoom, restoreRoom, deleteRoom, clearAllWorkspace, hydrated } = useWorkspace();
   const [isClearingAll, setIsClearingAll] = useState(false);
 
   const runningCount = Object.values(agentStates).filter((state) => state.agentTurns.some((turn) => turn.status === "running")).length;
@@ -65,7 +65,7 @@ export function RoomsOverviewPage() {
         </div>
 
         <div className="agent-preset-row">
-          {ROOM_AGENTS.map((agent) => (
+          {agents.map((agent) => (
             <button
               key={agent.id}
               type="button"
