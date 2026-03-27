@@ -87,6 +87,12 @@ interface FeishuRuntimeStatus {
   recentLogs: FeishuRuntimeLogEntry[];
 }
 
+interface FeishuBackfillResult {
+  scanned: number;
+  updated: number;
+  skipped: number;
+}
+
 interface ModelConfigDraft {
   name: string;
   kind: ModelConfigKind;
@@ -209,6 +215,20 @@ async function fetchFeishuRuntimeLogs(limit = 50): Promise<{ logFilePath: string
   };
 }
 
+async function runFeishuNicknameBackfill(): Promise<FeishuBackfillResult> {
+  const response = await fetch("/api/channels/feishu/backfill", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+  const payload = await parseJsonResponse<FeishuBackfillResult & { error?: string }>(response);
+  if (!response.ok || !payload) {
+    throw new Error(payload?.error || "Failed to backfill Feishu nicknames.");
+  }
+  return payload;
+}
+
 async function createModelConfigRequest(draft: ModelConfigDraft): Promise<ModelConfig> {
   const response = await fetch("/api/model-configs", {
     method: "POST",
@@ -311,6 +331,8 @@ export function SettingsPage() {
   const [feishuRuntimeLogPath, setFeishuRuntimeLogPath] = useState("");
   const [feishuRuntimeError, setFeishuRuntimeError] = useState("");
   const [loadingFeishuRuntime, setLoadingFeishuRuntime] = useState(false);
+  const [runningFeishuBackfill, setRunningFeishuBackfill] = useState(false);
+  const [feishuBackfillMessage, setFeishuBackfillMessage] = useState("");
   const legacyMigrationStartedRef = useRef(false);
 
   useEffect(() => {
@@ -661,6 +683,20 @@ export function SettingsPage() {
       setFeishuRuntimeError(error instanceof Error ? error.message : "Failed to refresh Feishu runtime info.");
     } finally {
       setLoadingFeishuRuntime(false);
+    }
+  };
+
+  const handleBackfillFeishuNicknames = async () => {
+    setRunningFeishuBackfill(true);
+    setFeishuBackfillMessage("");
+    try {
+      const result = await runFeishuNicknameBackfill();
+      setFeishuBackfillMessage(`已扫描 ${result.scanned} 个房间，更新 ${result.updated} 个，跳过 ${result.skipped} 个。`);
+      await handleRefreshFeishuRuntime();
+    } catch (error) {
+      setFeishuBackfillMessage(error instanceof Error ? error.message : "Feishu nickname backfill failed.");
+    } finally {
+      setRunningFeishuBackfill(false);
     }
   };
 
@@ -1443,14 +1479,19 @@ export function SettingsPage() {
               <div className="meta-chip-row compact top-gap">
                 <span className="meta-chip subtle">Status API: `/api/channels/feishu/status`</span>
                 <span className="meta-chip subtle">Logs API: `/api/channels/feishu/logs`</span>
+                <span className="meta-chip subtle">Backfill API: `/api/channels/feishu/backfill`</span>
                 {feishuRuntimeStatus?.allowOpenIds?.length ? <span className="meta-chip subtle">Allowlist enabled</span> : <span className="meta-chip subtle">No allowlist</span>}
               </div>
 
               <p className="muted-copy top-gap">日志文件: <code>{feishuRuntimeLogPath || feishuRuntimeStatus?.logFilePath || "Unavailable"}</code></p>
               {feishuRuntimeStatus?.lastError ? <p className="muted-copy top-gap danger-text">{feishuRuntimeStatus.lastError}</p> : null}
               {feishuRuntimeError ? <p className="muted-copy top-gap danger-text">{feishuRuntimeError}</p> : null}
+              {feishuBackfillMessage ? <p className="muted-copy top-gap">{feishuBackfillMessage}</p> : null}
 
               <div className="card-actions compact-right top-gap">
+                <button type="button" className="ghost-button" onClick={() => void handleBackfillFeishuNicknames()} disabled={runningFeishuBackfill || loadingFeishuRuntime}>
+                  {runningFeishuBackfill ? "回填中..." : "回填已有飞书昵称"}
+                </button>
                 <button type="button" className="ghost-button" onClick={() => void handleRefreshFeishuRuntime()} disabled={loadingFeishuRuntime}>
                   {loadingFeishuRuntime ? "刷新中..." : "刷新飞书状态"}
                 </button>

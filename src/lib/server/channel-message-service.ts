@@ -2,6 +2,7 @@ import type { RoomAgentDefinition, RoomMessage, RoomWorkspaceState } from "@/lib
 import { createAgentSharedState, createExternalRoomSession, createRoomMessage, createTimestamp, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
 import { findChannelBinding, touchChannelBinding, upsertChannelBinding } from "@/lib/server/channel-bindings-store";
 import { beginInboundMessage, finishInboundMessage, runSerializedDelivery } from "@/lib/server/channel-delivery-queue";
+import { applyFeishuRoomMetadata, buildFeishuRoomTitle } from "@/lib/server/channels/feishu/room-metadata";
 import type { ChannelBinding, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
 import { listAgentDefinitions } from "@/lib/server/agent-registry";
 import { appendFeishuRuntimeLog } from "@/lib/server/channel-runtime-log";
@@ -51,34 +52,7 @@ function buildInboundRoomMessageId(message: ExternalInboundMessage): string {
 }
 
 function buildExternalRoomTitle(message: ExternalInboundMessage): string {
-  const label = message.senderName.trim() || message.senderId.trim() || message.peerId.trim();
-  return `Feishu - ${label}`;
-}
-
-function applyExternalRoomMetadata(room: RoomWorkspaceState["rooms"][number], binding: ChannelBinding, senderName: string) {
-  const normalizedName = senderName.trim() || binding.peerId;
-  return {
-    ...room,
-    title: buildExternalRoomTitle({
-      channel: binding.channel,
-      accountId: binding.accountId,
-      peerKind: binding.peerKind,
-      peerId: binding.peerId,
-      messageId: "",
-      text: "",
-      senderId: binding.peerId,
-      senderName: normalizedName,
-    }),
-    participants: room.participants.map((participant) => (
-      participant.id === binding.humanParticipantId
-        ? {
-            ...participant,
-            name: normalizedName,
-            updatedAt: createTimestamp(),
-          }
-        : participant
-    )),
-  };
+  return buildFeishuRoomTitle(message.senderName || message.senderId || message.peerId, message.peerId);
 }
 
 function createInboundRoomMessage(message: ExternalInboundMessage, binding: ChannelBinding): RoomMessage {
@@ -196,14 +170,13 @@ async function appendInboundMessageToWorkspace(
         return room;
       }
 
-      const nextRoom = applyExternalRoomMetadata(room, binding, senderName);
+      const nextRoom = applyFeishuRoomMetadata(room, binding, senderName);
       return {
         ...nextRoom,
         roomMessages: [...nextRoom.roomMessages, {
           ...message,
           seq: (nextRoom.roomMessages[nextRoom.roomMessages.length - 1]?.seq ?? 0) + 1,
         }],
-        updatedAt: createTimestamp(),
         error: "",
       };
     }),
