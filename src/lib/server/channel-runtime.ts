@@ -146,6 +146,8 @@ export function ensureChannelRuntimeStarted(): void {
         details: {
           peerId: message.peerId,
           messageId: message.messageId,
+          messageType: message.messageType,
+          attachmentCount: message.attachments.length,
         },
       });
       const feishuConfig = readFeishuChannelConfig();
@@ -185,6 +187,7 @@ export function ensureChannelRuntimeStarted(): void {
               message: "Delivering Feishu outbound messages",
               details: {
                 peerId: enrichedMessage.peerId,
+                messageType: enrichedMessage.messageType,
                 count: messages.length,
               },
             });
@@ -201,6 +204,7 @@ export function ensureChannelRuntimeStarted(): void {
           details: {
             peerId: message.peerId,
             messageId: message.messageId,
+            messageType: message.messageType,
             error: currentStatus.lastError,
           },
         });

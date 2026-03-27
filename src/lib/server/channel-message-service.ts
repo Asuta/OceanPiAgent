@@ -63,6 +63,7 @@ function createInboundRoomMessage(message: ExternalInboundMessage, binding: Chan
         name: message.senderName,
         role: "participant",
       },
+      attachments: message.attachments,
     }),
     id: buildInboundRoomMessageId(message),
   };
@@ -219,6 +220,7 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
         details: {
           peerId: message.peerId,
           messageId: message.messageId,
+          messageType: message.messageType,
           dedupeState,
         },
       });
@@ -283,6 +285,8 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
           peerId: binding.peerId,
           roomId: binding.roomId,
           messageId: message.messageId,
+          messageType: message.messageType,
+          attachmentCount: message.attachments.length,
           emittedCount: outboundMessages.length,
           turnStatus: result.turn.status,
         },
@@ -301,6 +305,7 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
         details: {
           peerId: message.peerId,
           messageId: message.messageId,
+          messageType: message.messageType,
           error: error instanceof Error ? error.message : "Unknown channel processing error.",
         },
       });

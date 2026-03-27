@@ -19,12 +19,10 @@ export interface FeishuChannelRuntimeCallbacks {
 function registerInboundHandlers(dispatcher: EventDispatcher, config: FeishuChannelConfig, callbacks: FeishuChannelRuntimeCallbacks): void {
   dispatcher.register({
     "im.message.receive_v1": async (event: unknown) => {
-      const parsed = parseFeishuInboundMessage(event, config.accountId, config.defaultAgentId);
+      const parsed = await parseFeishuInboundMessage(event, config, {
+        logger: callbacks.onLog,
+      });
       if (!parsed) {
-        callbacks.onLog?.({
-          level: "info",
-          message: "Ignored non-text or unsupported Feishu event",
-        });
         return;
       }
       if (config.allowOpenIds.length > 0 && !config.allowOpenIds.includes(parsed.senderId)) {

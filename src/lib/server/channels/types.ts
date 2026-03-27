@@ -1,6 +1,10 @@
+import type { MessageImageAttachment } from "@/lib/chat/types";
+
 export type ExternalChannelId = "feishu";
 
 export type ExternalPeerKind = "direct" | "group";
+
+export type ExternalInboundMessageType = "text" | "image" | "post" | "file" | "audio" | "video" | "sticker" | "unknown";
 
 export interface ExternalInboundMessage {
   channel: ExternalChannelId;
@@ -8,10 +12,13 @@ export interface ExternalInboundMessage {
   peerKind: ExternalPeerKind;
   peerId: string;
   messageId: string;
+  messageType: ExternalInboundMessageType;
   text: string;
+  attachments: MessageImageAttachment[];
   senderId: string;
   senderName: string;
   agentId?: string;
+  rawContent?: string;
   rawEvent?: unknown;
 }
 
