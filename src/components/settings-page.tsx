@@ -65,6 +65,28 @@ interface WorkspaceSkillSummary {
   summary: string;
 }
 
+interface FeishuRuntimeLogEntry {
+  id: string;
+  timestamp: string;
+  level: "info" | "warn" | "error";
+  message: string;
+  details?: Record<string, string | number | boolean | null>;
+}
+
+interface FeishuRuntimeStatus {
+  enabled: boolean;
+  configured: boolean;
+  status: "disabled" | "idle" | "starting" | "running" | "error";
+  accountId: string;
+  defaultAgentId: string;
+  allowOpenIds: string[];
+  lastError: string | null;
+  startedAt: string | null;
+  lastInboundAt: string | null;
+  logFilePath: string;
+  recentLogs: FeishuRuntimeLogEntry[];
+}
+
 interface ModelConfigDraft {
   name: string;
   kind: ModelConfigKind;
@@ -159,6 +181,32 @@ async function fetchModelConfigs(): Promise<ModelConfig[]> {
 
   const payload = await parseJsonResponse<{ modelConfigs?: ModelConfig[] }>(response);
   return sortModelConfigs(payload?.modelConfigs ?? []);
+}
+
+async function fetchFeishuRuntimeStatus(): Promise<FeishuRuntimeStatus> {
+  const response = await fetch("/api/channels/feishu/status", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error("Failed to load Feishu runtime status.");
+  }
+
+  const payload = await parseJsonResponse<FeishuRuntimeStatus>(response);
+  if (!payload) {
+    throw new Error("Feishu runtime status returned an empty response.");
+  }
+  return payload;
+}
+
+async function fetchFeishuRuntimeLogs(limit = 50): Promise<{ logFilePath: string; logs: FeishuRuntimeLogEntry[] }> {
+  const response = await fetch(`/api/channels/feishu/logs?limit=${limit}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error("Failed to load Feishu runtime logs.");
+  }
+
+  const payload = await parseJsonResponse<{ logFilePath?: string; logs?: FeishuRuntimeLogEntry[] }>(response);
+  return {
+    logFilePath: payload?.logFilePath ?? "",
+    logs: payload?.logs ?? [],
+  };
 }
 
 async function createModelConfigRequest(draft: ModelConfigDraft): Promise<ModelConfig> {
@@ -258,6 +306,11 @@ export function SettingsPage() {
   const [modelConfigError, setModelConfigError] = useState("");
   const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
   const [savingModelConfig, setSavingModelConfig] = useState(false);
+  const [feishuRuntimeStatus, setFeishuRuntimeStatus] = useState<FeishuRuntimeStatus | null>(null);
+  const [feishuRuntimeLogs, setFeishuRuntimeLogs] = useState<FeishuRuntimeLogEntry[]>([]);
+  const [feishuRuntimeLogPath, setFeishuRuntimeLogPath] = useState("");
+  const [feishuRuntimeError, setFeishuRuntimeError] = useState("");
+  const [loadingFeishuRuntime, setLoadingFeishuRuntime] = useState(false);
   const legacyMigrationStartedRef = useRef(false);
 
   useEffect(() => {
@@ -378,6 +431,50 @@ export function SettingsPage() {
       }
     })();
   }, [agentStates, agents, loadingModelConfigs, modelConfigs, updateAgentSettings]);
+
+  useEffect(() => {
+    if (settingsTab !== "runtime") {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadRuntime = async (showLoading: boolean) => {
+      if (showLoading) {
+        setLoadingFeishuRuntime(true);
+      }
+
+      try {
+        const [status, logsPayload] = await Promise.all([fetchFeishuRuntimeStatus(), fetchFeishuRuntimeLogs(60)]);
+        if (cancelled) {
+          return;
+        }
+        setFeishuRuntimeStatus(status);
+        setFeishuRuntimeLogs(logsPayload.logs);
+        setFeishuRuntimeLogPath(logsPayload.logFilePath || status.logFilePath);
+        setFeishuRuntimeError("");
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setFeishuRuntimeError(error instanceof Error ? error.message : "Failed to load Feishu runtime info.");
+      } finally {
+        if (!cancelled) {
+          setLoadingFeishuRuntime(false);
+        }
+      }
+    };
+
+    void loadRuntime(true);
+    const intervalId = window.setInterval(() => {
+      void loadRuntime(false);
+    }, 10000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [settingsTab]);
 
   const syncAgentsWithModelConfig = (modelConfig: ModelConfig) => {
     for (const agent of agents) {
@@ -549,6 +646,21 @@ export function SettingsPage() {
       setCreateAgentError(error instanceof Error ? error.message : "创建 Agent 失败。");
     } finally {
       setCreatingAgent(false);
+    }
+  };
+
+  const handleRefreshFeishuRuntime = async () => {
+    setLoadingFeishuRuntime(true);
+    try {
+      const [status, logsPayload] = await Promise.all([fetchFeishuRuntimeStatus(), fetchFeishuRuntimeLogs(60)]);
+      setFeishuRuntimeStatus(status);
+      setFeishuRuntimeLogs(logsPayload.logs);
+      setFeishuRuntimeLogPath(logsPayload.logFilePath || status.logFilePath);
+      setFeishuRuntimeError("");
+    } catch (error) {
+      setFeishuRuntimeError(error instanceof Error ? error.message : "Failed to refresh Feishu runtime info.");
+    } finally {
+      setLoadingFeishuRuntime(false);
     }
   };
 
@@ -1291,7 +1403,80 @@ export function SettingsPage() {
         </>
       ) : null}
 
-      {settingsTab === "runtime" ? <section className="settings-grid page-enter page-enter-delay-1">{agents.map((agent) => renderAgentCard(agent, "runtime"))}</section> : null}
+      {settingsTab === "runtime" ? (
+        <>
+          <section className="surface-panel page-enter page-enter-delay-1">
+            <div className="settings-card-header">
+              <div>
+                <p className="section-label">Feishu Bridge</p>
+                <h2>飞书渠道调试</h2>
+                <p>在这里看飞书 runtime 状态、最近入站/出站日志，以及当前本地日志文件位置。</p>
+              </div>
+              <div className="meta-chip-row compact align-end">
+                <span className="meta-chip">{feishuRuntimeStatus?.status || "unknown"}</span>
+                <span className="meta-chip subtle">{feishuRuntimeStatus?.accountId || "default"}</span>
+                <span className="meta-chip subtle">{feishuRuntimeStatus?.defaultAgentId || "concierge"}</span>
+              </div>
+            </div>
+
+            <section className="subtle-panel top-gap">
+              <p className="section-label">Runtime Snapshot</p>
+              <div className="info-list">
+                <div>
+                  <span>Configured</span>
+                  <strong>{feishuRuntimeStatus?.configured ? "Yes" : "No"}</strong>
+                </div>
+                <div>
+                  <span>Enabled</span>
+                  <strong>{feishuRuntimeStatus?.enabled ? "Yes" : "No"}</strong>
+                </div>
+                <div>
+                  <span>Started</span>
+                  <strong>{feishuRuntimeStatus?.startedAt ? formatTimestamp(feishuRuntimeStatus.startedAt) : "Not yet"}</strong>
+                </div>
+                <div>
+                  <span>Last inbound</span>
+                  <strong>{feishuRuntimeStatus?.lastInboundAt ? formatTimestamp(feishuRuntimeStatus.lastInboundAt) : "No messages yet"}</strong>
+                </div>
+              </div>
+
+              <div className="meta-chip-row compact top-gap">
+                <span className="meta-chip subtle">Status API: `/api/channels/feishu/status`</span>
+                <span className="meta-chip subtle">Logs API: `/api/channels/feishu/logs`</span>
+                {feishuRuntimeStatus?.allowOpenIds?.length ? <span className="meta-chip subtle">Allowlist enabled</span> : <span className="meta-chip subtle">No allowlist</span>}
+              </div>
+
+              <p className="muted-copy top-gap">日志文件: <code>{feishuRuntimeLogPath || feishuRuntimeStatus?.logFilePath || "Unavailable"}</code></p>
+              {feishuRuntimeStatus?.lastError ? <p className="muted-copy top-gap danger-text">{feishuRuntimeStatus.lastError}</p> : null}
+              {feishuRuntimeError ? <p className="muted-copy top-gap danger-text">{feishuRuntimeError}</p> : null}
+
+              <div className="card-actions compact-right top-gap">
+                <button type="button" className="ghost-button" onClick={() => void handleRefreshFeishuRuntime()} disabled={loadingFeishuRuntime}>
+                  {loadingFeishuRuntime ? "刷新中..." : "刷新飞书状态"}
+                </button>
+              </div>
+            </section>
+
+            <section className="subtle-panel top-gap">
+              <p className="section-label">Recent Events</p>
+              {feishuRuntimeLogs.length > 0 ? (
+                <ul className="notes-list top-gap">
+                  {feishuRuntimeLogs.slice().reverse().map((entry) => (
+                    <li key={entry.id}>
+                      <strong>[{entry.level.toUpperCase()}]</strong> {entry.message} - {formatTimestamp(entry.timestamp)}
+                      {entry.details ? <span> - <code>{JSON.stringify(entry.details)}</code></span> : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted-copy top-gap">还没有飞书 runtime 日志。打开状态接口或发一条飞书私聊后，这里会开始出现事件。</p>
+              )}
+            </section>
+          </section>
+
+          <section className="settings-grid page-enter page-enter-delay-1">{agents.map((agent) => renderAgentCard(agent, "runtime"))}</section>
+        </>
+      ) : null}
     </div>
   );
 }

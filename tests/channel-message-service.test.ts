@@ -17,7 +17,7 @@ const COMPATIBILITY = {
 };
 
 test("receiveExternalMessage creates a bound room and delivers emitted replies", async () => {
-  resetChannelDeliveryStateForTest();
+  await resetChannelDeliveryStateForTest();
 
   let state = createDefaultWorkspaceState();
   let binding: ChannelBinding | null = null;
@@ -31,7 +31,7 @@ test("receiveExternalMessage creates a bound room and delivers emitted replies",
       peerKind: "direct",
       peerId: "ou_123",
       senderId: "ou_123",
-      senderName: "ou_123",
+      senderName: "Alice",
       messageId: "msg-1",
       text: "Hello from Feishu",
       agentId: "concierge",
@@ -115,6 +115,8 @@ test("receiveExternalMessage creates a bound room and delivers emitted replies",
 
   const feishuRoom = state.rooms.find((room) => room.id === createdBinding.roomId);
   assert.ok(feishuRoom);
+  assert.equal(feishuRoom?.title, "Feishu - Alice");
+  assert.equal(feishuRoom?.participants.find((participant) => participant.id === createdBinding.humanParticipantId)?.name, "Alice");
   assert.equal(feishuRoom?.agentTurns.length, 1);
   assert.ok(feishuRoom?.roomMessages.some((message) => message.content === "Hello from Feishu"));
   assert.ok(feishuRoom?.roomMessages.some((message) => message.content === "Visible Feishu reply"));
@@ -122,7 +124,7 @@ test("receiveExternalMessage creates a bound room and delivers emitted replies",
 });
 
 test("receiveExternalMessage deduplicates repeated inbound message ids", async () => {
-  resetChannelDeliveryStateForTest();
+  await resetChannelDeliveryStateForTest();
 
   const state = createDefaultWorkspaceState();
   let runCount = 0;

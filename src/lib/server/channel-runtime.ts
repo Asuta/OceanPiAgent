@@ -1,6 +1,7 @@
 import { receiveExternalMessage } from "@/lib/server/channel-message-service";
 import { readFeishuChannelConfig } from "@/lib/server/channel-config";
 import { startFeishuChannelRuntime } from "@/lib/server/channels/feishu";
+import { resolveFeishuDisplayNameFromOpenId } from "@/lib/server/channels/feishu/client";
 import { deliverFeishuMessages } from "@/lib/server/channels/feishu/outbound";
 import { appendFeishuRuntimeLog, getFeishuRuntimeLogFilePath, listFeishuRuntimeLogs, type FeishuRuntimeLogEntry } from "@/lib/server/channel-runtime-log";
 
@@ -149,13 +150,41 @@ export function ensureChannelRuntimeStarted(): void {
       });
       const feishuConfig = readFeishuChannelConfig();
       try {
-        await receiveExternalMessage(message, {
+        let enrichedMessage = message;
+        try {
+          const resolvedSenderName = await resolveFeishuDisplayNameFromOpenId(feishuConfig, message.senderId);
+          if (resolvedSenderName && resolvedSenderName !== message.senderName) {
+            enrichedMessage = {
+              ...message,
+              senderName: resolvedSenderName,
+            };
+            appendFeishuRuntimeLog({
+              level: "info",
+              message: "Resolved Feishu sender display name",
+              details: {
+                peerId: message.peerId,
+                senderName: resolvedSenderName,
+              },
+            });
+          }
+        } catch (error) {
+          appendFeishuRuntimeLog({
+            level: "warn",
+            message: "Failed to resolve Feishu sender display name",
+            details: {
+              peerId: message.peerId,
+              error: error instanceof Error ? error.message : "Unknown display-name lookup error.",
+            },
+          });
+        }
+
+        await receiveExternalMessage(enrichedMessage, {
           deliverMessages: async (messages) => {
             appendFeishuRuntimeLog({
               level: "info",
               message: "Delivering Feishu outbound messages",
               details: {
-                peerId: message.peerId,
+                peerId: enrichedMessage.peerId,
                 count: messages.length,
               },
             });

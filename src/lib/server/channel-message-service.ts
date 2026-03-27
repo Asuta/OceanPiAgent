@@ -55,6 +55,32 @@ function buildExternalRoomTitle(message: ExternalInboundMessage): string {
   return `Feishu - ${label}`;
 }
 
+function applyExternalRoomMetadata(room: RoomWorkspaceState["rooms"][number], binding: ChannelBinding, senderName: string) {
+  const normalizedName = senderName.trim() || binding.peerId;
+  return {
+    ...room,
+    title: buildExternalRoomTitle({
+      channel: binding.channel,
+      accountId: binding.accountId,
+      peerKind: binding.peerKind,
+      peerId: binding.peerId,
+      messageId: "",
+      text: "",
+      senderId: binding.peerId,
+      senderName: normalizedName,
+    }),
+    participants: room.participants.map((participant) => (
+      participant.id === binding.humanParticipantId
+        ? {
+            ...participant,
+            name: normalizedName,
+            updatedAt: createTimestamp(),
+          }
+        : participant
+    )),
+  };
+}
+
 function createInboundRoomMessage(message: ExternalInboundMessage, binding: ChannelBinding): RoomMessage {
   return {
     ...createRoomMessage(binding.roomId, "user", message.text, "user", {
@@ -157,18 +183,30 @@ async function ensureBindingAndWorkspace(message: ExternalInboundMessage, deps: 
   };
 }
 
-async function appendInboundMessageToWorkspace(message: RoomMessage, roomId: string, deps: Required<ExternalMessageServiceDependencies>): Promise<WorkspaceEnvelope> {
+async function appendInboundMessageToWorkspace(
+  message: RoomMessage,
+  binding: ChannelBinding,
+  senderName: string,
+  deps: Required<ExternalMessageServiceDependencies>,
+): Promise<WorkspaceEnvelope> {
   return deps.mutateWorkspace((workspace) => ({
     ...workspace,
-    rooms: workspace.rooms.map((room) => (room.id === roomId ? {
-      ...room,
-      roomMessages: [...room.roomMessages, {
-        ...message,
-        seq: (room.roomMessages[room.roomMessages.length - 1]?.seq ?? 0) + 1,
-      }],
-      updatedAt: createTimestamp(),
-      error: "",
-    } : room)),
+    rooms: workspace.rooms.map((room) => {
+      if (room.id !== binding.roomId) {
+        return room;
+      }
+
+      const nextRoom = applyExternalRoomMetadata(room, binding, senderName);
+      return {
+        ...nextRoom,
+        roomMessages: [...nextRoom.roomMessages, {
+          ...message,
+          seq: (nextRoom.roomMessages[nextRoom.roomMessages.length - 1]?.seq ?? 0) + 1,
+        }],
+        updatedAt: createTimestamp(),
+        error: "",
+      };
+    }),
   }));
 }
 
@@ -200,7 +238,7 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
 
   return runSerializedDelivery(buildQueueKey(message), async () => {
     const dedupeKey = buildMessageDedupKey(message);
-    const dedupeState = beginInboundMessage(dedupeKey);
+    const dedupeState = await beginInboundMessage(dedupeKey);
     if (dedupeState !== "started") {
       deps.logger({
         level: "info",
@@ -218,7 +256,7 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
     try {
       const { binding } = await ensureBindingAndWorkspace(message, deps);
       const inboundRoomMessage = createInboundRoomMessage(message, binding);
-      const workspaceWithMessage = await appendInboundMessageToWorkspace(inboundRoomMessage, binding.roomId, deps);
+      const workspaceWithMessage = await appendInboundMessageToWorkspace(inboundRoomMessage, binding, message.senderName, deps);
       const settings = workspaceWithMessage.state.agentStates[binding.agentId]?.settings ?? createAgentSharedState().settings;
       const result = await deps.runRoomTurnNonStreaming({
         workspace: workspaceWithMessage.state,
@@ -295,7 +333,7 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
       });
       throw error;
     } finally {
-      finishInboundMessage(dedupeKey, succeeded);
+      await finishInboundMessage(dedupeKey, succeeded);
     }
   });
 }
