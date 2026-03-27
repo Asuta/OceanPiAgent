@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { formatTimestamp, getRoomPreview, useWorkspace } from "@/components/workspace-provider";
 
 function getShellTitle(pathname: string) {
@@ -30,7 +30,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { activeRooms, archivedRooms, activeRoomId, createRoom, hydrated, setActiveRoomId } = useWorkspace();
+  const { activeRooms, archivedRooms, activeRoomId, archiveRoom, createRoom, hydrated, isRoomRunning, setActiveRoomId } = useWorkspace();
 
   const shellTitle = useMemo(() => getShellTitle(pathname), [pathname]);
   const sidebarRooms = useMemo(() => {
@@ -40,10 +40,20 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
 
     const currentPathRoomId = pathname.startsWith("/rooms/") ? pathname.split("/")[2] ?? "" : activeRoomId;
     const pinned = currentPathRoomId ? activeRooms.find((room) => room.id === currentPathRoomId) : null;
-    const recent = activeRooms.filter((room) => room.id !== pinned?.id).slice(0, 3);
+    const recent = activeRooms.filter((room) => room.id !== pinned?.id);
 
-    return pinned ? [pinned, ...recent] : activeRooms.slice(0, 4);
+    return pinned ? [pinned, ...recent] : activeRooms;
   }, [activeRoomId, activeRooms, hydrated, pathname]);
+  const handleArchiveRoom = useCallback(
+    (roomId: string, roomTitle: string) => {
+      if (!window.confirm(`确认归档“${roomTitle}”吗？归档后它会从最近房间中移除，但仍可在总览页恢复。`)) {
+        return;
+      }
+
+      archiveRoom(roomId);
+    },
+    [archiveRoom],
+  );
 
   return (
     <div className={`app-shell${sidebarOpen ? " sidebar-open" : ""}`}>
@@ -99,29 +109,39 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
               {hydrated ? (
                 sidebarRooms.map((room) => {
                   const active = pathname === `/rooms/${room.id}` || (pathname === "/rooms" && room.id === activeRoomId);
+                  const isRunning = isRoomRunning(room.id);
                   return (
-                    <Link
-                      key={room.id}
-                      href={`/rooms/${room.id}`}
-                      className={active ? "sidebar-room-card active" : "sidebar-room-card"}
-                      onClick={() => {
-                        setActiveRoomId(room.id);
-                        setSidebarOpen(false);
-                      }}
-                    >
-                      <div className="sidebar-room-topline">
-                        <strong>{room.title}</strong>
-                        <span>{formatTimestamp(room.updatedAt)}</span>
+                    <article key={room.id} className={active ? "sidebar-room-card active" : "sidebar-room-card"}>
+                      <Link
+                        href={`/rooms/${room.id}`}
+                        className="sidebar-room-card-link"
+                        onClick={() => {
+                          setActiveRoomId(room.id);
+                          setSidebarOpen(false);
+                        }}
+                      >
+                        <div className="sidebar-room-topline">
+                          <strong>{room.title}</strong>
+                          <span>{formatTimestamp(room.updatedAt)}</span>
+                        </div>
+                        <p>{getRoomPreview(room)}</p>
+                      </Link>
+                      <div className="sidebar-room-actions">
+                        <button
+                          type="button"
+                          className="mini-button"
+                          disabled={isRunning}
+                          onClick={() => handleArchiveRoom(room.id, room.title)}
+                        >
+                          归档
+                        </button>
                       </div>
-                      <p>{getRoomPreview(room)}</p>
-                    </Link>
+                    </article>
                   );
                 })
               ) : (
                 <div className="sidebar-empty-card">正在恢复本地房间...</div>
               )}
-
-              {hydrated && activeRooms.length > sidebarRooms.length ? <div className="sidebar-empty-card compact-note">其余房间可在总览页继续查看。</div> : null}
             </div>
 
             {archivedRooms.length > 0 ? (
