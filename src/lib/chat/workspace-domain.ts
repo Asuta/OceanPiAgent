@@ -234,6 +234,37 @@ export function createRoomSession(index: number, agentId: RoomAgentId = DEFAULT_
   };
 }
 
+export function createExternalRoomSession(args: {
+  roomId: string;
+  title: string;
+  agentId: RoomAgentId;
+  humanParticipantId: string;
+  humanParticipantName: string;
+  agentDefinitions?: RoomAgentDefinition[];
+}): RoomSession {
+  const timestamp = createTimestamp();
+  const participants = sortRoomParticipants([
+    createHumanParticipant(args.humanParticipantName, args.humanParticipantId),
+    createAgentParticipant(args.agentId, 1, args.agentDefinitions),
+  ]);
+
+  return {
+    id: args.roomId,
+    title: args.title,
+    agentId: args.agentId,
+    archivedAt: null,
+    ownerParticipantId: args.humanParticipantId,
+    receiptRevision: 0,
+    participants,
+    scheduler: createSchedulerState(args.agentId),
+    roomMessages: [],
+    agentTurns: [],
+    error: "",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
 export function createDefaultWorkspaceState(agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): RoomWorkspaceState {
   const initialRoom = createRoomSession(1, DEFAULT_AGENT_ID, agentDefinitions);
   return {
