@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ROOM_AGENTS } from "@/lib/chat/catalog";
 import { createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
+import type { MessageImageAttachment } from "@/lib/chat/types";
 import type { ChannelBinding, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
 import { resetChannelDeliveryStateForTest } from "@/lib/server/channel-delivery-queue";
 import { receiveExternalMessage } from "@/lib/server/channel-message-service";
@@ -14,6 +15,16 @@ const COMPATIBILITY = {
   responsesContinuation: "replay" as const,
   responsesPayloadMode: "json" as const,
   notes: [],
+};
+
+const SAMPLE_ATTACHMENT: MessageImageAttachment = {
+  id: "image-1",
+  kind: "image",
+  mimeType: "image/jpeg",
+  filename: "feishu.jpg",
+  sizeBytes: 1024,
+  storagePath: "images/feishu.jpg",
+  url: "/api/uploads/image/images/feishu.jpg",
 };
 
 test("receiveExternalMessage creates a bound room and delivers emitted replies", async () => {
@@ -33,7 +44,9 @@ test("receiveExternalMessage creates a bound room and delivers emitted replies",
       senderId: "ou_123",
       senderName: "Alice",
       messageId: "msg-1",
+      messageType: "text",
       text: "Hello from Feishu",
+      attachments: [],
       agentId: "concierge",
     },
     {
@@ -147,12 +160,14 @@ test("receiveExternalMessage deduplicates repeated inbound message ids", async (
     accountId: "default",
     peerKind: "direct",
     peerId: "ou_123",
-    senderId: "ou_123",
-    senderName: "ou_123",
-    messageId: "msg-dup",
-    text: "Same message",
-    agentId: "concierge",
-  };
+      senderId: "ou_123",
+      senderName: "ou_123",
+      messageId: "msg-dup",
+      messageType: "text",
+      text: "Same message",
+      attachments: [],
+      agentId: "concierge",
+    };
 
   const deps = {
     loadWorkspaceEnvelope: async () => ({ version: 1, updatedAt: new Date().toISOString(), state }),
@@ -195,4 +210,72 @@ test("receiveExternalMessage deduplicates repeated inbound message ids", async (
   assert.equal(first.status, "processed");
   assert.equal(second.status, "duplicate");
   assert.equal(runCount, 1);
+});
+
+test("receiveExternalMessage preserves inbound Feishu image attachments", async () => {
+  await resetChannelDeliveryStateForTest();
+
+  let state = createDefaultWorkspaceState();
+  let binding: ChannelBinding | null = null;
+
+  await receiveExternalMessage(
+    {
+      channel: "feishu",
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "ou_456",
+      senderId: "ou_456",
+      senderName: "Photo User",
+      messageId: "msg-image-1",
+      messageType: "image",
+      text: "",
+      attachments: [SAMPLE_ATTACHMENT],
+      agentId: "concierge",
+    },
+    {
+      loadWorkspaceEnvelope: async () => ({ version: 1, updatedAt: new Date().toISOString(), state }),
+      mutateWorkspace: async (mutator) => {
+        state = await mutator(state);
+        return { version: 1, updatedAt: new Date().toISOString(), state };
+      },
+      findChannelBinding: async () => binding,
+      upsertChannelBinding: async (nextBinding) => {
+        binding = nextBinding;
+        return nextBinding;
+      },
+      touchChannelBinding: async () => binding,
+      listAgentDefinitions: async () => ROOM_AGENTS,
+      runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => ({
+        turn: {
+          id: "turn-image-1",
+          agent: {
+            id: agentId,
+            label: "Harbor Concierge",
+          },
+          userMessage: {
+            ...createRoomMessage(roomId, "user", message.content, "user", { sender: message.sender, attachments: message.attachments }),
+            id: message.id,
+          },
+          assistantContent: "I can see the image.",
+          tools: [],
+          emittedMessages: [],
+          status: "completed",
+          resolvedModel: "generic/fake-model",
+        },
+        resolvedModel: "generic/fake-model",
+        compatibility: COMPATIBILITY,
+        emittedMessages: [],
+        receiptUpdates: [],
+        roomActions: [],
+      }),
+      deliverMessages: async () => {},
+    },
+  );
+
+  const room = state.rooms.find((entry) => entry.id === binding?.roomId);
+  assert.ok(room);
+  const inboundMessage = room?.roomMessages.find((entry) => entry.id === "feishu:default:msg-image-1");
+  assert.ok(inboundMessage);
+  assert.equal(inboundMessage?.attachments.length, 1);
+  assert.equal(inboundMessage?.attachments[0]?.filename, "feishu.jpg");
 });

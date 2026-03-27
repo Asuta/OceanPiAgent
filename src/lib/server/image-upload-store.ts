@@ -21,6 +21,11 @@ function sanitizeFilename(filename: string): string {
   return normalized.replace(/^-+|-+$/g, "") || "image";
 }
 
+function inferExtensionFromFilename(filename: string): string | null {
+  const extension = path.extname(filename || "").toLowerCase();
+  return extension || null;
+}
+
 async function ensureImageUploadDir(): Promise<void> {
   await mkdir(IMAGE_UPLOAD_DIR, { recursive: true });
 }
@@ -29,6 +34,50 @@ function assertValidMimeType(mimeType: string): asserts mimeType is (typeof ALLO
   if (!ALLOWED_MESSAGE_IMAGE_MIME_TYPES.includes(mimeType as (typeof ALLOWED_MESSAGE_IMAGE_MIME_TYPES)[number])) {
     throw new Error("Only PNG, JPEG, and WebP images are supported.");
   }
+}
+
+export function detectAllowedImageMimeType(args: {
+  mimeType?: string | null;
+  filename?: string | null;
+  buffer?: Buffer;
+}): (typeof ALLOWED_MESSAGE_IMAGE_MIME_TYPES)[number] | null {
+  const normalizedMimeType = args.mimeType?.trim().toLowerCase() || "";
+  if (normalizedMimeType === "image/jpg") {
+    return "image/jpeg";
+  }
+  if (ALLOWED_MESSAGE_IMAGE_MIME_TYPES.includes(normalizedMimeType as (typeof ALLOWED_MESSAGE_IMAGE_MIME_TYPES)[number])) {
+    return normalizedMimeType as (typeof ALLOWED_MESSAGE_IMAGE_MIME_TYPES)[number];
+  }
+
+  const extension = inferExtensionFromFilename(args.filename || "");
+  if (extension === ".png") {
+    return "image/png";
+  }
+  if (extension === ".jpg" || extension === ".jpeg") {
+    return "image/jpeg";
+  }
+  if (extension === ".webp") {
+    return "image/webp";
+  }
+
+  const buffer = args.buffer;
+  if (!buffer || buffer.byteLength < 12) {
+    return null;
+  }
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+    return "image/png";
+  }
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46
+    && buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+
+  return null;
 }
 
 function buildAttachmentUrl(storagePath: string): string {
@@ -64,23 +113,52 @@ export async function storeUploadedImage(file: File): Promise<MessageImageAttach
   }
 
   assertValidMimeType(file.type);
+  const buffer = Buffer.from(await file.arrayBuffer());
+  return storeImageBufferAsAttachment({
+    buffer,
+    mimeType: file.type,
+    filename: file.name,
+  });
+}
+
+export async function storeImageBufferAsAttachment(args: {
+  buffer: Buffer;
+  mimeType: string;
+  filename?: string;
+}): Promise<MessageImageAttachment> {
+  if (args.buffer.byteLength <= 0) {
+    throw new Error("The selected image is empty.");
+  }
+  if (args.buffer.byteLength > MAX_MESSAGE_IMAGE_BYTES) {
+    throw new Error(`Each image must be ${Math.floor(MAX_MESSAGE_IMAGE_BYTES / (1024 * 1024))} MB or smaller.`);
+  }
+
+  const detectedMimeType = detectAllowedImageMimeType({
+    mimeType: args.mimeType,
+    filename: args.filename,
+    buffer: args.buffer,
+  });
+  if (!detectedMimeType) {
+    throw new Error("Only PNG, JPEG, and WebP images are supported.");
+  }
+
+  assertValidMimeType(detectedMimeType);
   await ensureImageUploadDir();
 
   const id = createUuid();
-  const extension = MIME_TYPE_TO_EXTENSION[file.type];
-  const filename = sanitizeFilename(file.name);
+  const extension = MIME_TYPE_TO_EXTENSION[detectedMimeType];
+  const filename = sanitizeFilename(args.filename || `image${extension}`);
   const storagePath = path.posix.join("images", `${id}${extension}`);
   const absolutePath = resolveStoredImagePath(storagePath);
-  const buffer = Buffer.from(await file.arrayBuffer());
 
-  await writeFile(absolutePath, buffer);
+  await writeFile(absolutePath, args.buffer);
 
   return {
     id,
     kind: "image",
-    mimeType: file.type,
+    mimeType: detectedMimeType,
     filename,
-    sizeBytes: buffer.byteLength,
+    sizeBytes: args.buffer.byteLength,
     storagePath,
     url: buildAttachmentUrl(storagePath),
   };
