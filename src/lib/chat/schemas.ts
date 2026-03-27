@@ -166,6 +166,16 @@ const assistantMessageMetaSchema = z.object({
   recovery: recoveryDiagnosticSchema.optional(),
 }).strict();
 
+const toolExecutionDetailsSchema = z.object({
+  exitCode: z.number().nullable().optional(),
+  truncated: z.boolean().optional(),
+  fullOutputPath: z.string().optional(),
+  cwd: z.string().optional(),
+  shell: z.string().optional(),
+  timedOut: z.boolean().optional(),
+  aborted: z.boolean().optional(),
+}).strict();
+
 const toolExecutionSchema = z.object({
   id: z.string(),
   sequence: z.number(),
@@ -177,6 +187,7 @@ const toolExecutionSchema = z.object({
   outputText: z.string(),
   status: toolExecutionStatusSchema,
   durationMs: z.number(),
+  details: toolExecutionDetailsSchema.optional(),
   roomMessage: roomMessageEmissionSchema.optional(),
   roomAction: roomToolActionUnionSchema.optional(),
 }).strict();

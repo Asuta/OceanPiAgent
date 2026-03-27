@@ -741,6 +741,7 @@ function normalizeToolExecution(value: unknown, index: number): ToolExecution | 
 
   const inputText = typeof value.inputText === "string" ? value.inputText : "";
   const outputText = typeof value.outputText === "string" ? value.outputText : "";
+  const normalizedDetails = normalizeToolExecutionDetails(value.details);
 
   return {
     id: typeof value.id === "string" && value.id ? value.id : createUuid(),
@@ -753,6 +754,7 @@ function normalizeToolExecution(value: unknown, index: number): ToolExecution | 
     outputText,
     status: value.status === "error" ? "error" : "success",
     durationMs: typeof value.durationMs === "number" && value.durationMs >= 0 ? value.durationMs : 0,
+    ...(normalizedDetails ? { details: normalizedDetails } : {}),
     ...(normalizeRoomMessageEmission(value.roomMessage)
       ? {
           roomMessage: normalizeRoomMessageEmission(value.roomMessage),
@@ -764,6 +766,46 @@ function normalizeToolExecution(value: unknown, index: number): ToolExecution | 
         }
       : {}),
   };
+}
+
+function normalizeToolExecutionDetails(value: unknown): ToolExecution["details"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const details: NonNullable<ToolExecution["details"]> = {};
+
+  if (typeof value.exitCode === "number" && Number.isFinite(value.exitCode)) {
+    details.exitCode = Math.round(value.exitCode);
+  } else if (value.exitCode === null) {
+    details.exitCode = null;
+  }
+
+  if (typeof value.truncated === "boolean") {
+    details.truncated = value.truncated;
+  }
+
+  if (typeof value.fullOutputPath === "string") {
+    details.fullOutputPath = value.fullOutputPath;
+  }
+
+  if (typeof value.cwd === "string") {
+    details.cwd = value.cwd;
+  }
+
+  if (typeof value.shell === "string") {
+    details.shell = value.shell;
+  }
+
+  if (typeof value.timedOut === "boolean") {
+    details.timedOut = value.timedOut;
+  }
+
+  if (typeof value.aborted === "boolean") {
+    details.aborted = value.aborted;
+  }
+
+  return Object.keys(details).length > 0 ? details : undefined;
 }
 
 function normalizeCompatibility(value: unknown): ProviderCompatibility | null {

@@ -2,7 +2,7 @@ import { baseTools } from "./base-tools";
 import { cronTools } from "./cron-tools";
 import { memoryTools } from "./memory-tools";
 import { roomTools } from "./room-tools";
-import { formatJsonOutput, type ToolDefinition, type ToolExecutionContext, type ToolName, type ToolRuntimeResult } from "./shared";
+import { ToolExecutionError, formatJsonOutput, type ToolDefinition, type ToolExecutionContext, type ToolName, type ToolRuntimeResult } from "./shared";
 import { workspaceTools } from "./workspace-tools";
 import type { ToolExecution, ToolScope } from "@/lib/chat/types";
 import { truncateText } from "@/lib/shared/text";
@@ -68,7 +68,7 @@ export async function executeTool(
   scope: ToolScope = "default",
   signal?: AbortSignal,
   context?: ToolExecutionContext,
-): Promise<{ output: string; event: ToolExecution }> {
+): Promise<{ output: string; event: ToolExecution; details?: ToolExecution["details"] }> {
   const toolMap = getToolDefinitions(scope);
   const tool = toolMap[toolName as ToolName];
   if (!tool) {
@@ -101,6 +101,7 @@ export async function executeTool(
 
     return {
       output: executionResult.output,
+      details: executionResult.details,
       event: {
         id: createUuid(),
         sequence: 0,
@@ -115,12 +116,14 @@ export async function executeTool(
         outputText: executionResult.output,
         status: "success",
         durationMs: Math.max(1, Math.round(performance.now() - startedAt)),
+        ...(executionResult.details ? { details: executionResult.details } : {}),
         ...(executionResult.roomMessage ? { roomMessage: executionResult.roomMessage } : {}),
         ...(executionResult.roomAction ? { roomAction: executionResult.roomAction } : {}),
       },
     };
   } catch (error) {
     const output = error instanceof Error ? error.message : "Tool execution failed.";
+    const details = error instanceof ToolExecutionError ? error.details : undefined;
     const customCommandName =
       rawArgs && typeof rawArgs === "object" && "command" in rawArgs
         ? String((rawArgs as { command: unknown }).command)
@@ -128,6 +131,7 @@ export async function executeTool(
 
     return {
       output,
+      details,
       event: {
         id: createUuid(),
         sequence: 0,
@@ -142,6 +146,7 @@ export async function executeTool(
         outputText: output,
         status: "error",
         durationMs: 0,
+        ...(details ? { details } : {}),
       },
     };
   }

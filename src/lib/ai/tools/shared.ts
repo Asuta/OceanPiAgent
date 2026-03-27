@@ -13,6 +13,7 @@ import type {
   RoomMessageEmission,
   RoomToolActionUnion,
   RoomToolContext,
+  ToolExecutionDetails,
 } from "@/lib/chat/types";
 import { safeJsonStringify } from "@/lib/shared/text";
 import { createUuid } from "@/lib/utils/uuid";
@@ -63,8 +64,19 @@ export interface ToolExecutionContext {
 
 export interface ToolRuntimeResult {
   output: string;
+  details?: ToolExecutionDetails;
   roomMessage?: RoomMessageEmission;
   roomAction?: RoomToolActionUnion;
+}
+
+export class ToolExecutionError extends Error {
+  details?: ToolExecutionDetails;
+
+  constructor(message: string, details?: ToolExecutionDetails) {
+    super(message);
+    this.name = "ToolExecutionError";
+    this.details = details;
+  }
 }
 
 export interface ToolDefinition<TInput> {
