@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { roomWorkspaceStateSchema } from "@/lib/chat/schemas";
+import { ensureChannelRuntimeStarted } from "@/lib/server/channel-runtime";
 import { ensureCronDispatcherStarted } from "@/lib/server/cron-dispatcher";
 import { loadWorkspaceEnvelope, saveWorkspaceState } from "@/lib/server/workspace-store";
 
@@ -13,6 +14,7 @@ const requestSchema = z.object({
 
 export async function GET() {
   ensureCronDispatcherStarted();
+  ensureChannelRuntimeStarted();
   const envelope = await loadWorkspaceEnvelope();
   return NextResponse.json(envelope);
 }
@@ -20,6 +22,7 @@ export async function GET() {
 export async function PUT(request: Request) {
   try {
     ensureCronDispatcherStarted();
+    ensureChannelRuntimeStarted();
     const payload = requestSchema.parse(await request.json());
     const envelope = await saveWorkspaceState({
       expectedVersion: payload.expectedVersion,

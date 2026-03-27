@@ -16,6 +16,7 @@ import {
   runPreparedRoomTurn,
   type RunPreparedRoomTurnInput,
 } from "@/lib/server/room-runner";
+import { ensureChannelRuntimeStarted } from "@/lib/server/channel-runtime";
 import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store";
 
 export const runtime = "nodejs";
@@ -174,6 +175,7 @@ function toPreparedInput(payload: {
 
 export async function POST(request: Request) {
   try {
+    ensureChannelRuntimeStarted();
     const payload = requestSchema.parse(await request.json());
     const resolvedSelection = await resolveSettingsWithModelConfig(payload.settings);
     const preparedInput = toPreparedInput({
