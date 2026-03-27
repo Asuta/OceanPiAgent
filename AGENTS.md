@@ -15,16 +15,21 @@ Repository guidance for coding agents working in this project.
 - Workspace state validation lives in `src/lib/chat/schemas.ts`.
 - Server-side workspace state composition lives in `src/lib/server/workspace-state.ts`, which reuses shared domain helpers and applies server-only orchestration.
 - Shared server room execution flow lives in `src/lib/server/room-runner.ts`.
+- Agent definition persistence and custom agent loading live in `src/lib/server/agent-registry.ts`, with workspace-backed agent files stored through `src/lib/server/agent-workspace-store.ts`.
 - Tool registration is composed in `src/lib/ai/tools/index.ts` from smaller tool modules.
 - Pi runtime tool wrapping and schema adaptation live in `src/lib/ai/pi-agent-tools.ts`.
+- Project bootstrap/context document discovery and reads live in `src/lib/ai/project-context.ts`.
+- Workspace skill catalog loading and `skills/*/SKILL.md` parsing live in `src/lib/ai/skills.ts`.
 - `src/components/workspace-provider.tsx` is still the top-level client composition layer, but it is already large; prefer moving new reusable logic out instead of expanding it further.
-- Client-side room behavior continues to move into focused modules under `src/components/workspace/`.
+- Client-side room behavior continues to move into focused modules under `src/components/workspace/`, especially execution in `use-room-execution.ts`, scheduling in `use-room-scheduler.ts`, persistence in `persistence.ts`, and snapshot/diff helpers in `workspace-state.ts`.
 
 ## Important Boundaries
 
 - Do not duplicate room/workspace business rules in both client and server when a shared domain helper can be used instead.
 - Do not bypass `src/lib/server/room-runner.ts` by re-implementing room turn execution in API routes.
 - Do not put new pure domain logic, persistence conflict handling, or reusable normalization helpers directly into `src/components/workspace-provider.tsx` when they can live in shared modules.
+- Do not bypass `src/lib/server/agent-registry.ts` when creating or updating custom agent definitions.
+- Do not bypass the allowlisted project-context or skill loaders with ad hoc filesystem reads when the same behavior belongs in `src/lib/ai/project-context.ts` or `src/lib/ai/skills.ts`.
 - Prefer extracting reusable logic into:
   - `src/lib/chat/` for shared domain logic and schemas
   - `src/lib/server/` for server orchestration and persistence
@@ -42,7 +47,7 @@ Repository guidance for coding agents working in this project.
 
 ## Tools
 
-- Base tools: shared web/custom command utilities
+- Base tools: bash, shared web/custom command utilities, project-context reads, and workspace skill reads
 - Room tools: room membership, room history, visible room messaging
 - Cron tools: scheduled room jobs and run history
 - Memory tools: per-agent memory search and file reads
@@ -62,6 +67,8 @@ When adding a tool:
 - Client persistence uses local storage plus server-backed workspace envelopes fetched through `/api/workspace`.
 - Server persistence uses versioned workspace envelopes and optimistic conflict handling; do not remove version conflict handling casually.
 - Background server flows such as cron mutate workspace state through `src/lib/server/workspace-store.ts` instead of bypassing shared validation.
+- Shared per-agent runtime history, continuation snapshots, and compaction state flow through `src/lib/server/agent-room-sessions.ts`, `src/lib/server/agent-runtime-store.ts`, and `src/lib/server/agent-memory-store.ts`.
+- Custom agent profiles and prompts persist inside each agent workspace through `src/lib/server/agent-registry.ts`.
 - If you change workspace shape, update validation in `src/lib/chat/schemas.ts` and check migration/hydration behavior.
 
 ## Testing And Validation
@@ -97,4 +104,6 @@ Add tests when changing:
 - Shared domain logic should stay serializable and framework-light.
 - Room execution changes should respect the separation between visible output and internal execution.
 - Room tools may emit visible room messages, silent receipt updates, or room-management actions; preserve those distinctions through the full stack.
+- Project-context tools only expose allowlisted root docs and `docs/`; keep that boundary intentional when expanding context access.
+- Skills are workspace content under `skills/<skill-id>/SKILL.md`; if you change how skills are discovered or injected, keep loader behavior and tool exposure aligned.
 - Build currently succeeds even though Next.js prints a non-blocking dynamic import warning during page data collection; do not confuse that with a failed build.

@@ -29,7 +29,7 @@ function toProjectContextFileEntry(entry: LoadedProjectContextFile): ProjectCont
   };
 }
 
-const ROOT_BOOTSTRAP_FILES = ["PROJECT_CONTEXT.md", "AGENTS.md", "SOUL.md", "TOOLS.md"] as const;
+const ROOT_BOOTSTRAP_FILES = ["PROJECT_CONTEXT.md", "AGENTS.md", "SOUL.md"] as const;
 const ROOT_CATALOG_FILES = [
   ...ROOT_BOOTSTRAP_FILES,
   "AGENTS.md",
