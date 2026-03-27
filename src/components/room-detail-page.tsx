@@ -263,6 +263,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const [isUploadingImages, setIsUploadingImages] = useState(false);
   const [titleDraftByRoomId, setTitleDraftByRoomId] = useState<Record<string, string>>({});
   const threadListRef = useRef<HTMLDivElement | null>(null);
+  const workbenchBodyRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const stickThreadToBottomRef = useRef(true);
   const lastThreadRoomIdRef = useRef<string | null>(null);
@@ -286,6 +287,15 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
 
     threadList.scrollTop = threadList.scrollHeight;
     stickThreadToBottomRef.current = true;
+  }, []);
+
+  const scrollWorkbenchToBottom = useCallback(() => {
+    const workbenchBody = workbenchBodyRef.current;
+    if (!workbenchBody) {
+      return;
+    }
+
+    workbenchBody.scrollTop = workbenchBody.scrollHeight;
   }, []);
 
   useEffect(() => {
@@ -356,6 +366,24 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
       }
     };
   }, [room, scrollThreadListToBottom, threadScrollKey]);
+
+  useLayoutEffect(() => {
+    if (!workbenchOpen || inspectorTab !== "console") {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      scrollWorkbenchToBottom();
+    });
+    const settleTimer = window.setTimeout(() => {
+      scrollWorkbenchToBottom();
+    }, 80);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      window.clearTimeout(settleTimer);
+    };
+  }, [inspectorTab, room?.id, scrollWorkbenchToBottom, workbenchOpen]);
 
   const roomDraft = room ? draftsByRoomId[room.id] ?? "" : "";
   const isRunning = room ? isRoomRunning(room.id) : false;
@@ -976,7 +1004,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               </div>
             </div>
 
-            <div className="room-side-panel-body inspector-stack">
+            <div ref={workbenchBodyRef} className="room-side-panel-body inspector-stack">
               {inspectorTab === "console" ? (
                 <div className="inspector-stack">
                   <section className="subtle-panel">
