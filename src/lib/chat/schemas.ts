@@ -159,9 +159,105 @@ const recoveryDiagnosticSchema = z.object({
   attempts: z.array(recoveryAttemptDiagnosticSchema),
 }).strict();
 
-const assistantMessageMetaSchema = z.object({
+const assistantUsageSnapshotSchema = z.object({
+  input: z.number(),
+  output: z.number(),
+  cacheRead: z.number(),
+  cacheWrite: z.number(),
+  totalTokens: z.number(),
+}).strict();
+
+const assistantContinuationSnapshotSchema = z.object({
+  strategy: responsesContinuationSchema,
+  previousResponseId: z.string().optional(),
+}).strict();
+
+const assistantHistoryTextPartSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+  textSignature: z.string().optional(),
+}).strict();
+
+const assistantHistoryThinkingPartSchema = z.object({
+  type: z.literal("thinking"),
+  thinking: z.string(),
+  thinkingSignature: z.string().optional(),
+  redacted: z.boolean().optional(),
+}).strict();
+
+const assistantHistoryImagePartSchema = z.object({
+  type: z.literal("image"),
+  data: z.string(),
+  mimeType: z.string(),
+}).strict();
+
+const assistantHistoryToolCallPartSchema = z.object({
+  type: z.literal("toolCall"),
+  id: z.string(),
+  name: z.string(),
+  arguments: z.record(z.string(), z.unknown()),
+  thoughtSignature: z.string().optional(),
+}).strict();
+
+const assistantHistoryUsageSnapshotSchema = z.object({
+  input: z.number(),
+  output: z.number(),
+  cacheRead: z.number(),
+  cacheWrite: z.number(),
+  totalTokens: z.number(),
+  cost: z.object({
+    input: z.number(),
+    output: z.number(),
+    cacheRead: z.number(),
+    cacheWrite: z.number(),
+    total: z.number(),
+  }).strict(),
+}).strict();
+
+const assistantHistoryMessageSchema = z.discriminatedUnion("role", [
+  z.object({
+    role: z.literal("user"),
+    content: z.union([
+      z.string(),
+      z.array(z.union([assistantHistoryTextPartSchema, assistantHistoryImagePartSchema])),
+    ]),
+    timestamp: z.number(),
+  }).strict(),
+  z.object({
+    role: z.literal("assistant"),
+    content: z.array(z.union([
+      assistantHistoryTextPartSchema,
+      assistantHistoryThinkingPartSchema,
+      assistantHistoryToolCallPartSchema,
+    ])),
+    api: z.string(),
+    provider: z.string(),
+    model: z.string(),
+    responseId: z.string().optional(),
+    usage: assistantHistoryUsageSnapshotSchema,
+    stopReason: z.enum(["stop", "length", "toolUse", "error", "aborted"]),
+    errorMessage: z.string().optional(),
+    timestamp: z.number(),
+  }).strict(),
+  z.object({
+    role: z.literal("toolResult"),
+    toolCallId: z.string(),
+    toolName: z.string(),
+    content: z.array(z.union([assistantHistoryTextPartSchema, assistantHistoryImagePartSchema])),
+    details: z.unknown().optional(),
+    isError: z.boolean(),
+    timestamp: z.number(),
+  }).strict(),
+]);
+
+export const assistantMessageMetaSchema = z.object({
   apiFormat: apiFormatSchema,
   compatibility: providerCompatibilitySchema,
+  responseId: z.string().optional(),
+  sessionId: z.string().optional(),
+  continuation: assistantContinuationSnapshotSchema.optional(),
+  usage: assistantUsageSnapshotSchema.optional(),
+  historyDelta: z.array(assistantHistoryMessageSchema).optional(),
   emptyCompletion: emptyCompletionDiagnosticSchema.optional(),
   recovery: recoveryDiagnosticSchema.optional(),
 }).strict();

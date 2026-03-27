@@ -3,7 +3,7 @@ import path from "node:path";
 import { generateCompactionSummary } from "./agent-compaction";
 import { appendAgentCompactionMemory, clearAgentMemory } from "./agent-memory-store";
 import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runtime-hooks";
-import type { MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
+import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 
 export interface PersistedVisibleMessage {
@@ -11,6 +11,7 @@ export interface PersistedVisibleMessage {
   role: "user" | "assistant";
   content: string;
   attachments: MessageImageAttachment[];
+  meta?: AssistantMessageMeta;
   createdAt: string;
 }
 
@@ -101,6 +102,11 @@ function normalizeMessage(value: unknown): PersistedVisibleMessage | null {
             && typeof (attachment as MessageImageAttachment).url === "string",
         )
       : [],
+    ...(isRecord(value.meta)
+      ? {
+          meta: value.meta as unknown as AssistantMessageMeta,
+        }
+      : {}),
     createdAt: typeof value.createdAt === "string" && value.createdAt ? value.createdAt : createTimestamp(),
   };
 }
@@ -183,7 +189,7 @@ export async function savePersistedAgentRuntime(runtime: PersistedAgentRuntime):
 
 export async function appendPersistedHistoryMessage(args: {
   agentId: RoomAgentId;
-  message: Omit<PersistedVisibleMessage, "id" | "createdAt" | "attachments"> & Partial<Pick<PersistedVisibleMessage, "id" | "createdAt" | "attachments">>;
+  message: Omit<PersistedVisibleMessage, "id" | "createdAt" | "attachments" | "meta"> & Partial<Pick<PersistedVisibleMessage, "id" | "createdAt" | "attachments" | "meta">>;
 }): Promise<PersistedAgentRuntime> {
   const runtime = await loadPersistedAgentRuntime(args.agentId);
   runtime.history.push({
@@ -191,6 +197,7 @@ export async function appendPersistedHistoryMessage(args: {
     role: args.message.role,
     content: args.message.content,
     attachments: args.message.attachments ? [...args.message.attachments] : [],
+    ...(args.message.meta ? { meta: args.message.meta } : {}),
     createdAt: args.message.createdAt || createTimestamp(),
   });
   runtime.updatedAt = createTimestamp();

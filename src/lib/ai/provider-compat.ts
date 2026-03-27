@@ -114,9 +114,28 @@ export function shouldFallbackToLegacyFunctions(error: unknown): boolean {
 }
 
 export function shouldFallbackToResponsesReplay(error: unknown): boolean {
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current; depth += 1) {
+    if (typeof current === "string") {
+      messages.push(current.toLowerCase());
+      break;
+    }
+
+    if (!(current instanceof Error)) {
+      break;
+    }
+
+    messages.push(current.message.toLowerCase());
+    current = current.cause;
+  }
+
+  const message = messages.join("\n");
   return (
     message.includes("previous_response_id") ||
+    message.includes("400 status code") ||
+    message.includes("status code (no body)") ||
+    message.includes("bad request") ||
     message.includes("no tool call found") ||
     message.includes("unsupported parameter")
   );

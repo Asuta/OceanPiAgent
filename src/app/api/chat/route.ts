@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { extractAssistantMetaFromConversationError, runConversation, streamConversation } from "@/lib/ai/openai-client";
-import { messageImageAttachmentSchema } from "@/lib/chat/schemas";
+import { assistantMessageMetaSchema, messageImageAttachmentSchema } from "@/lib/chat/schemas";
 import {
   DEFAULT_MAX_TOOL_LOOP_STEPS,
   MAX_MAX_TOOL_LOOP_STEPS,
@@ -22,6 +22,7 @@ const requestSchema = z.object({
         role: z.enum(["user", "assistant"]),
         content: z.string().max(20_000),
         attachments: z.array(messageImageAttachmentSchema).max(3).optional().default([]),
+        meta: assistantMessageMetaSchema.optional(),
       }).superRefine((message, ctx) => {
         if (!message.content.trim() && message.attachments.length === 0) {
           ctx.addIssue({
@@ -63,19 +64,16 @@ function toAssistantResponse(
         attachments: [],
         tools: result.toolEvents,
         meta: {
-        apiFormat: result.actualApiFormat,
-        compatibility: result.compatibility,
-        ...(result.recovery
-          ? {
-              recovery: result.recovery,
-            }
-          : {}),
-        ...(result.emptyCompletion
-          ? {
-              emptyCompletion: result.emptyCompletion,
-            }
-          : {}),
-      },
+          apiFormat: result.actualApiFormat,
+          compatibility: result.compatibility,
+          ...(result.responseId ? { responseId: result.responseId } : {}),
+          ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+          ...(result.continuation ? { continuation: result.continuation } : {}),
+          ...(result.usage ? { usage: result.usage } : {}),
+          ...(result.historyDelta ? { historyDelta: result.historyDelta } : {}),
+          ...(result.recovery ? { recovery: result.recovery } : {}),
+          ...(result.emptyCompletion ? { emptyCompletion: result.emptyCompletion } : {}),
+        },
     },
     resolvedModel: result.resolvedModel,
     compatibility: result.compatibility,
@@ -148,6 +146,11 @@ export async function POST(request: Request) {
                   meta: {
                     apiFormat: result.actualApiFormat,
                     compatibility: result.compatibility,
+                    ...(result.responseId ? { responseId: result.responseId } : {}),
+                    ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+                    ...(result.continuation ? { continuation: result.continuation } : {}),
+                    ...(result.usage ? { usage: result.usage } : {}),
+                    ...(result.historyDelta ? { historyDelta: result.historyDelta } : {}),
                     ...(result.recovery
                       ? {
                           recovery: result.recovery,

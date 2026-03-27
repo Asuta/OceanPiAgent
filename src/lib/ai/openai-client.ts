@@ -1,5 +1,10 @@
+import { createHash } from "node:crypto";
 import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
-import type { Api, AssistantMessage, Message, Model, UserMessage } from "@mariozechner/pi-ai";
+import type { Api, AssistantMessage, Message, Model, Usage, UserMessage } from "@mariozechner/pi-ai";
+import {
+  getResponsesContinuationOrder,
+  shouldFallbackToResponsesReplay,
+} from "@/lib/ai/provider-compat";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { resolvePiModel } from "@/lib/ai/pi-model-resolver";
 import { getPiAgentTools, type PiToolResultDetails } from "@/lib/ai/pi-agent-tools";
@@ -8,7 +13,11 @@ import { readStoredImageAttachment } from "@/lib/server/image-upload-store";
 import { ensureGlobalProxyDispatcherInstalled } from "@/lib/server/proxy-fetch";
 import type {
   ApiFormat,
+  AssistantContinuationSnapshot,
+  AssistantHistoryMessage,
+  AssistantHistoryUsageSnapshot,
   AssistantMessageMeta,
+  AssistantUsageSnapshot,
   ChatMessage,
   ChatSettings,
   EmptyCompletionDiagnostic,
@@ -21,7 +30,11 @@ import type {
 } from "@/lib/chat/types";
 import { coerceMaxToolLoopSteps } from "@/lib/chat/types";
 
-type VisibleMessage = Pick<ChatMessage, "role" | "content" | "attachments">;
+type VisibleMessage = Pick<ChatMessage, "role" | "content" | "attachments" | "meta">;
+
+type ResponsesContinuationStrategy = "replay" | "previous_response_id";
+
+type PayloadRecord = Record<string, unknown>;
 
 interface RunConversationResult {
   assistantText: string;
@@ -29,6 +42,11 @@ interface RunConversationResult {
   resolvedModel: string;
   compatibility: ProviderCompatibility;
   actualApiFormat: ApiFormat;
+  responseId?: string;
+  sessionId?: string;
+  continuation?: AssistantContinuationSnapshot;
+  usage?: AssistantUsageSnapshot;
+  historyDelta?: AssistantHistoryMessage[];
   emptyCompletion?: EmptyCompletionDiagnostic;
   recovery?: RecoveryDiagnostic;
 }
@@ -38,6 +56,14 @@ interface RunTextPromptResult {
   resolvedModel: string;
   compatibility: ProviderCompatibility;
   actualApiFormat: ApiFormat;
+  responseId?: string;
+  sessionId?: string;
+  usage?: AssistantUsageSnapshot;
+}
+
+interface ResponsesContinuationContext {
+  previousResponseId: string;
+  messages: VisibleMessage[];
 }
 
 interface StreamConversationCallbacks {
@@ -107,6 +133,53 @@ function createUsage() {
   };
 }
 
+function shouldSendSessionHeader(baseUrl: string): boolean {
+  return baseUrl.toLowerCase().includes("right.codes");
+}
+
+function sanitizeSessionIdPart(value: string): string {
+  const sanitized = value.trim().replace(/[^a-zA-Z0-9:_-]+/g, "-").replace(/-+/g, "-").replace(/^[-:]+|[-:]+$/g, "");
+  return sanitized || "unknown";
+}
+
+function buildStableSessionId(args: {
+  resolvedModel: ReturnType<typeof resolvePiModel>;
+  toolContext?: RoomToolContext;
+}): string | undefined {
+  const roomId = args.toolContext?.currentRoomId?.trim();
+  const agentId = args.toolContext?.currentAgentId?.trim();
+  if (!roomId || !agentId) {
+    return undefined;
+  }
+
+  return [
+    "room",
+    sanitizeSessionIdPart(roomId),
+    "agent",
+    sanitizeSessionIdPart(agentId),
+    "provider",
+    sanitizeSessionIdPart(args.resolvedModel.compatibility.providerKey),
+    "api",
+    sanitizeSessionIdPart(args.resolvedModel.actualApiFormat),
+    "model",
+    sanitizeSessionIdPart(args.resolvedModel.resolvedModelRef || args.resolvedModel.model.id),
+  ].join(":");
+}
+
+function buildProviderSessionKey(sessionId: string | undefined): string | undefined {
+  if (!sessionId?.trim()) {
+    return undefined;
+  }
+
+  const normalized = sanitizeSessionIdPart(sessionId);
+  if (normalized.length <= 64) {
+    return normalized;
+  }
+
+  const digest = createHash("sha1").update(normalized).digest("hex").slice(0, 16);
+  return `${normalized.slice(0, 47)}:${digest}`;
+}
+
 function createHistoricalAssistantMessage(message: VisibleMessage, model: Model<Api>, timestamp: number): AssistantMessage {
   return {
     role: "assistant",
@@ -121,9 +194,289 @@ function createHistoricalAssistantMessage(message: VisibleMessage, model: Model<
     api: model.api,
     provider: model.provider,
     model: model.id,
+    ...(message.meta?.responseId
+      ? {
+          responseId: message.meta.responseId,
+        }
+      : {}),
     usage: createUsage(),
     stopReason: "stop",
     timestamp,
+  };
+}
+
+function toHistoryUsageSnapshot(usage: Usage): AssistantHistoryUsageSnapshot {
+  return {
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    totalTokens: usage.totalTokens,
+    cost: {
+      input: usage.cost.input,
+      output: usage.cost.output,
+      cacheRead: usage.cost.cacheRead,
+      cacheWrite: usage.cost.cacheWrite,
+      total: usage.cost.total,
+    },
+  };
+}
+
+function restoreUsageSnapshot(snapshot: AssistantHistoryUsageSnapshot | undefined): Usage {
+  if (!snapshot) {
+    return createUsage();
+  }
+
+  return {
+    input: snapshot.input,
+    output: snapshot.output,
+    cacheRead: snapshot.cacheRead,
+    cacheWrite: snapshot.cacheWrite,
+    totalTokens: snapshot.totalTokens,
+    cost: {
+      input: snapshot.cost.input,
+      output: snapshot.cost.output,
+      cacheRead: snapshot.cost.cacheRead,
+      cacheWrite: snapshot.cost.cacheWrite,
+      total: snapshot.cost.total,
+    },
+  };
+}
+
+function snapshotHistoryMessage(message: Message): AssistantHistoryMessage | null {
+  if (message.role === "user") {
+    return {
+      role: "user",
+      content: typeof message.content === "string"
+        ? message.content
+        : message.content.flatMap((item) => item.type === "text" || item.type === "image" ? [item] : []),
+      timestamp: message.timestamp,
+    };
+  }
+
+  if (message.role === "assistant") {
+    return {
+      role: "assistant",
+      content: message.content.flatMap((item) => item.type === "text" || item.type === "thinking" || item.type === "toolCall" ? [item] : []),
+      api: message.api,
+      provider: message.provider,
+      model: message.model,
+      ...(message.responseId
+        ? {
+            responseId: message.responseId,
+          }
+        : {}),
+      usage: toHistoryUsageSnapshot(message.usage),
+      stopReason: message.stopReason,
+      ...(message.errorMessage
+        ? {
+            errorMessage: message.errorMessage,
+          }
+        : {}),
+      timestamp: message.timestamp,
+    };
+  }
+
+  if (message.role === "toolResult") {
+    return {
+      role: "toolResult",
+      toolCallId: message.toolCallId,
+      toolName: message.toolName,
+      content: message.content.flatMap((item) => item.type === "text" || item.type === "image" ? [item] : []),
+      ...(typeof message.details !== "undefined"
+        ? {
+            details: message.details,
+          }
+        : {}),
+      isError: message.isError,
+      timestamp: message.timestamp,
+    };
+  }
+
+  return null;
+}
+
+function snapshotHistoryDelta(messages: Message[]): AssistantHistoryMessage[] | undefined {
+  const historyDelta = messages.flatMap((message) => {
+    const snapshot = snapshotHistoryMessage(message);
+    return snapshot ? [snapshot] : [];
+  });
+
+  return historyDelta.length > 0 ? historyDelta : undefined;
+}
+
+function restoreHistoryMessage(snapshot: AssistantHistoryMessage): Message | null {
+  if (snapshot.role === "user") {
+    return {
+      role: "user",
+      content: snapshot.content,
+      timestamp: snapshot.timestamp,
+    } satisfies UserMessage;
+  }
+
+  if (snapshot.role === "assistant") {
+    return {
+      role: "assistant",
+      content: snapshot.content,
+      api: snapshot.api as Api,
+      provider: snapshot.provider,
+      model: snapshot.model,
+      ...(snapshot.responseId
+        ? {
+            responseId: snapshot.responseId,
+          }
+        : {}),
+      usage: restoreUsageSnapshot(snapshot.usage),
+      stopReason: snapshot.stopReason,
+      ...(snapshot.errorMessage
+        ? {
+            errorMessage: snapshot.errorMessage,
+          }
+        : {}),
+      timestamp: snapshot.timestamp,
+    } satisfies AssistantMessage;
+  }
+
+  if (snapshot.role === "toolResult") {
+    return {
+      role: "toolResult",
+      toolCallId: snapshot.toolCallId,
+      toolName: snapshot.toolName,
+      content: snapshot.content,
+      ...(typeof snapshot.details !== "undefined"
+        ? {
+            details: snapshot.details,
+          }
+        : {}),
+      isError: snapshot.isError,
+      timestamp: snapshot.timestamp,
+    };
+  }
+
+  return null;
+}
+
+function restoreHistoryDelta(historyDelta: AssistantHistoryMessage[] | undefined): Message[] {
+  if (!historyDelta?.length) {
+    return [];
+  }
+
+  return historyDelta.flatMap((snapshot) => {
+    const message = restoreHistoryMessage(snapshot);
+    return message ? [message] : [];
+  });
+}
+
+function toAssistantUsageSnapshot(usage: Usage | undefined): AssistantUsageSnapshot | undefined {
+  if (!usage) {
+    return undefined;
+  }
+
+  return {
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    totalTokens: usage.totalTokens,
+  };
+}
+
+function isPayloadRecord(value: unknown): value is PayloadRecord {
+  return typeof value === "object" && value !== null;
+}
+
+function isPayloadMessageWithRole(value: unknown): value is { role: string } {
+  return isPayloadRecord(value) && typeof value.role === "string";
+}
+
+function resolveResponsesContinuationContext(
+  messages: VisibleMessage[],
+  compatibility: ProviderCompatibility,
+): ResponsesContinuationContext | null {
+  if (messages.length < 2) {
+    return null;
+  }
+
+  let lastAssistantIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") {
+      lastAssistantIndex = index;
+      break;
+    }
+  }
+
+  if (lastAssistantIndex < 0 || lastAssistantIndex >= messages.length - 1) {
+    return null;
+  }
+
+  const assistantMessage = messages[lastAssistantIndex];
+  const responseId = assistantMessage.meta?.responseId?.trim();
+  if (!responseId || assistantMessage.meta?.apiFormat !== "responses") {
+    return null;
+  }
+
+  if (
+    assistantMessage.meta.compatibility.providerKey !== compatibility.providerKey
+    || assistantMessage.meta.compatibility.baseUrl !== compatibility.baseUrl
+  ) {
+    return null;
+  }
+
+  const followUpMessages = messages.slice(lastAssistantIndex + 1);
+  if (followUpMessages.length === 0 || followUpMessages.some((message) => message.role !== "user")) {
+    return null;
+  }
+
+  return {
+    previousResponseId: responseId,
+    messages: followUpMessages,
+  };
+}
+
+function applyPreviousResponseIdToPayload(
+  payload: unknown,
+  previousResponseId: string,
+  systemPrompt: string,
+): unknown {
+  if (!isPayloadRecord(payload)) {
+    return payload;
+  }
+
+  const input = Array.isArray(payload.input)
+    ? payload.input.filter((item) => !isPayloadMessageWithRole(item) || (item.role !== "developer" && item.role !== "system"))
+    : payload.input;
+
+  return {
+    ...payload,
+    input,
+    previous_response_id: previousResponseId,
+    ...(systemPrompt.trim()
+      ? {
+          instructions: systemPrompt,
+        }
+      : {}),
+  };
+}
+
+function applyResponsesPayloadOverrides(args: {
+  payload: unknown;
+  promptCacheKey?: string;
+  previousResponseId?: string;
+  systemPrompt: string;
+}): unknown {
+  let nextPayload = args.payload;
+
+  if (args.previousResponseId) {
+    nextPayload = applyPreviousResponseIdToPayload(nextPayload, args.previousResponseId, args.systemPrompt);
+  }
+
+  if (!isPayloadRecord(nextPayload) || !args.promptCacheKey?.trim()) {
+    return nextPayload;
+  }
+
+  return {
+    ...nextPayload,
+    prompt_cache_key: args.promptCacheKey,
   };
 }
 
@@ -154,18 +507,25 @@ async function createUserMessageContent(message: VisibleMessage): Promise<UserMe
 
 async function createConversationHistory(messages: VisibleMessage[], model: Model<Api>): Promise<Message[]> {
   const startTimestamp = Date.now() - Math.max(messages.length, 1) * 1_000;
-  return Promise.all(messages.map(async (message, index) => {
+  const history = await Promise.all(messages.map(async (message, index) => {
     const timestamp = startTimestamp + index * 1_000;
     if (message.role === "user") {
-      return {
+      return [{
         role: "user",
         content: await createUserMessageContent(message),
         timestamp,
-      } satisfies Message;
+      } satisfies Message];
     }
 
-    return createHistoricalAssistantMessage(message, model, timestamp);
+    const restoredHistory = restoreHistoryDelta(message.meta?.historyDelta);
+    if (restoredHistory.length > 0) {
+      return restoredHistory;
+    }
+
+    return [createHistoricalAssistantMessage(message, model, timestamp)];
   }));
+
+  return history.flat();
 }
 
 function isAssistantMessage(message: Message): message is AssistantMessage {
@@ -265,6 +625,141 @@ function getGeneratedAssistantMessages(messages: Message[]): AssistantMessage[] 
   return messages.filter(isAssistantMessage);
 }
 
+async function runConversationAttempt(args: {
+  messages: VisibleMessage[];
+  resolvedModel: ReturnType<typeof resolvePiModel>;
+  systemPromptText: string;
+  callbacks?: StreamConversationCallbacks;
+  resolvedOptions: ReturnType<typeof resolveConversationOptions>;
+  continuationStrategy: ResponsesContinuationStrategy;
+  sessionId?: string;
+}): Promise<RunConversationResult> {
+  const responsesContinuation = args.continuationStrategy === "previous_response_id"
+    ? resolveResponsesContinuationContext(args.messages, args.resolvedModel.compatibility)
+    : null;
+  const historyMessages = responsesContinuation?.messages ?? args.messages;
+  const providerSessionKey = buildProviderSessionKey(args.sessionId);
+  const model = providerSessionKey && shouldSendSessionHeader(args.resolvedModel.compatibility.baseUrl)
+    ? {
+        ...args.resolvedModel.model,
+        headers: {
+          ...((args.resolvedModel.model as { headers?: Record<string, string> }).headers ?? {}),
+          session_id: providerSessionKey,
+        },
+      }
+    : args.resolvedModel.model;
+
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: args.systemPromptText,
+      model,
+      thinkingLevel: args.resolvedModel.actualThinkingLevel,
+      tools: getPiAgentTools(args.resolvedOptions.toolScope, args.resolvedOptions.toolContext),
+      messages: await createConversationHistory(historyMessages, model),
+    },
+    getApiKey: args.resolvedModel.apiKey
+      ? async () => args.resolvedModel.apiKey
+      : undefined,
+    sessionId: args.sessionId,
+    onPayload: async (payload: unknown) =>
+      applyResponsesPayloadOverrides({
+        payload,
+        promptCacheKey: providerSessionKey,
+        previousResponseId: responsesContinuation?.previousResponseId,
+        systemPrompt: args.systemPromptText,
+      }),
+  });
+
+  const startingMessageCount = agent.state.messages.length;
+  const toolEvents: ToolExecution[] = [];
+  let assistantText = "";
+  let toolTurnCount = 0;
+  let toolLoopErrorMessage = "";
+
+  const unsubscribe = agent.subscribe((event) => {
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      assistantText += event.assistantMessageEvent.delta;
+      args.callbacks?.onTextDelta?.(event.assistantMessageEvent.delta);
+      return;
+    }
+
+    if (event.type === "tool_execution_end") {
+      const toolEvent = extractToolExecution(event);
+      if (!toolEvent) {
+        return;
+      }
+
+      const numberedToolEvent = {
+        ...toolEvent,
+        sequence: toolEvents.length + 1,
+      } satisfies ToolExecution;
+      toolEvents.push(numberedToolEvent);
+      args.callbacks?.onTool?.(numberedToolEvent);
+      return;
+    }
+
+    if (event.type === "turn_end" && isAssistantMessage(event.message)) {
+      const hasToolCalls = event.message.content.some((item) => item.type === "toolCall");
+      if (!hasToolCalls) {
+        return;
+      }
+
+      toolTurnCount += 1;
+      if (toolTurnCount >= args.resolvedOptions.maxToolLoopSteps) {
+        toolLoopErrorMessage = `Tool loop exceeded the maximum number of steps (${args.resolvedOptions.maxToolLoopSteps}).`;
+        agent.abort();
+      }
+    }
+  });
+
+  const abortListener = () => agent.abort();
+  args.resolvedOptions.signal?.addEventListener("abort", abortListener, { once: true });
+
+  try {
+    await agent.continue();
+  } finally {
+    unsubscribe();
+    args.resolvedOptions.signal?.removeEventListener("abort", abortListener);
+  }
+
+  throwIfAborted(args.resolvedOptions.signal);
+
+  const generatedMessages = agent.state.messages.slice(startingMessageCount) as Message[];
+  const generatedAssistantMessages = getGeneratedAssistantMessages(generatedMessages);
+  const finalAssistantMessage = generatedAssistantMessages[generatedAssistantMessages.length - 1];
+
+  if (toolLoopErrorMessage) {
+    throw new Error(toolLoopErrorMessage);
+  }
+
+  if (finalAssistantMessage?.stopReason === "error" || finalAssistantMessage?.stopReason === "aborted") {
+    throw new Error(finalAssistantMessage.errorMessage || "The model request failed.");
+  }
+
+  const derivedAssistantText = assistantText.trim()
+    || generatedAssistantMessages
+      .map((message) => extractAssistantText(message))
+      .filter(Boolean)
+      .join("\n\n")
+      .trim();
+
+  return {
+    assistantText: derivedAssistantText || "The model returned no text.",
+    toolEvents,
+    resolvedModel: args.resolvedModel.resolvedModelRef,
+    compatibility: args.resolvedModel.compatibility,
+    actualApiFormat: args.resolvedModel.actualApiFormat,
+    ...(finalAssistantMessage?.responseId ? { responseId: finalAssistantMessage.responseId } : {}),
+    ...(args.sessionId ? { sessionId: args.sessionId } : {}),
+    continuation: {
+      strategy: responsesContinuation ? "previous_response_id" : "replay",
+      ...(responsesContinuation?.previousResponseId ? { previousResponseId: responsesContinuation.previousResponseId } : {}),
+    },
+    ...(toAssistantUsageSnapshot(finalAssistantMessage?.usage) ? { usage: toAssistantUsageSnapshot(finalAssistantMessage?.usage) } : {}),
+    ...(snapshotHistoryDelta(generatedMessages) ? { historyDelta: snapshotHistoryDelta(generatedMessages) } : {}),
+  };
+}
+
 async function executeConversation(
   messages: VisibleMessage[],
   settings: ChatSettings,
@@ -293,113 +788,45 @@ async function executeConversation(
     toolContext: resolvedOptions.toolContext,
     systemPrompt: baseSystemPrompt,
   });
-  const agent = new Agent({
-    initialState: {
-      systemPrompt: systemPromptText,
-      model: resolvedModel.model,
-      thinkingLevel: resolvedModel.actualThinkingLevel,
-      tools: getPiAgentTools(resolvedOptions.toolScope, resolvedOptions.toolContext),
-      messages: await createConversationHistory(messages, resolvedModel.model),
-    },
-    getApiKey: resolvedModel.apiKey
-      ? async () => resolvedModel.apiKey
-      : undefined,
+  const sessionId = buildStableSessionId({
+    resolvedModel,
+    toolContext: resolvedOptions.toolContext,
   });
+  const continuationOrder = resolvedModel.actualApiFormat === "responses"
+    ? getResponsesContinuationOrder(resolvedModel.compatibility)
+    : (["replay"] as ResponsesContinuationStrategy[]);
+  let lastError: unknown = undefined;
 
-  const startingMessageCount = agent.state.messages.length;
-  const toolEvents: ToolExecution[] = [];
-  let assistantText = "";
-  let toolTurnCount = 0;
-  let toolLoopErrorMessage = "";
-
-  const unsubscribe = agent.subscribe((event) => {
-    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-      assistantText += event.assistantMessageEvent.delta;
-      callbacks?.onTextDelta?.(event.assistantMessageEvent.delta);
-      return;
-    }
-
-    if (event.type === "tool_execution_end") {
-      const toolEvent = extractToolExecution(event);
-      if (!toolEvent) {
-        return;
+  for (const continuationStrategy of continuationOrder) {
+    try {
+      return await runConversationAttempt({
+        messages,
+        resolvedModel,
+        systemPromptText,
+        callbacks,
+        resolvedOptions,
+        continuationStrategy,
+        sessionId,
+      });
+    } catch (error) {
+      if (continuationStrategy === "previous_response_id" && shouldFallbackToResponsesReplay(error)) {
+        lastError = error;
+        continue;
       }
 
-      const numberedToolEvent = {
-        ...toolEvent,
-        sequence: toolEvents.length + 1,
-      } satisfies ToolExecution;
-      toolEvents.push(numberedToolEvent);
-      callbacks?.onTool?.(numberedToolEvent);
-      return;
+      throw createConversationError(
+        normalizeConversationFailure(error, error instanceof Error ? error.message : "The model request failed."),
+        resolvedModel.actualApiFormat,
+        resolvedModel.compatibility,
+      );
     }
-
-    if (event.type === "turn_end" && isAssistantMessage(event.message)) {
-      const hasToolCalls = event.message.content.some((item) => item.type === "toolCall");
-      if (!hasToolCalls) {
-        return;
-      }
-
-      toolTurnCount += 1;
-      if (toolTurnCount >= resolvedOptions.maxToolLoopSteps) {
-        toolLoopErrorMessage = `Tool loop exceeded the maximum number of steps (${resolvedOptions.maxToolLoopSteps}).`;
-        agent.abort();
-      }
-    }
-  });
-
-  const abortListener = () => agent.abort();
-  resolvedOptions.signal?.addEventListener("abort", abortListener, { once: true });
-
-  try {
-    await agent.continue();
-  } catch (error) {
-    throw createConversationError(
-      normalizeConversationFailure(error, error instanceof Error ? error.message : "The model request failed."),
-      resolvedModel.actualApiFormat,
-      resolvedModel.compatibility,
-    );
-  } finally {
-    unsubscribe();
-    resolvedOptions.signal?.removeEventListener("abort", abortListener);
   }
 
-  throwIfAborted(resolvedOptions.signal);
-
-  const generatedMessages = agent.state.messages.slice(startingMessageCount) as Message[];
-  const generatedAssistantMessages = getGeneratedAssistantMessages(generatedMessages);
-  const finalAssistantMessage = generatedAssistantMessages[generatedAssistantMessages.length - 1];
-
-  if (toolLoopErrorMessage) {
-    throw createConversationError(
-      toolLoopErrorMessage,
-      resolvedModel.actualApiFormat,
-      resolvedModel.compatibility,
-    );
-  }
-
-  if (finalAssistantMessage?.stopReason === "error" || finalAssistantMessage?.stopReason === "aborted") {
-    throw createConversationError(
-      normalizeConversationFailure(finalAssistantMessage.errorMessage, finalAssistantMessage.errorMessage || "The model request failed."),
-      resolvedModel.actualApiFormat,
-      resolvedModel.compatibility,
-    );
-  }
-
-  const derivedAssistantText = assistantText.trim()
-    || generatedAssistantMessages
-      .map((message) => extractAssistantText(message))
-      .filter(Boolean)
-      .join("\n\n")
-      .trim();
-
-  return {
-    assistantText: derivedAssistantText || "The model returned no text.",
-    toolEvents,
-    resolvedModel: resolvedModel.resolvedModelRef,
-    compatibility: resolvedModel.compatibility,
-    actualApiFormat: resolvedModel.actualApiFormat,
-  };
+  throw createConversationError(
+    normalizeConversationFailure(lastError, lastError instanceof Error ? lastError.message : "The model request failed."),
+    resolvedModel.actualApiFormat,
+    resolvedModel.compatibility,
+  );
 }
 
 export function extractAssistantMetaFromConversationError(error: unknown): AssistantMessageMeta | undefined {
@@ -437,6 +864,9 @@ export async function runTextPrompt(args: {
     toolScope: "default",
   });
   const resolvedModel = resolvePiModel(effectiveSettings);
+  const sessionId = buildStableSessionId({
+    resolvedModel,
+  });
   const agent = new Agent({
     initialState: {
       systemPrompt: args.systemPrompt?.trim() || "",
@@ -454,6 +884,7 @@ export async function runTextPrompt(args: {
     getApiKey: resolvedModel.apiKey
       ? async () => resolvedModel.apiKey
       : undefined,
+    sessionId,
   });
 
   const abortListener = () => agent.abort();
@@ -495,5 +926,8 @@ export async function runTextPrompt(args: {
     resolvedModel: resolvedModel.resolvedModelRef,
     compatibility: resolvedModel.compatibility,
     actualApiFormat: resolvedModel.actualApiFormat,
+    ...(finalAssistantMessage?.responseId ? { responseId: finalAssistantMessage.responseId } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...(toAssistantUsageSnapshot(finalAssistantMessage?.usage) ? { usage: toAssistantUsageSnapshot(finalAssistantMessage?.usage) } : {}),
   };
 }

@@ -232,7 +232,7 @@ function getRoomHistoryByIdForAgent(workspace: { rooms: RoomSession[] }, agentId
 }
 
 type RoomConversationRunner = (
-  messages: Array<{ role: "user" | "assistant"; content: string; attachments?: MessageImageAttachment[] }>,
+  messages: Array<{ role: "user" | "assistant"; content: string; attachments?: MessageImageAttachment[]; meta?: AssistantMessageMeta }>,
   settings: ChatSettings,
   callbacks?: {
     onTextDelta?: (delta: string) => void;
@@ -246,12 +246,17 @@ type RoomConversationRunner = (
     toolContext?: RoomToolContext;
     modelConfigOverrides?: ModelConfigExecutionOverrides;
   },
-) => Promise<{
+  ) => Promise<{
   assistantText: string;
   toolEvents: ToolExecution[];
   resolvedModel: string;
   compatibility: AssistantMessageMeta["compatibility"];
   actualApiFormat: AssistantMessageMeta["apiFormat"];
+  responseId?: NonNullable<AgentRoomTurn["meta"]>["responseId"];
+  sessionId?: NonNullable<AgentRoomTurn["meta"]>["sessionId"];
+  continuation?: NonNullable<AgentRoomTurn["meta"]>["continuation"];
+  usage?: NonNullable<AgentRoomTurn["meta"]>["usage"];
+  historyDelta?: NonNullable<AgentRoomTurn["meta"]>["historyDelta"];
   emptyCompletion?: NonNullable<AgentRoomTurn["meta"]>["emptyCompletion"];
   recovery?: NonNullable<AgentRoomTurn["meta"]>["recovery"];
 }>;
@@ -497,6 +502,17 @@ export async function runPreparedRoomTurn(
       assistantText: result.assistantText,
       resolvedModel: result.resolvedModel,
       compatibility: result.compatibility,
+      meta: {
+        apiFormat: result.actualApiFormat,
+        compatibility: result.compatibility,
+        ...(result.responseId ? { responseId: result.responseId } : {}),
+        ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+        ...(result.continuation ? { continuation: result.continuation } : {}),
+        ...(result.usage ? { usage: result.usage } : {}),
+        ...(result.historyDelta ? { historyDelta: result.historyDelta } : {}),
+        ...(result.recovery ? { recovery: result.recovery } : {}),
+        ...(result.emptyCompletion ? { emptyCompletion: result.emptyCompletion } : {}),
+      },
     });
 
     const turn = createTurn(
@@ -515,6 +531,11 @@ export async function runPreparedRoomTurn(
       {
         apiFormat: result.actualApiFormat,
         compatibility: result.compatibility,
+        ...(result.responseId ? { responseId: result.responseId } : {}),
+        ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+        ...(result.continuation ? { continuation: result.continuation } : {}),
+        ...(result.usage ? { usage: result.usage } : {}),
+        ...(result.historyDelta ? { historyDelta: result.historyDelta } : {}),
         ...(result.recovery ? { recovery: result.recovery } : {}),
         ...(result.emptyCompletion ? { emptyCompletion: result.emptyCompletion } : {}),
       },

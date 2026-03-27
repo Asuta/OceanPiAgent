@@ -341,9 +341,103 @@ export interface RecoveryDiagnostic {
   attempts: RecoveryAttemptDiagnostic[];
 }
 
+export interface AssistantUsageSnapshot {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+}
+
+export interface AssistantContinuationSnapshot {
+  strategy: ResponsesContinuation;
+  previousResponseId?: string;
+}
+
+export interface AssistantHistoryTextPart {
+  type: "text";
+  text: string;
+  textSignature?: string;
+}
+
+export interface AssistantHistoryThinkingPart {
+  type: "thinking";
+  thinking: string;
+  thinkingSignature?: string;
+  redacted?: boolean;
+}
+
+export interface AssistantHistoryImagePart {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
+export interface AssistantHistoryToolCallPart {
+  type: "toolCall";
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  thoughtSignature?: string;
+}
+
+export interface AssistantHistoryUsageSnapshot {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+}
+
+export interface AssistantHistoryUserMessage {
+  role: "user";
+  content: string | Array<AssistantHistoryTextPart | AssistantHistoryImagePart>;
+  timestamp: number;
+}
+
+export interface AssistantHistoryAssistantMessage {
+  role: "assistant";
+  content: Array<AssistantHistoryTextPart | AssistantHistoryThinkingPart | AssistantHistoryToolCallPart>;
+  api: string;
+  provider: string;
+  model: string;
+  responseId?: string;
+  usage: AssistantHistoryUsageSnapshot;
+  stopReason: "stop" | "length" | "toolUse" | "error" | "aborted";
+  errorMessage?: string;
+  timestamp: number;
+}
+
+export interface AssistantHistoryToolResultMessage {
+  role: "toolResult";
+  toolCallId: string;
+  toolName: string;
+  content: Array<AssistantHistoryTextPart | AssistantHistoryImagePart>;
+  details?: unknown;
+  isError: boolean;
+  timestamp: number;
+}
+
+export type AssistantHistoryMessage =
+  | AssistantHistoryUserMessage
+  | AssistantHistoryAssistantMessage
+  | AssistantHistoryToolResultMessage;
+
 export interface AssistantMessageMeta {
   apiFormat: ApiFormat;
   compatibility: ProviderCompatibility;
+  responseId?: string;
+  sessionId?: string;
+  continuation?: AssistantContinuationSnapshot;
+  usage?: AssistantUsageSnapshot;
+  historyDelta?: AssistantHistoryMessage[];
   emptyCompletion?: EmptyCompletionDiagnostic;
   recovery?: RecoveryDiagnostic;
 }
