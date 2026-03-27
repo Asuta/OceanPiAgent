@@ -84,6 +84,11 @@ test("executeTool lists and reads project context files", async () => {
       "# Project Context\n\nUse project notes first.\n",
       "utf8",
     );
+    await writeFile(
+      path.join(tempDir, "AGENTS.md"),
+      "# Agent Rules\n\nKeep room output explicit.\n",
+      "utf8",
+    );
     await mkdir(path.join(tempDir, "docs"), { recursive: true });
     await writeFile(
       path.join(tempDir, "docs", "README.md"),
@@ -95,6 +100,7 @@ test("executeTool lists and reads project context files", async () => {
     const readResult = await executeTool("project_context_read", { path: "PROJECT_CONTEXT.md" });
 
     assert.equal(listResult.event.status, "success");
+    assert.match(listResult.output, /AGENTS\.md/);
     assert.match(listResult.output, /PROJECT_CONTEXT\.md/);
     assert.match(listResult.output, /docs\/README\.md/);
 

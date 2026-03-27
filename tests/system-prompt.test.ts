@@ -65,6 +65,11 @@ test("prompt hooks append a skill catalog and injected project context", async (
       "# Project Context\n\nKeep room-visible output inside send_message_to_room.\n",
       "utf8",
     );
+    await writeFile(
+      path.join(tempDir, "AGENTS.md"),
+      "# Agent Rules\n\nAlways keep visible room output explicit.\n",
+      "utf8",
+    );
 
     const prompt = await runBeforePromptBuildHooks({
       agentId: undefined,
@@ -79,6 +84,8 @@ test("prompt hooks append a skill catalog and injected project context", async (
     assert.match(prompt, /<name>precision<\/name>/);
     assert.match(prompt, /<description>Use when the answer needs verified detail from tools\.<\/description>/);
     assert.match(prompt, /Project context catalog:/);
+    assert.match(prompt, /## AGENTS\.md/);
+    assert.match(prompt, /Always keep visible room output explicit\./);
     assert.match(prompt, /## PROJECT_CONTEXT\.md/);
     assert.match(prompt, /send_message_to_room/);
     assert.doesNotMatch(prompt, /This body line should only appear after the skill is explicitly read\./);
