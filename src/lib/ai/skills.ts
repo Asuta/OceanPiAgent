@@ -3,7 +3,9 @@ import path from "node:path";
 
 export interface WorkspaceSkillCatalogEntry {
   id: string;
+  name: string;
   title: string;
+  description: string;
   summary: string;
   sourcePath: string;
 }
@@ -34,6 +36,66 @@ function extractSummary(markdown: string, fallback: string): string {
   return summaryLine || fallback;
 }
 
+interface ParsedSkillFrontmatter {
+  name?: string;
+  description?: string;
+}
+
+function stripWrappingQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (
+    trimmed.length >= 2
+    && ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+
+  return trimmed;
+}
+
+function parseSkillFrontmatter(markdown: string): { frontmatter: ParsedSkillFrontmatter; body: string } {
+  const normalized = markdown.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---\n")) {
+    return { frontmatter: {}, body: markdown };
+  }
+
+  const closingIndex = normalized.indexOf("\n---\n", 4);
+  if (closingIndex === -1) {
+    return { frontmatter: {}, body: markdown };
+  }
+
+  const frontmatterText = normalized.slice(4, closingIndex);
+  const body = normalized.slice(closingIndex + 5).replace(/^\n+/, "");
+  const frontmatter: ParsedSkillFrontmatter = {};
+
+  for (const rawLine of frontmatterText.split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+
+    const separatorIndex = line.indexOf(":");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = line.slice(0, separatorIndex).trim();
+    const rawValue = line.slice(separatorIndex + 1).trim();
+    if (!rawValue) {
+      continue;
+    }
+
+    const value = stripWrappingQuotes(rawValue);
+    if (key === "name") {
+      frontmatter.name = value;
+    } else if (key === "description") {
+      frontmatter.description = value;
+    }
+  }
+
+  return { frontmatter, body };
+}
+
 function extractTitle(markdown: string, fallbackId: string): string {
   const heading = markdown
     .split(/\r?\n/g)
@@ -54,17 +116,23 @@ async function loadWorkspaceSkill(skillId: string): Promise<WorkspaceSkill | nul
   }
 
   const sourcePath = path.join(getSkillsDir(), trimmedId, "SKILL.md");
-  const prompt = await readFile(sourcePath, "utf8").catch(() => "");
-  if (!prompt.trim()) {
+  const rawPrompt = await readFile(sourcePath, "utf8").catch(() => "");
+  if (!rawPrompt.trim()) {
     return null;
   }
 
-  const title = extractTitle(prompt, trimmedId);
+  const { frontmatter, body } = parseSkillFrontmatter(rawPrompt);
+  const prompt = body.trim() || rawPrompt.trim();
+  const name = frontmatter.name?.trim() || trimmedId;
+  const title = extractTitle(prompt, name);
+  const description = frontmatter.description?.trim() || extractSummary(prompt, `${title} skill`);
   return {
     id: trimmedId,
+    name,
     title,
-    summary: extractSummary(prompt, `${title} skill`),
-    prompt: prompt.trim(),
+    description,
+    summary: description,
+    prompt,
     sourcePath,
   } satisfies WorkspaceSkill;
 }
@@ -110,7 +178,9 @@ function escapeXml(value: string): string {
 function toSkillCatalogEntry(skill: WorkspaceSkill): WorkspaceSkillCatalogEntry {
   return {
     id: skill.id,
+    name: skill.name,
     title: skill.title,
+    description: skill.description,
     summary: skill.summary,
     sourcePath: skill.sourcePath,
   };
@@ -128,7 +198,9 @@ export function buildSkillsCatalogPrompt(skills: WorkspaceSkillCatalogEntry[]): 
     ...skills.flatMap((skill) => [
       "  <skill>",
       `    <id>${escapeXml(skill.id)}</id>`,
+      `    <name>${escapeXml(skill.name)}</name>`,
       `    <title>${escapeXml(skill.title)}</title>`,
+      `    <description>${escapeXml(skill.description)}</description>`,
       `    <summary>${escapeXml(skill.summary)}</summary>`,
       `    <source>${escapeXml(`skills/${skill.id}/SKILL.md`)}</source>`,
       "  </skill>",

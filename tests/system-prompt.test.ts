@@ -57,7 +57,7 @@ test("prompt hooks append a skill catalog and injected project context", async (
     await mkdir(path.join(tempDir, "skills", "precision"), { recursive: true });
     await writeFile(
       path.join(tempDir, "skills", "precision", "SKILL.md"),
-      "# Precision\n\nUse this skill when the answer needs verified detail.\n",
+      "---\nname: precision\ndescription: Use when the answer needs verified detail from tools.\n---\n\n# Precision\n\nThis body line should only appear after the skill is explicitly read.\n",
       "utf8",
     );
     await writeFile(
@@ -76,8 +76,11 @@ test("prompt hooks append a skill catalog and injected project context", async (
 
     assert.match(prompt, /<available_skills>/);
     assert.match(prompt, /<id>precision<\/id>/);
+    assert.match(prompt, /<name>precision<\/name>/);
+    assert.match(prompt, /<description>Use when the answer needs verified detail from tools\.<\/description>/);
     assert.match(prompt, /Project context catalog:/);
     assert.match(prompt, /## PROJECT_CONTEXT\.md/);
     assert.match(prompt, /send_message_to_room/);
+    assert.doesNotMatch(prompt, /This body line should only appear after the skill is explicitly read\./);
   });
 });

@@ -62,7 +62,7 @@ test("executeTool reads a workspace skill by id", async () => {
     await mkdir(path.join(tempDir, "skills", "alpha-skill"), { recursive: true });
     await writeFile(
       path.join(tempDir, "skills", "alpha-skill", "SKILL.md"),
-      "# Alpha Skill\n\nUse this skill when precision matters.\n",
+      "---\nname: alpha-skill\ndescription: Use when precision matters most.\n---\n\n# Alpha Skill\n\nBody-only guidance lives here.\n",
       "utf8",
     );
 
@@ -70,7 +70,10 @@ test("executeTool reads a workspace skill by id", async () => {
 
     assert.equal(result.event.status, "success");
     assert.match(result.output, /"id": "alpha-skill"/);
-    assert.match(result.output, /Use this skill when precision matters\./);
+    assert.match(result.output, /"name": "alpha-skill"/);
+    assert.match(result.output, /Use when precision matters most\./);
+    assert.match(result.output, /Body-only guidance lives here\./);
+    assert.doesNotMatch(result.output, /---/);
   });
 });
 

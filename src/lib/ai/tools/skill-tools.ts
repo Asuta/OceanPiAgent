@@ -26,7 +26,9 @@ export const skillTools = {
 
       return createStructuredOutput({
         id: skill.id,
+        name: skill.name,
         title: skill.title,
+        description: skill.description,
         summary: skill.summary,
         sourcePath: `skills/${skill.id}/SKILL.md`,
         prompt: skill.prompt,
