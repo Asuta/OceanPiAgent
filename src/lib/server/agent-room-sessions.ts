@@ -291,11 +291,7 @@ function toVisibleHistory(history: PersistedVisibleMessage[]): VisibleMessage[] 
     role: message.role,
     content: message.content,
     attachments: [...message.attachments],
-    ...(message.meta
-      ? {
-          meta: message.meta,
-        }
-      : {}),
+    ...(message.meta ? { meta: message.meta } : {}),
   }));
 }
 
@@ -423,7 +419,7 @@ export async function completeAgentRoomRun(args: {
   assistantText: string;
   resolvedModel: string;
   compatibility: ProviderCompatibility;
-  assistantMeta?: AssistantMessageMeta;
+  meta?: AssistantMessageMeta;
 }): Promise<void> {
   const session = await hydrateSession(args.agentId);
   const run = session.activeRun;
@@ -436,11 +432,7 @@ export async function completeAgentRoomRun(args: {
     role: "assistant",
     content: buildAssistantHistoryEntry(run, args.assistantText),
     attachments: [],
-    ...(args.assistantMeta
-      ? {
-          meta: args.assistantMeta,
-        }
-      : {}),
+    ...(args.meta ? { meta: args.meta } : {}),
     createdAt: createTimestamp(),
   };
 

@@ -20,6 +20,7 @@ import type {
   ChatSettings,
   MessageImageAttachment,
   ProviderCompatibility,
+  RoomAgentDefinition,
   RoomHistoryMessageSummary,
   RoomAgentId,
   RoomMessage,
@@ -77,6 +78,7 @@ import {
   saveWorkspaceEnvelope,
   saveWorkspaceStateToLocalStorage,
 } from "@/components/workspace/persistence";
+import { buildWorkspaceStateSnapshot, workspaceStatesEqual } from "@/components/workspace/workspace-state";
 import {
   addAgentParticipantToRoom,
   addHumanParticipantToRoom,
@@ -97,10 +99,10 @@ const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
 
 const DEFAULT_SETTINGS: ChatSettings = {
   modelConfigId: null,
-  apiFormat: "responses",
+  apiFormat: "chat_completions",
   model: "",
   systemPrompt: "",
-  providerMode: "openai",
+  providerMode: "auto",
   maxToolLoopSteps: DEFAULT_MAX_TOOL_LOOP_STEPS,
   thinkingLevel: "off",
   enabledSkillIds: [],
@@ -138,12 +140,26 @@ const ROOM_VISIBLE_MESSAGE_KINDS = ["answer", "progress", "warning", "error", "c
 const ROOM_MESSAGE_STATUSES = ["pending", "streaming", "completed", "failed"] as const;
 const AGENT_TURN_STATUSES = ["running", "continued", "completed", "error"] as const;
 
-function createInitialAgentCompactionFeedback(): Record<RoomAgentId, AgentCompactionFeedback | null> {
-  return {
-    concierge: null,
-    researcher: null,
-    operator: null,
-  };
+interface AgentMutationInput {
+  id: string;
+  label: string;
+  summary: string;
+  skills?: string[];
+  workingStyle: string;
+  instruction: string;
+}
+
+interface AgentUpdateInput {
+  label?: string;
+  summary?: string;
+  skills?: string[];
+  workingStyle?: string;
+  instruction?: string;
+}
+
+function createInitialAgentCompactionFeedback(agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): Record<RoomAgentId, AgentCompactionFeedback | null> {
+  const definitions = agentDefinitions.length > 0 ? agentDefinitions : [getRoomAgent(DEFAULT_AGENT_ID)];
+  return Object.fromEntries(definitions.map((agent) => [agent.id, null])) as Record<RoomAgentId, AgentCompactionFeedback | null>;
 }
 
 interface SendMessageArgs {
@@ -162,6 +178,7 @@ export interface AgentCompactionFeedback {
 
 interface WorkspaceContextValue {
   hydrated: boolean;
+  agents: RoomAgentDefinition[];
   rooms: RoomSession[];
   activeRooms: RoomSession[];
   archivedRooms: RoomSession[];
@@ -177,11 +194,13 @@ interface WorkspaceContextValue {
   setSelectedConsoleAgentId: (agentId: RoomAgentId) => void;
   setSelectedSender: (roomId: string, participantId: string) => void;
   setDraft: (roomId: string, value: string) => void;
+  getAgentDefinition: (agentId: RoomAgentId) => RoomAgentDefinition;
   getRoomById: (roomId: string) => RoomSession | null;
   isAgentRunning: (agentId: RoomAgentId) => boolean;
   isAgentCompacting: (agentId: RoomAgentId) => boolean;
   isRoomRunning: (roomId: string) => boolean;
   createRoom: (agentId?: RoomAgentId) => RoomSession;
+  createAgentDefinition: (input: AgentMutationInput) => Promise<RoomAgentDefinition>;
   renameRoom: (roomId: string, title: string) => void;
   archiveRoom: (roomId: string) => void;
   restoreRoom: (roomId: string) => void;
@@ -198,6 +217,7 @@ interface WorkspaceContextValue {
   resetAgentContext: (agentId: RoomAgentId) => Promise<void>;
   compactAgentContext: (agentId: RoomAgentId) => Promise<void>;
   updateAgentSettings: (agentId: RoomAgentId, patch: Partial<ChatSettings>) => void;
+  updateAgentDefinition: (agentId: RoomAgentId, patch: AgentUpdateInput) => Promise<RoomAgentDefinition>;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -220,6 +240,102 @@ function isRoomMessageStatus(value: unknown): value is RoomMessage["status"] {
 
 function isAgentTurnStatus(value: unknown): value is AgentRoomTurn["status"] {
   return typeof value === "string" && AGENT_TURN_STATUSES.includes(value as AgentRoomTurn["status"]);
+}
+
+function isRoomAgentId(value: unknown): value is RoomAgentId {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function normalizeRoomAgentId(value: unknown): RoomAgentId {
+  return isRoomAgentId(value) ? value.trim().slice(0, 120) : DEFAULT_AGENT_ID;
+}
+
+function normalizeRoomAgentIds(value: unknown): RoomAgentId[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value.filter(isRoomAgentId).map((agentId) => agentId.trim()).filter(Boolean))];
+}
+
+function ensureAgentStateMap(
+  current: Record<RoomAgentId, AgentSharedState>,
+  agentDefinitions: RoomAgentDefinition[],
+  rooms: RoomSession[],
+): Record<RoomAgentId, AgentSharedState> {
+  const nextState = { ...current };
+  for (const agent of agentDefinitions) {
+    nextState[agent.id] = nextState[agent.id] ?? createAgentSharedState();
+  }
+  for (const room of rooms) {
+    for (const participant of room.participants) {
+      if (participant.runtimeKind === "agent" && participant.agentId) {
+        nextState[participant.agentId] = nextState[participant.agentId] ?? createAgentSharedState();
+      }
+    }
+  }
+  return nextState;
+}
+
+function ensureAgentFeedbackMap(
+  current: Record<RoomAgentId, AgentCompactionFeedback | null>,
+  agentDefinitions: RoomAgentDefinition[],
+  agentStates: Record<RoomAgentId, AgentSharedState>,
+): Record<RoomAgentId, AgentCompactionFeedback | null> {
+  const nextState = { ...current };
+  for (const agent of agentDefinitions) {
+    nextState[agent.id] = nextState[agent.id] ?? null;
+  }
+  for (const agentId of Object.keys(agentStates)) {
+    nextState[agentId] = nextState[agentId] ?? null;
+  }
+  return nextState;
+}
+
+async function parseJsonResponse<T>(response: Response): Promise<T | null> {
+  return (await response.json().catch(() => null)) as T | null;
+}
+
+async function fetchAgentDefinitions(): Promise<RoomAgentDefinition[]> {
+  const response = await fetch("/api/agents", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error("Failed to load agents.");
+  }
+
+  const payload = await parseJsonResponse<{ agents?: RoomAgentDefinition[] }>(response);
+  return payload?.agents ?? [];
+}
+
+async function createAgentDefinitionRequest(input: AgentMutationInput): Promise<RoomAgentDefinition> {
+  const response = await fetch("/api/agents", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+  const payload = await parseJsonResponse<{ agent?: RoomAgentDefinition; error?: string }>(response);
+  if (!response.ok || !payload?.agent) {
+    throw new Error(payload?.error || "Failed to create agent.");
+  }
+
+  return payload.agent;
+}
+
+async function updateAgentDefinitionRequest(agentId: RoomAgentId, patch: AgentUpdateInput): Promise<RoomAgentDefinition> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(patch),
+  });
+  const payload = await parseJsonResponse<{ agent?: RoomAgentDefinition; error?: string }>(response);
+  if (!response.ok || !payload?.agent) {
+    throw new Error(payload?.error || "Failed to update agent.");
+  }
+
+  return payload.agent;
 }
 
 function sortAgentTurnsByUserMessageTime(turns: AgentRoomTurn[]): AgentRoomTurn[] {
@@ -359,9 +475,9 @@ function normalizeRoomMessageReceipt(value: unknown): RoomMessageReceipt | null 
   return {
     participantId,
     participantName,
-    ...(value.agentId === "concierge" || value.agentId === "researcher" || value.agentId === "operator"
+    ...(isRoomAgentId(value.agentId)
       ? {
-          agentId: value.agentId,
+          agentId: value.agentId.trim(),
         }
       : {}),
     type: "read_no_reply",
@@ -390,14 +506,6 @@ function normalizeRoomMessageReceipts(
   }
 
   return [];
-}
-
-function normalizeRoomAgentId(value: unknown): RoomAgentId {
-  if (value === "concierge" || value === "researcher" || value === "operator") {
-    return value;
-  }
-
-  return DEFAULT_AGENT_ID;
 }
 
 function normalizeRoomMessageEmission(value: unknown): RoomMessageEmission | undefined {
@@ -450,9 +558,7 @@ function normalizeRoomToolAction(value: unknown): RoomToolActionUnion | undefine
       type: "create_room",
       roomId: typeof value.roomId === "string" ? value.roomId : createUuid(),
       title: typeof value.title === "string" && value.title.trim() ? value.title.trim() : "New Room",
-      agentIds: Array.isArray(value.agentIds)
-        ? value.agentIds.filter((agentId): agentId is RoomAgentId => agentId === "concierge" || agentId === "researcher" || agentId === "operator")
-        : [],
+      agentIds: normalizeRoomAgentIds(value.agentIds),
     };
   }
 
@@ -460,9 +566,7 @@ function normalizeRoomToolAction(value: unknown): RoomToolActionUnion | undefine
     return {
       type: "add_agents_to_room",
       roomId: typeof value.roomId === "string" ? value.roomId : "",
-      agentIds: Array.isArray(value.agentIds)
-        ? value.agentIds.filter((agentId): agentId is RoomAgentId => agentId === "concierge" || agentId === "researcher" || agentId === "operator")
-        : [],
+      agentIds: normalizeRoomAgentIds(value.agentIds),
     };
   }
 
@@ -637,6 +741,7 @@ function normalizeToolExecution(value: unknown, index: number): ToolExecution | 
 
   const inputText = typeof value.inputText === "string" ? value.inputText : "";
   const outputText = typeof value.outputText === "string" ? value.outputText : "";
+  const normalizedDetails = normalizeToolExecutionDetails(value.details);
 
   return {
     id: typeof value.id === "string" && value.id ? value.id : createUuid(),
@@ -649,6 +754,7 @@ function normalizeToolExecution(value: unknown, index: number): ToolExecution | 
     outputText,
     status: value.status === "error" ? "error" : "success",
     durationMs: typeof value.durationMs === "number" && value.durationMs >= 0 ? value.durationMs : 0,
+    ...(normalizedDetails ? { details: normalizedDetails } : {}),
     ...(normalizeRoomMessageEmission(value.roomMessage)
       ? {
           roomMessage: normalizeRoomMessageEmission(value.roomMessage),
@@ -660,6 +766,46 @@ function normalizeToolExecution(value: unknown, index: number): ToolExecution | 
         }
       : {}),
   };
+}
+
+function normalizeToolExecutionDetails(value: unknown): ToolExecution["details"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const details: NonNullable<ToolExecution["details"]> = {};
+
+  if (typeof value.exitCode === "number" && Number.isFinite(value.exitCode)) {
+    details.exitCode = Math.round(value.exitCode);
+  } else if (value.exitCode === null) {
+    details.exitCode = null;
+  }
+
+  if (typeof value.truncated === "boolean") {
+    details.truncated = value.truncated;
+  }
+
+  if (typeof value.fullOutputPath === "string") {
+    details.fullOutputPath = value.fullOutputPath;
+  }
+
+  if (typeof value.cwd === "string") {
+    details.cwd = value.cwd;
+  }
+
+  if (typeof value.shell === "string") {
+    details.shell = value.shell;
+  }
+
+  if (typeof value.timedOut === "boolean") {
+    details.timedOut = value.timedOut;
+  }
+
+  if (typeof value.aborted === "boolean") {
+    details.aborted = value.aborted;
+  }
+
+  return Object.keys(details).length > 0 ? details : undefined;
 }
 
 function normalizeCompatibility(value: unknown): ProviderCompatibility | null {
@@ -780,12 +926,11 @@ function normalizeAssistantHistoryToolCallPart(value: unknown) {
     return undefined;
   }
 
-  const args = isRecord(value.arguments) ? value.arguments : {};
   return {
     type: "toolCall" as const,
     id: value.id,
     name: value.name,
-    arguments: args,
+    arguments: isRecord(value.arguments) ? value.arguments : {},
     ...(typeof value.thoughtSignature === "string" && value.thoughtSignature
       ? {
           thoughtSignature: value.thoughtSignature,
@@ -799,18 +944,12 @@ function normalizeAssistantHistoryUsage(value: unknown) {
     return undefined;
   }
 
-  const input = typeof value.input === "number" && Number.isFinite(value.input) ? value.input : 0;
-  const output = typeof value.output === "number" && Number.isFinite(value.output) ? value.output : 0;
-  const cacheRead = typeof value.cacheRead === "number" && Number.isFinite(value.cacheRead) ? value.cacheRead : 0;
-  const cacheWrite = typeof value.cacheWrite === "number" && Number.isFinite(value.cacheWrite) ? value.cacheWrite : 0;
-  const totalTokens = typeof value.totalTokens === "number" && Number.isFinite(value.totalTokens) ? value.totalTokens : 0;
-
   return {
-    input,
-    output,
-    cacheRead,
-    cacheWrite,
-    totalTokens,
+    input: typeof value.input === "number" && Number.isFinite(value.input) ? value.input : 0,
+    output: typeof value.output === "number" && Number.isFinite(value.output) ? value.output : 0,
+    cacheRead: typeof value.cacheRead === "number" && Number.isFinite(value.cacheRead) ? value.cacheRead : 0,
+    cacheWrite: typeof value.cacheWrite === "number" && Number.isFinite(value.cacheWrite) ? value.cacheWrite : 0,
+    totalTokens: typeof value.totalTokens === "number" && Number.isFinite(value.totalTokens) ? value.totalTokens : 0,
     cost: {
       input: typeof value.cost.input === "number" && Number.isFinite(value.cost.input) ? value.cost.input : 0,
       output: typeof value.cost.output === "number" && Number.isFinite(value.cost.output) ? value.cost.output : 0,
@@ -835,7 +974,10 @@ function normalizeAssistantHistoryMessage(value: unknown): NonNullable<NonNullab
     if (typeof value.content === "string") {
       content = value.content;
     } else if (Array.isArray(value.content)) {
-      const normalizedContent: Array<NonNullable<ReturnType<typeof normalizeAssistantHistoryTextPart>> | NonNullable<ReturnType<typeof normalizeAssistantHistoryImagePart>>> = [];
+      const normalizedContent: Array<
+        NonNullable<ReturnType<typeof normalizeAssistantHistoryTextPart>>
+        | NonNullable<ReturnType<typeof normalizeAssistantHistoryImagePart>>
+      > = [];
       for (const item of value.content) {
         const text = normalizeAssistantHistoryTextPart(item);
         if (text) {
@@ -923,7 +1065,10 @@ function normalizeAssistantHistoryMessage(value: unknown): NonNullable<NonNullab
       return undefined;
     }
 
-    const content: Array<NonNullable<ReturnType<typeof normalizeAssistantHistoryTextPart>> | NonNullable<ReturnType<typeof normalizeAssistantHistoryImagePart>>> = [];
+    const content: Array<
+      NonNullable<ReturnType<typeof normalizeAssistantHistoryTextPart>>
+      | NonNullable<ReturnType<typeof normalizeAssistantHistoryImagePart>>
+    > = [];
     for (const item of value.content) {
       const text = normalizeAssistantHistoryTextPart(item);
       if (text) {
@@ -944,11 +1089,7 @@ function normalizeAssistantHistoryMessage(value: unknown): NonNullable<NonNullab
       content,
       isError: typeof value.isError === "boolean" ? value.isError : false,
       timestamp: typeof value.timestamp === "number" && Number.isFinite(value.timestamp) ? value.timestamp : Date.now(),
-      ...("details" in value
-        ? {
-            details: value.details,
-          }
-        : {}),
+      ...("details" in value ? { details: value.details } : {}),
     };
   }
 
@@ -1246,28 +1387,18 @@ function normalizeSettings(value: unknown): ChatSettings {
     return { ...DEFAULT_SETTINGS };
   }
 
-  const modelConfigId = typeof value.modelConfigId === "string" && value.modelConfigId.trim() ? value.modelConfigId : null;
-  const requestedApiFormat = value.apiFormat === "responses" ? "responses" : "chat_completions";
-  const requestedProviderMode =
-    value.providerMode === "openai" ||
-    value.providerMode === "right_codes" ||
-    value.providerMode === "generic" ||
-    value.providerMode === "auto"
-      ? value.providerMode
-      : "auto";
-  const requestedModel = typeof value.model === "string" ? value.model : "";
-  const shouldUpgradeLegacyDefaultRouting =
-    !modelConfigId
-    && !requestedModel.trim()
-    && requestedApiFormat === "chat_completions"
-    && requestedProviderMode === "auto";
-
   return {
-    modelConfigId,
-    apiFormat: shouldUpgradeLegacyDefaultRouting ? "responses" : requestedApiFormat,
-    model: requestedModel,
+    modelConfigId: typeof value.modelConfigId === "string" && value.modelConfigId.trim() ? value.modelConfigId : null,
+    apiFormat: value.apiFormat === "responses" ? "responses" : "chat_completions",
+    model: typeof value.model === "string" ? value.model : "",
     systemPrompt: typeof value.systemPrompt === "string" ? value.systemPrompt : "",
-    providerMode: shouldUpgradeLegacyDefaultRouting ? "openai" : requestedProviderMode,
+    providerMode:
+      value.providerMode === "openai" ||
+      value.providerMode === "right_codes" ||
+      value.providerMode === "generic" ||
+      value.providerMode === "auto"
+        ? value.providerMode
+        : "auto",
     maxToolLoopSteps: coerceMaxToolLoopSteps(value.maxToolLoopSteps),
     thinkingLevel: coerceThinkingLevel(value.thinkingLevel),
     enabledSkillIds: coerceSkillIds(value.enabledSkillIds),
@@ -1414,9 +1545,12 @@ function parseWorkspaceState(raw: string): RoomWorkspaceState | null {
     }
 
     const parsedAgentStates = isRecord(parsed.agentStates) ? parsed.agentStates : {};
-    let agentStates = createInitialAgentStates();
-    for (const agent of ROOM_AGENTS) {
-      agentStates[agent.id] = normalizeAgentSharedState(agent.id, parsedAgentStates[agent.id]);
+    const knownAgentIds = Object.keys(parsedAgentStates);
+    let agentStates = createInitialAgentStates(
+      knownAgentIds.length > 0 ? knownAgentIds.map((agentId) => getRoomAgent(agentId)) : ROOM_AGENTS,
+    );
+    for (const agentId of knownAgentIds) {
+      agentStates[agentId] = normalizeAgentSharedState(agentId, parsedAgentStates[agentId]);
     }
 
     for (const room of Array.isArray(parsed.rooms) ? parsed.rooms : []) {
@@ -1427,10 +1561,9 @@ function parseWorkspaceState(raw: string): RoomWorkspaceState | null {
       typeof parsed.activeRoomId === "string" && rooms.some((room) => room.id === parsed.activeRoomId)
         ? parsed.activeRoomId
         : rooms[0].id;
-    const selectedConsoleAgentId =
-      parsed.selectedConsoleAgentId === "concierge" || parsed.selectedConsoleAgentId === "researcher" || parsed.selectedConsoleAgentId === "operator"
-        ? parsed.selectedConsoleAgentId
-        : getPrimaryRoomAgentId(rooms.find((room) => room.id === activeRoomId) ?? rooms[0]);
+    const selectedConsoleAgentId = isRoomAgentId(parsed.selectedConsoleAgentId)
+      ? parsed.selectedConsoleAgentId.trim()
+      : getPrimaryRoomAgentId(rooms.find((room) => room.id === activeRoomId) ?? rooms[0]);
 
     return {
       rooms: sortRoomsByUpdatedAt(
@@ -1556,10 +1689,11 @@ function getToolStats(tools: ToolExecution[]) {
 }
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
+  const [agents, setAgents] = useState<RoomAgentDefinition[]>(ROOM_AGENTS);
   const [rooms, setRooms] = useState<RoomSession[]>([]);
-  const [agentStates, setAgentStates] = useState<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates());
+  const [agentStates, setAgentStates] = useState<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates(ROOM_AGENTS));
   const [agentCompactionFeedback, setAgentCompactionFeedback] = useState<Record<RoomAgentId, AgentCompactionFeedback | null>>(
-    createInitialAgentCompactionFeedback(),
+    createInitialAgentCompactionFeedback(ROOM_AGENTS),
   );
   const [activeRoomId, setActiveRoomId] = useState("");
   const [selectedConsoleAgentId, setSelectedConsoleAgentId] = useState<RoomAgentId | null>(null);
@@ -1572,9 +1706,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [hydrated, setHydrated] = useState(false);
   const activeRunsRef = useRef<Record<string, ActiveRoomRun>>({});
   const activeSchedulerRunsRef = useRef<Record<string, ActiveSchedulerRun>>({});
+  const agentsRef = useRef<RoomAgentDefinition[]>(ROOM_AGENTS);
   const roomsRef = useRef<RoomSession[]>([]);
-  const agentStatesRef = useRef<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates());
+  const agentStatesRef = useRef<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates(ROOM_AGENTS));
   const workspaceVersionRef = useRef(0);
+  const activeRoomIdRef = useRef("");
+  const selectedConsoleAgentIdRef = useRef<RoomAgentId | null>(null);
   const skipNextServerPersistRef = useRef(false);
   const workspacePersistTimerRef = useRef<number | null>(null);
   const pendingWorkspacePersistRef = useRef<RoomWorkspaceState | null>(null);
@@ -1593,8 +1730,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (options?.skipServerPersist) {
         skipNextServerPersistRef.current = true;
       }
-      const nextRooms = snapshot.rooms.length > 0 ? snapshot.rooms : [createRoomSession(1)];
-      const nextAgentStates = snapshot.agentStates;
+      const nextRooms = snapshot.rooms.length > 0 ? snapshot.rooms : [createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current)];
+      const nextAgentStates = ensureAgentStateMap(snapshot.agentStates, agentsRef.current, nextRooms);
       const nextActiveRoomId =
         snapshot.activeRoomId && nextRooms.some((room) => room.id === snapshot.activeRoomId)
           ? snapshot.activeRoomId
@@ -1606,6 +1743,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       workspaceVersionRef.current = version;
       setRooms(nextRooms);
       setAgentStates(nextAgentStates);
+      setAgentCompactionFeedback((current) => ensureAgentFeedbackMap(current, agentsRef.current, nextAgentStates));
       setActiveRoomId(nextActiveRoomId);
       setSelectedConsoleAgentId(nextSelectedConsoleAgentId);
       setWorkspaceVersion(version);
@@ -1618,7 +1756,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
 
     void (async () => {
-      const serverEnvelope = await fetchWorkspaceEnvelope();
+      const [serverEnvelope, loadedAgents] = await Promise.all([
+        fetchWorkspaceEnvelope(),
+        fetchAgentDefinitions().catch(() => ROOM_AGENTS),
+      ]);
+      agentsRef.current = loadedAgents.length > 0 ? loadedAgents : ROOM_AGENTS;
+      if (!cancelled) {
+        setAgents(agentsRef.current);
+        setAgentStates((current) => ensureAgentStateMap(current, agentsRef.current, roomsRef.current));
+        setAgentCompactionFeedback((current) => ensureAgentFeedbackMap(current, agentsRef.current, agentStatesRef.current));
+      }
       const serverVersion = typeof serverEnvelope?.version === "number" ? serverEnvelope.version : 0;
       const serverState = serverEnvelope?.state ?? null;
       const localWorkspace = loadLocalWorkspaceState({
@@ -1645,8 +1792,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const initialRoom = createRoomSession(1);
-      const initialAgentStates = createInitialAgentStates();
+      const initialRoom = createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current);
+      const initialAgentStates = createInitialAgentStates(agentsRef.current);
       applyWorkspaceSnapshot(
         {
           rooms: [initialRoom],
@@ -1671,7 +1818,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
     const availableRooms = getActiveRooms(rooms);
     if (availableRooms.length === 0) {
-      const fallbackRoom = createRoomSession(getNextRoomIndex(roomsRef.current));
+      const fallbackRoom = createRoomSession(getNextRoomIndex(roomsRef.current), DEFAULT_AGENT_ID, agentsRef.current);
       const nextRooms = sortRoomsByUpdatedAt([fallbackRoom, ...roomsRef.current]);
       roomsRef.current = nextRooms;
       setRooms(nextRooms);
@@ -1690,17 +1837,35 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    saveWorkspaceStateToLocalStorage({
+    saveWorkspaceStateToLocalStorage(buildWorkspaceStateSnapshot({
       rooms,
       agentStates,
       activeRoomId,
-      selectedConsoleAgentId: selectedConsoleAgentId ?? undefined,
-    } satisfies RoomWorkspaceState);
+      selectedConsoleAgentId,
+    }));
   }, [activeRoomId, agentStates, hydrated, rooms, selectedConsoleAgentId]);
 
   useEffect(() => {
     workspaceVersionRef.current = workspaceVersion;
   }, [workspaceVersion]);
+
+  useEffect(() => {
+    activeRoomIdRef.current = activeRoomId;
+  }, [activeRoomId]);
+
+  useEffect(() => {
+    selectedConsoleAgentIdRef.current = selectedConsoleAgentId;
+  }, [selectedConsoleAgentId]);
+
+  useEffect(() => {
+    agentsRef.current = agents;
+    setAgentStates((current) => {
+      const nextState = ensureAgentStateMap(current, agents, roomsRef.current);
+      agentStatesRef.current = nextState;
+      return nextState;
+    });
+    setAgentCompactionFeedback((current) => ensureAgentFeedbackMap(current, agents, agentStatesRef.current));
+  }, [agents]);
 
   const persistWorkspaceSnapshot = useCallback(async () => {
     if (workspacePersistInFlightRef.current) {
@@ -1709,6 +1874,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
     workspacePersistInFlightRef.current = true;
     let scheduledDelayedRetry = false;
+    const getCurrentWorkspaceSnapshot = () =>
+      buildWorkspaceStateSnapshot({
+        rooms: roomsRef.current,
+        agentStates: agentStatesRef.current,
+        activeRoomId: activeRoomIdRef.current,
+        selectedConsoleAgentId: selectedConsoleAgentIdRef.current,
+      });
+
     try {
       while (pendingWorkspacePersistRef.current) {
         const payload = pendingWorkspacePersistRef.current;
@@ -1721,7 +1894,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         });
 
         if (!response) {
-          pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? payload;
+          pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? getCurrentWorkspaceSnapshot();
           window.setTimeout(() => {
             void persistWorkspaceSnapshot();
           }, 1000);
@@ -1754,14 +1927,25 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }
 
         const requestIsLatest = requestNonce === workspacePersistNonceRef.current && pendingWorkspacePersistRef.current === null;
-        if (requestIsLatest && typeof conflictVersion === "number" && conflictState && Object.keys(activeRunsRef.current).length === 0) {
+        const latestSnapshot = getCurrentWorkspaceSnapshot();
+        const localStateChangedSinceRequest = !workspaceStatesEqual(latestSnapshot, payload);
+        const localPersistStillQueued = workspacePersistTimerRef.current !== null;
+
+        if (
+          requestIsLatest
+          && !localStateChangedSinceRequest
+          && !localPersistStillQueued
+          && typeof conflictVersion === "number"
+          && conflictState
+          && Object.keys(activeRunsRef.current).length === 0
+        ) {
           applyWorkspaceSnapshot(conflictState, conflictVersion, {
             skipServerPersist: true,
           });
           break;
         }
 
-        pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? payload;
+        pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? latestSnapshot;
       }
     } finally {
       workspacePersistInFlightRef.current = false;
@@ -1781,12 +1965,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const payload = {
+    const payload = buildWorkspaceStateSnapshot({
       rooms,
       agentStates,
       activeRoomId,
-      selectedConsoleAgentId: selectedConsoleAgentId ?? undefined,
-    } satisfies RoomWorkspaceState;
+      selectedConsoleAgentId,
+    });
 
     const timer = window.setTimeout(() => {
       workspacePersistNonceRef.current += 1;
@@ -1972,10 +2156,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const reduceRoomManagementActions = useCallback(
     (currentRooms: RoomSession[], actions: RoomToolActionUnion[], actorAgentId: RoomAgentId): RoomSession[] => {
-      return reduceSharedRoomManagementActions(currentRooms, actions, actorAgentId);
+      return reduceSharedRoomManagementActions(currentRooms, actions, actorAgentId, agentsRef.current);
     },
     [],
   );
+
+  const getAgentDefinition = useCallback((agentId: RoomAgentId): RoomAgentDefinition => {
+    return getRoomAgent(agentId, agentsRef.current);
+  }, []);
 
   const applyRoomToolActions = useCallback(
     (actions: RoomToolActionUnion[], actorAgentId: RoomAgentId) => {
@@ -2008,7 +2196,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const getKnownAgentsForToolContext = useCallback((): AgentInfoCard[] => {
-    return createKnownAgentCards();
+    return createKnownAgentCards(agentsRef.current);
   }, []);
 
   const getRoomHistoryByIdForAgent = useCallback((agentId: RoomAgentId): Record<string, RoomHistoryMessageSummary[]> => {
@@ -2030,6 +2218,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     updateAgentState,
     applyReceiptUpdateToAllAgentConsoles,
     applyRoomToolActions,
+    getAgentDefinition,
     getAttachedRoomsForAgent,
     getKnownAgentsForToolContext,
     getRoomHistoryByIdForAgent,
@@ -2095,7 +2284,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const createRoom = useCallback(
     (agentId: RoomAgentId = DEFAULT_AGENT_ID) => {
-      const nextRoom = createRoomSession(getNextRoomIndex(roomsRef.current), agentId);
+      const resolvedAgentId = agentsRef.current.some((agent) => agent.id === agentId) ? agentId : (agentsRef.current[0]?.id ?? DEFAULT_AGENT_ID);
+      const nextRoom = createRoomSession(getNextRoomIndex(roomsRef.current), resolvedAgentId, agentsRef.current);
       replaceRooms(sortRoomsByUpdatedAt([nextRoom, ...roomsRef.current]));
       setActiveRoomId(nextRoom.id);
       setSelectedSenderByRoomId((current) => ({
@@ -2253,7 +2443,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
 
       updateRoomState(roomId, (currentRoom) => {
-        return addAgentParticipantToRoom({ room: currentRoom, agentId });
+        return addAgentParticipantToRoom({ room: currentRoom, agentId, agentDefinitions: agentsRef.current });
       });
     },
     [roomHasRunningAgent, updateRoomState],
@@ -2333,15 +2523,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     clearAllActiveRuns("Workspace reset by operator.");
     clearAllSchedulerRuns();
 
-    const initialRoom = createRoomSession(1);
-    const initialAgentStates = createInitialAgentStates();
+    const initialRoom = createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current);
+    const initialAgentStates = createInitialAgentStates(agentsRef.current);
 
     roomsRef.current = [initialRoom];
     agentStatesRef.current = initialAgentStates;
 
     setRooms([initialRoom]);
     setAgentStates(initialAgentStates);
-    setAgentCompactionFeedback(createInitialAgentCompactionFeedback());
+    setAgentCompactionFeedback(createInitialAgentCompactionFeedback(agentsRef.current));
     setActiveRoomId(initialRoom.id);
     setSelectedConsoleAgentId(initialRoom.agentId);
     setSelectedSenderByRoomId({});
@@ -2352,7 +2542,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     clearPersistedWorkspaceState();
 
     await Promise.allSettled(
-      ROOM_AGENTS.map((agent) =>
+      agentsRef.current.map((agent) =>
         fetch("/api/agent-memory/reset", {
           method: "POST",
           headers: {
@@ -2521,6 +2711,49 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [updateAgentState],
   );
 
+  const createAgentDefinition = useCallback(async (input: AgentMutationInput) => {
+    const agent = await createAgentDefinitionRequest({
+      ...input,
+      id: input.id.trim(),
+      label: input.label.trim(),
+      summary: input.summary.trim(),
+      workingStyle: input.workingStyle.trim(),
+      skills: [...new Set((input.skills ?? []).map((skill) => skill.trim()).filter(Boolean))],
+      instruction: input.instruction,
+    });
+    setAgents((current) => {
+      const nextAgents = [...current.filter((entry) => entry.id !== agent.id), agent].sort((left, right) => left.label.localeCompare(right.label));
+      agentsRef.current = nextAgents;
+      return nextAgents;
+    });
+    updateAgentState(agent.id, (state) => state);
+    setAgentCompactionFeedback((current) => ({
+      ...current,
+      [agent.id]: current[agent.id] ?? null,
+    }));
+    return agent;
+  }, [updateAgentState]);
+
+  const updateAgentDefinition = useCallback(async (agentId: RoomAgentId, patch: AgentUpdateInput) => {
+    const agent = await updateAgentDefinitionRequest(agentId, {
+      ...patch,
+      ...(typeof patch.label === "string" ? { label: patch.label.trim() } : {}),
+      ...(typeof patch.summary === "string" ? { summary: patch.summary.trim() } : {}),
+      ...(typeof patch.workingStyle === "string" ? { workingStyle: patch.workingStyle.trim() } : {}),
+      ...(Array.isArray(patch.skills)
+        ? {
+            skills: [...new Set(patch.skills.map((skill) => skill.trim()).filter(Boolean))],
+          }
+        : {}),
+    });
+    setAgents((current) => {
+      const nextAgents = current.map((entry) => (entry.id === agent.id ? agent : entry));
+      agentsRef.current = nextAgents;
+      return nextAgents;
+    });
+    return agent;
+  }, []);
+
   const getRoomById = useCallback((roomId: string) => {
     return roomsRef.current.find((room) => room.id === roomId) ?? null;
   }, []);
@@ -2550,6 +2783,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const contextValue = useMemo<WorkspaceContextValue>(
     () => ({
       hydrated,
+      agents,
       rooms,
       activeRooms,
       archivedRooms,
@@ -2565,11 +2799,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setSelectedConsoleAgentId,
       setSelectedSender,
       setDraft,
+      getAgentDefinition,
       getRoomById,
       isAgentRunning,
       isAgentCompacting,
       isRoomRunning,
       createRoom,
+      createAgentDefinition,
       renameRoom,
       archiveRoom,
       restoreRoom,
@@ -2586,8 +2822,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       resetAgentContext,
       compactAgentContext,
       updateAgentSettings,
+      updateAgentDefinition,
     }),
     [
+      agents,
       activeRoom,
       activeRoomId,
       activeRooms,
@@ -2603,6 +2841,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       createRoom,
       deleteRoom,
       draftsByRoomId,
+      getAgentDefinition,
       getRoomById,
       hydrated,
       isAgentRunning,
@@ -2619,10 +2858,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       selectedSenderByRoomId,
       sendMessage,
       clearAllWorkspace,
+      createAgentDefinition,
       setDraft,
       setSelectedSender,
       toggleAgentParticipant,
       updateAgentSettings,
+      updateAgentDefinition,
     ],
   );
 

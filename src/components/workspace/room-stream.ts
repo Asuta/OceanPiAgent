@@ -35,6 +35,45 @@ function parseRoomStreamBlock(block: string): RoomChatStreamEvent | null {
   }
 }
 
+function handleRoomStreamEvent(
+  event: RoomChatStreamEvent,
+  args: Omit<Parameters<typeof readRoomStream>[0], "response">,
+  emittedMessages: RoomMessage[],
+  receiptUpdates: RoomMessageReceiptUpdate[],
+): void {
+  if (event.type === "agent-text-delta") {
+    args.onTextDelta(event.delta);
+    return;
+  }
+
+  if (event.type === "tool") {
+    args.onTool(event.tool);
+    return;
+  }
+
+  if (event.type === "room-message") {
+    emittedMessages.push(event.message);
+    args.onRoomMessage(event.message);
+    return;
+  }
+
+  if (event.type === "message-receipt") {
+    receiptUpdates.push(event.update);
+    args.onReceiptUpdate(event.update);
+    return;
+  }
+
+  if (event.type === "done") {
+    args.onDone(event);
+    return;
+  }
+
+  if (event.meta) {
+    args.onMeta(event.meta);
+  }
+  throw new Error(event.error);
+}
+
 export async function readRoomStream(args: {
   response: Response;
   shouldContinue: () => boolean;
@@ -85,37 +124,7 @@ export async function readRoomStream(args: {
         return { emittedMessages, receiptUpdates };
       }
 
-      if (event.type === "agent-text-delta") {
-        args.onTextDelta(event.delta);
-        continue;
-      }
-
-      if (event.type === "tool") {
-        args.onTool(event.tool);
-        continue;
-      }
-
-      if (event.type === "room-message") {
-        emittedMessages.push(event.message);
-        args.onRoomMessage(event.message);
-        continue;
-      }
-
-      if (event.type === "message-receipt") {
-        receiptUpdates.push(event.update);
-        args.onReceiptUpdate(event.update);
-        continue;
-      }
-
-      if (event.type === "done") {
-        args.onDone(event);
-        continue;
-      }
-
-      if (event.meta) {
-        args.onMeta(event.meta);
-      }
-      throw new Error(event.error);
+      handleRoomStreamEvent(event, args, emittedMessages, receiptUpdates);
     }
 
     if (done) {
@@ -128,11 +137,8 @@ export async function readRoomStream(args: {
   }
 
   const trailingEvent = parseRoomStreamBlock(buffer);
-  if (trailingEvent?.type === "error") {
-    if (trailingEvent.meta) {
-      args.onMeta(trailingEvent.meta);
-    }
-    throw new Error(trailingEvent.error);
+  if (trailingEvent) {
+    handleRoomStreamEvent(trailingEvent, args, emittedMessages, receiptUpdates);
   }
 
   return { emittedMessages, receiptUpdates };

@@ -5,7 +5,7 @@ import { compactAgentRoomSession } from "@/lib/server/agent-room-sessions";
 export const runtime = "nodejs";
 
 const requestSchema = z.object({
-  agentId: z.enum(["concierge", "researcher", "operator"]),
+  agentId: z.string().trim().min(1).max(120),
 });
 
 export async function POST(request: Request) {

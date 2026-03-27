@@ -6,7 +6,7 @@ import {
   type RoomWorkspaceState,
 } from "@/lib/chat/types";
 
-export const roomAgentIdSchema = z.enum(["concierge", "researcher", "operator"]);
+export const roomAgentIdSchema = z.string().trim().min(1).max(120);
 const providerKeySchema = z.enum(["openai", "right_codes", "generic"]);
 const providerModeSchema = z.enum(["auto", "openai", "right_codes", "generic"]);
 const apiFormatSchema = z.enum(["chat_completions", "responses"]);
@@ -195,7 +195,7 @@ const assistantHistoryToolCallPartSchema = z.object({
   type: z.literal("toolCall"),
   id: z.string(),
   name: z.string(),
-  arguments: z.record(z.unknown()),
+  arguments: z.record(z.string(), z.unknown()),
   thoughtSignature: z.string().optional(),
 }).strict();
 
@@ -214,42 +214,43 @@ const assistantHistoryUsageSnapshotSchema = z.object({
   }).strict(),
 }).strict();
 
-const assistantHistoryUserMessageSchema = z.object({
-  role: z.literal("user"),
-  content: z.union([z.string(), z.array(z.union([assistantHistoryTextPartSchema, assistantHistoryImagePartSchema]))]),
-  timestamp: z.number(),
-}).strict();
-
-const assistantHistoryAssistantMessageSchema = z.object({
-  role: z.literal("assistant"),
-  content: z.array(z.union([assistantHistoryTextPartSchema, assistantHistoryThinkingPartSchema, assistantHistoryToolCallPartSchema])),
-  api: z.string(),
-  provider: z.string(),
-  model: z.string(),
-  responseId: z.string().optional(),
-  usage: assistantHistoryUsageSnapshotSchema,
-  stopReason: z.enum(["stop", "length", "toolUse", "error", "aborted"]),
-  errorMessage: z.string().optional(),
-  timestamp: z.number(),
-}).strict();
-
-const assistantHistoryToolResultMessageSchema = z.object({
-  role: z.literal("toolResult"),
-  toolCallId: z.string(),
-  toolName: z.string(),
-  content: z.array(z.union([assistantHistoryTextPartSchema, assistantHistoryImagePartSchema])),
-  details: z.unknown().optional(),
-  isError: z.boolean(),
-  timestamp: z.number(),
-}).strict();
-
-const assistantHistoryMessageSchema = z.union([
-  assistantHistoryUserMessageSchema,
-  assistantHistoryAssistantMessageSchema,
-  assistantHistoryToolResultMessageSchema,
+const assistantHistoryMessageSchema = z.discriminatedUnion("role", [
+  z.object({
+    role: z.literal("user"),
+    content: z.union([
+      z.string(),
+      z.array(z.union([assistantHistoryTextPartSchema, assistantHistoryImagePartSchema])),
+    ]),
+    timestamp: z.number(),
+  }).strict(),
+  z.object({
+    role: z.literal("assistant"),
+    content: z.array(z.union([
+      assistantHistoryTextPartSchema,
+      assistantHistoryThinkingPartSchema,
+      assistantHistoryToolCallPartSchema,
+    ])),
+    api: z.string(),
+    provider: z.string(),
+    model: z.string(),
+    responseId: z.string().optional(),
+    usage: assistantHistoryUsageSnapshotSchema,
+    stopReason: z.enum(["stop", "length", "toolUse", "error", "aborted"]),
+    errorMessage: z.string().optional(),
+    timestamp: z.number(),
+  }).strict(),
+  z.object({
+    role: z.literal("toolResult"),
+    toolCallId: z.string(),
+    toolName: z.string(),
+    content: z.array(z.union([assistantHistoryTextPartSchema, assistantHistoryImagePartSchema])),
+    details: z.unknown().optional(),
+    isError: z.boolean(),
+    timestamp: z.number(),
+  }).strict(),
 ]);
 
-const assistantMessageMetaSchema = z.object({
+export const assistantMessageMetaSchema = z.object({
   apiFormat: apiFormatSchema,
   compatibility: providerCompatibilitySchema,
   responseId: z.string().optional(),
@@ -259,6 +260,16 @@ const assistantMessageMetaSchema = z.object({
   historyDelta: z.array(assistantHistoryMessageSchema).optional(),
   emptyCompletion: emptyCompletionDiagnosticSchema.optional(),
   recovery: recoveryDiagnosticSchema.optional(),
+}).strict();
+
+const toolExecutionDetailsSchema = z.object({
+  exitCode: z.number().nullable().optional(),
+  truncated: z.boolean().optional(),
+  fullOutputPath: z.string().optional(),
+  cwd: z.string().optional(),
+  shell: z.string().optional(),
+  timedOut: z.boolean().optional(),
+  aborted: z.boolean().optional(),
 }).strict();
 
 const toolExecutionSchema = z.object({
@@ -272,6 +283,7 @@ const toolExecutionSchema = z.object({
   outputText: z.string(),
   status: toolExecutionStatusSchema,
   durationMs: z.number(),
+  details: toolExecutionDetailsSchema.optional(),
   roomMessage: roomMessageEmissionSchema.optional(),
   roomAction: roomToolActionUnionSchema.optional(),
 }).strict();
@@ -366,11 +378,7 @@ const roomSessionSchema = z.object({
 
 export const roomWorkspaceStateSchema = z.object({
   rooms: z.array(roomSessionSchema),
-  agentStates: z.object({
-    concierge: agentSharedStateSchema,
-    researcher: agentSharedStateSchema,
-    operator: agentSharedStateSchema,
-  }).strict(),
+  agentStates: z.record(roomAgentIdSchema, agentSharedStateSchema),
   activeRoomId: z.string(),
   selectedConsoleAgentId: roomAgentIdSchema.optional(),
 }).strict();

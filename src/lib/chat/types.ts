@@ -30,7 +30,17 @@ export type ResponsesPayloadMode = "json" | "sse" | "auto";
 
 export type ToolExecutionStatus = "success" | "error";
 
-export type RoomAgentId = "concierge" | "researcher" | "operator";
+export interface ToolExecutionDetails {
+  exitCode?: number | null;
+  truncated?: boolean;
+  fullOutputPath?: string;
+  cwd?: string;
+  shell?: string;
+  timedOut?: boolean;
+  aborted?: boolean;
+}
+
+export type RoomAgentId = string;
 
 export type RoomMembershipRole = "owner" | "member";
 
@@ -288,6 +298,7 @@ export interface ToolExecution {
   outputText: string;
   status: ToolExecutionStatus;
   durationMs: number;
+  details?: ToolExecutionDetails;
   roomMessage?: RoomMessageEmission;
   roomAction?: RoomToolActionUnion;
 }

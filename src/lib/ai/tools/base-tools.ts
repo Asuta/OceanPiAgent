@@ -1,9 +1,13 @@
 import { z } from "zod";
+import { bashTool } from "./bash-tool";
 import { executeCustomCommand } from "./custom-commands";
+import { projectContextTools } from "./project-context-tools";
+import { skillTools } from "./skill-tools";
 import { fetchWebPage } from "./web-fetch";
 import { customCommandArgsSchema, webFetchArgsSchema, type ToolDefinition } from "./shared";
 
 export const baseTools = {
+  bash: bashTool,
   web_fetch: {
     name: "web_fetch",
     displayName: "Web Fetch",
@@ -65,4 +69,6 @@ export const baseTools = {
       return executeCustomCommand(args, signal);
     },
   } satisfies ToolDefinition<unknown>,
+  ...skillTools,
+  ...projectContextTools,
 };

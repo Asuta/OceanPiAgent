@@ -13,13 +13,18 @@ import type {
   RoomMessageEmission,
   RoomToolActionUnion,
   RoomToolContext,
+  ToolExecutionDetails,
 } from "@/lib/chat/types";
 import { safeJsonStringify } from "@/lib/shared/text";
 import { createUuid } from "@/lib/utils/uuid";
 
 export type ToolName =
+  | "bash"
   | "web_fetch"
   | "custom_command"
+  | "skill_read"
+  | "project_context_list"
+  | "project_context_read"
   | "send_message_to_room"
   | "read_no_reply"
   | "list_attached_rooms"
@@ -62,8 +67,19 @@ export interface ToolExecutionContext {
 
 export interface ToolRuntimeResult {
   output: string;
+  details?: ToolExecutionDetails;
   roomMessage?: RoomMessageEmission;
   roomAction?: RoomToolActionUnion;
+}
+
+export class ToolExecutionError extends Error {
+  details?: ToolExecutionDetails;
+
+  constructor(message: string, details?: ToolExecutionDetails) {
+    super(message);
+    this.name = "ToolExecutionError";
+    this.details = details;
+  }
 }
 
 export interface ToolDefinition<TInput> {
@@ -101,12 +117,20 @@ export const optionalUrlString = z.preprocess(
 );
 
 export const emptyArgsSchema = z.object({}).strict();
-export const roomAgentIdSchema = z.enum(["concierge", "researcher", "operator"]);
+export const roomAgentIdSchema = z.string().trim().min(1).max(120);
 
 export const webFetchArgsSchema = z.object({
   url: z.string().url(),
   focus: optionalTrimmedString(200),
 });
+
+export const bashArgsSchema = z
+  .object({
+    command: z.string().trim().min(1).max(20_000),
+    cwd: optionalTrimmedString(1_000),
+    timeoutMs: z.number().int().min(1_000).max(10 * 60 * 1_000).optional().default(120_000),
+  })
+  .strict();
 
 export const customCommandArgsSchema = z.object({
   command: z.enum(CUSTOM_COMMAND_NAME_TUPLE),
@@ -114,6 +138,20 @@ export const customCommandArgsSchema = z.object({
   timezone: optionalTrimmedString(120),
   topic: optionalTrimmedString(200),
 });
+
+export const skillReadArgsSchema = z
+  .object({
+    skillId: z.string().trim().min(1).max(120),
+  })
+  .strict();
+
+export const projectContextReadArgsSchema = z
+  .object({
+    path: z.string().trim().min(1).max(240),
+    fromLine: z.number().int().min(1).optional(),
+    lineCount: z.number().int().min(1).max(400).optional().default(200),
+  })
+  .strict();
 
 export const roomMessageArgsSchema = z.object({
   roomId: z.string().trim().min(1).max(120),

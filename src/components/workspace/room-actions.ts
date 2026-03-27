@@ -1,4 +1,4 @@
-import type { RoomAgentId, RoomParticipant, RoomSession } from "@/lib/chat/types";
+import type { RoomAgentDefinition, RoomAgentId, RoomParticipant, RoomSession } from "@/lib/chat/types";
 import {
   appendMessageToRoom,
   createAgentParticipant,
@@ -89,6 +89,7 @@ export function addHumanParticipantToRoom(args: {
 export function addAgentParticipantToRoom(args: {
   room: RoomSession;
   agentId: RoomAgentId;
+  agentDefinitions?: RoomAgentDefinition[];
 }): RoomSession {
   if (args.room.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === args.agentId)) {
     return args.room;
@@ -96,9 +97,9 @@ export function addAgentParticipantToRoom(args: {
 
   let nextRoom = syncRoomParticipants(args.room, [
     ...args.room.participants,
-    createAgentParticipant(args.agentId, getAgentParticipants(args.room).length + 1),
+    createAgentParticipant(args.agentId, getAgentParticipants(args.room).length + 1, args.agentDefinitions),
   ]);
-  nextRoom = appendMessageToRoom(nextRoom, createSystemRoomEvent(nextRoom, `You added ${getRoomAgent(args.agentId).label} to the room.`));
+  nextRoom = appendMessageToRoom(nextRoom, createSystemRoomEvent(nextRoom, `You added ${getRoomAgent(args.agentId, args.agentDefinitions).label} to the room.`));
   return nextRoom;
 }
 

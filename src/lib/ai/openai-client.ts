@@ -66,52 +66,6 @@ interface ResponsesContinuationContext {
   messages: VisibleMessage[];
 }
 
-function shouldSendSessionHeader(baseUrl: string): boolean {
-  return baseUrl.toLowerCase().includes("right.codes");
-}
-
-function sanitizeSessionIdPart(value: string): string {
-  return value.trim().replace(/[^a-zA-Z0-9:_-]+/g, "-").slice(0, 64);
-}
-
-function buildStableSessionId(args: {
-  resolvedModel: ReturnType<typeof resolvePiModel>;
-  toolContext?: RoomToolContext;
-}): string | undefined {
-  const roomId = args.toolContext?.currentRoomId?.trim();
-  const agentId = args.toolContext?.currentAgentId?.trim();
-  if (!roomId || !agentId) {
-    return undefined;
-  }
-
-  return [
-    "room",
-    sanitizeSessionIdPart(roomId),
-    "agent",
-    sanitizeSessionIdPart(agentId),
-    "provider",
-    sanitizeSessionIdPart(args.resolvedModel.compatibility.providerKey),
-    "api",
-    sanitizeSessionIdPart(args.resolvedModel.actualApiFormat),
-    "model",
-    sanitizeSessionIdPart(args.resolvedModel.resolvedModelRef || args.resolvedModel.model.id),
-  ].join(":");
-}
-
-function buildProviderSessionKey(sessionId: string | undefined): string | undefined {
-  if (!sessionId?.trim()) {
-    return undefined;
-  }
-
-  const normalized = sanitizeSessionIdPart(sessionId);
-  if (normalized.length <= 64) {
-    return normalized;
-  }
-
-  const digest = createHash("sha1").update(normalized).digest("hex").slice(0, 16);
-  return `${normalized.slice(0, 47)}:${digest}`;
-}
-
 interface StreamConversationCallbacks {
   onTextDelta?: (delta: string) => void;
   onTool?: (tool: ToolExecution) => void;
@@ -177,6 +131,53 @@ function createUsage() {
       total: 0,
     },
   };
+}
+
+function shouldSendSessionHeader(baseUrl: string): boolean {
+  return baseUrl.toLowerCase().includes("right.codes");
+}
+
+function sanitizeSessionIdPart(value: string): string {
+  const sanitized = value.trim().replace(/[^a-zA-Z0-9:_-]+/g, "-").replace(/-+/g, "-").replace(/^[-:]+|[-:]+$/g, "");
+  return sanitized || "unknown";
+}
+
+function buildStableSessionId(args: {
+  resolvedModel: ReturnType<typeof resolvePiModel>;
+  toolContext?: RoomToolContext;
+}): string | undefined {
+  const roomId = args.toolContext?.currentRoomId?.trim();
+  const agentId = args.toolContext?.currentAgentId?.trim();
+  if (!roomId || !agentId) {
+    return undefined;
+  }
+
+  return [
+    "room",
+    sanitizeSessionIdPart(roomId),
+    "agent",
+    sanitizeSessionIdPart(agentId),
+    "provider",
+    sanitizeSessionIdPart(args.resolvedModel.compatibility.providerKey),
+    "api",
+    sanitizeSessionIdPart(args.resolvedModel.actualApiFormat),
+    "model",
+    sanitizeSessionIdPart(args.resolvedModel.resolvedModelRef || args.resolvedModel.model.id),
+  ].join(":");
+}
+
+function buildProviderSessionKey(sessionId: string | undefined): string | undefined {
+  if (!sessionId?.trim()) {
+    return undefined;
+  }
+
+  const normalized = sanitizeSessionIdPart(sessionId);
+  if (normalized.length <= 64) {
+    return normalized;
+  }
+
+  const digest = createHash("sha1").update(normalized).digest("hex").slice(0, 16);
+  return `${normalized.slice(0, 47)}:${digest}`;
 }
 
 function createHistoricalAssistantMessage(message: VisibleMessage, model: Model<Api>, timestamp: number): AssistantMessage {
@@ -282,6 +283,11 @@ function snapshotHistoryMessage(message: Message): AssistantHistoryMessage | nul
       toolCallId: message.toolCallId,
       toolName: message.toolName,
       content: message.content.flatMap((item) => item.type === "text" || item.type === "image" ? [item] : []),
+      ...(typeof message.details !== "undefined"
+        ? {
+            details: message.details,
+          }
+        : {}),
       isError: message.isError,
       timestamp: message.timestamp,
     };
@@ -337,7 +343,7 @@ function restoreHistoryMessage(snapshot: AssistantHistoryMessage): Message | nul
       toolCallId: snapshot.toolCallId,
       toolName: snapshot.toolName,
       content: snapshot.content,
-      ...("details" in snapshot
+      ...(typeof snapshot.details !== "undefined"
         ? {
             details: snapshot.details,
           }
@@ -351,7 +357,7 @@ function restoreHistoryMessage(snapshot: AssistantHistoryMessage): Message | nul
 }
 
 function restoreHistoryDelta(historyDelta: AssistantHistoryMessage[] | undefined): Message[] {
-  if (!historyDelta || historyDelta.length === 0) {
+  if (!historyDelta?.length) {
     return [];
   }
 
@@ -437,13 +443,7 @@ function applyPreviousResponseIdToPayload(
   }
 
   const input = Array.isArray(payload.input)
-    ? payload.input.filter((item) => {
-        if (!isPayloadMessageWithRole(item)) {
-          return true;
-        }
-
-        return item.role !== "developer" && item.role !== "system";
-      })
+    ? payload.input.filter((item) => !isPayloadMessageWithRole(item) || (item.role !== "developer" && item.role !== "system"))
     : payload.input;
 
   return {
@@ -749,34 +749,14 @@ async function runConversationAttempt(args: {
     resolvedModel: args.resolvedModel.resolvedModelRef,
     compatibility: args.resolvedModel.compatibility,
     actualApiFormat: args.resolvedModel.actualApiFormat,
-    ...(finalAssistantMessage?.responseId
-      ? {
-          responseId: finalAssistantMessage.responseId,
-        }
-      : {}),
-    ...(args.sessionId
-      ? {
-          sessionId: args.sessionId,
-        }
-      : {}),
+    ...(finalAssistantMessage?.responseId ? { responseId: finalAssistantMessage.responseId } : {}),
+    ...(args.sessionId ? { sessionId: args.sessionId } : {}),
     continuation: {
       strategy: responsesContinuation ? "previous_response_id" : "replay",
-      ...(responsesContinuation?.previousResponseId
-        ? {
-            previousResponseId: responsesContinuation.previousResponseId,
-          }
-        : {}),
+      ...(responsesContinuation?.previousResponseId ? { previousResponseId: responsesContinuation.previousResponseId } : {}),
     },
-    ...(toAssistantUsageSnapshot(finalAssistantMessage?.usage)
-      ? {
-          usage: toAssistantUsageSnapshot(finalAssistantMessage?.usage),
-        }
-      : {}),
-    ...(snapshotHistoryDelta(generatedMessages)
-      ? {
-          historyDelta: snapshotHistoryDelta(generatedMessages),
-        }
-      : {}),
+    ...(toAssistantUsageSnapshot(finalAssistantMessage?.usage) ? { usage: toAssistantUsageSnapshot(finalAssistantMessage?.usage) } : {}),
+    ...(snapshotHistoryDelta(generatedMessages) ? { historyDelta: snapshotHistoryDelta(generatedMessages) } : {}),
   };
 }
 
@@ -946,20 +926,8 @@ export async function runTextPrompt(args: {
     resolvedModel: resolvedModel.resolvedModelRef,
     compatibility: resolvedModel.compatibility,
     actualApiFormat: resolvedModel.actualApiFormat,
-    ...(finalAssistantMessage?.responseId
-      ? {
-          responseId: finalAssistantMessage.responseId,
-        }
-      : {}),
-    ...(sessionId
-      ? {
-          sessionId,
-        }
-      : {}),
-    ...(toAssistantUsageSnapshot(finalAssistantMessage?.usage)
-      ? {
-          usage: toAssistantUsageSnapshot(finalAssistantMessage?.usage),
-        }
-      : {}),
+    ...(finalAssistantMessage?.responseId ? { responseId: finalAssistantMessage.responseId } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...(toAssistantUsageSnapshot(finalAssistantMessage?.usage) ? { usage: toAssistantUsageSnapshot(finalAssistantMessage?.usage) } : {}),
   };
 }

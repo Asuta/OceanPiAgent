@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createKnownAgentCards } from "@/lib/chat/workspace-domain";
-import type { MessageImageAttachment } from "@/lib/chat/types";
+import type { AssistantMessageMeta, MessageImageAttachment } from "@/lib/chat/types";
 import { resetAgentRoomSession } from "@/lib/server/agent-room-sessions";
 import { runPreparedRoomTurn } from "@/lib/server/room-runner";
 
@@ -22,6 +22,7 @@ type ReplayedMessage = {
   role: "user" | "assistant";
   content: string;
   attachments?: MessageImageAttachment[];
+  meta?: AssistantMessageMeta;
 };
 
 async function withTempCwd(run: () => Promise<void>) {
@@ -356,6 +357,277 @@ test("runPreparedRoomTurn keeps image attachments in persisted agent history", a
     }
     const secondRunMessages = replayedMessages as ReplayedMessage[];
     assert.ok(secondRunMessages.some((message: ReplayedMessage) => message.role === "user" && message.attachments?.[0]?.id === TEST_IMAGE_ATTACHMENT.id));
+
+    await resetAgentRoomSession("concierge");
+  });
+});
+
+test("runPreparedRoomTurn preserves assistant response metadata for future replay", async () => {
+  await withTempCwd(async () => {
+    await runPreparedRoomTurn({
+      message: {
+        id: "user-msg-cache-1",
+        content: "Plan the next step",
+        attachments: [],
+        sender: {
+          id: "local-user",
+          name: "You",
+          role: "participant",
+        },
+      },
+      settings: {
+        modelConfigId: null,
+        apiFormat: "responses",
+        model: "fake-model",
+        systemPrompt: "",
+        providerMode: "openai",
+        maxToolLoopSteps: 4,
+        thinkingLevel: "off",
+        enabledSkillIds: [],
+      },
+      room: {
+        id: "room-1",
+        title: "Primary Room",
+      },
+      attachedRooms: [
+        {
+          id: "room-1",
+          title: "Primary Room",
+          archived: false,
+          ownerParticipantId: "concierge",
+          ownerName: "Harbor Concierge",
+          currentAgentMembershipRole: "owner",
+          currentAgentIsOwner: true,
+          participants: [
+            {
+              participantId: "concierge",
+              name: "Harbor Concierge",
+              runtimeKind: "agent",
+              membershipRole: "owner",
+              enabled: true,
+              agentId: "concierge",
+            },
+            {
+              participantId: "local-user",
+              name: "You",
+              runtimeKind: "human",
+              membershipRole: "member",
+              enabled: true,
+            },
+          ],
+          messageCount: 1,
+          latestMessageAt: null,
+        },
+      ],
+      knownAgents: createKnownAgentCards(),
+      roomHistoryById: {
+        "room-1": [],
+      },
+      agent: {
+        id: "concierge",
+        label: "Harbor Concierge",
+        instruction: "Keep it short.",
+      },
+      conversationRunner: async () => ({
+        assistantText: "I checked it.",
+        toolEvents: [],
+        resolvedModel: "openai/gpt-4.1",
+        compatibility: {
+          providerKey: "openai",
+          providerLabel: "OpenAI",
+          baseUrl: "https://api.openai.com/v1",
+          chatCompletionsToolStyle: "tools",
+          responsesContinuation: "previous_response_id",
+          responsesPayloadMode: "json",
+          notes: [],
+        },
+        actualApiFormat: "responses",
+        responseId: "resp-cache-1",
+        sessionId: "room:room-1:agent:concierge",
+        continuation: {
+          strategy: "replay",
+        },
+        usage: {
+          input: 20,
+          output: 8,
+          cacheRead: 128,
+          cacheWrite: 0,
+          totalTokens: 156,
+        },
+        historyDelta: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "call-1",
+                name: "workspace_read",
+                arguments: { path: "notes.txt" },
+              },
+            ],
+            api: "openai-responses",
+            provider: "openai",
+            model: "gpt-4.1",
+            usage: {
+              input: 10,
+              output: 2,
+              cacheRead: 64,
+              cacheWrite: 0,
+              totalTokens: 76,
+              cost: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: 0,
+              },
+            },
+            stopReason: "toolUse",
+            timestamp: 1,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call-1",
+            toolName: "workspace_read",
+            content: [
+              {
+                type: "text",
+                text: "notes loaded",
+              },
+            ],
+            isError: false,
+            timestamp: 2,
+          },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: "I checked it.",
+              },
+            ],
+            api: "openai-responses",
+            provider: "openai",
+            model: "gpt-4.1",
+            responseId: "resp-cache-1",
+            usage: {
+              input: 20,
+              output: 8,
+              cacheRead: 128,
+              cacheWrite: 0,
+              totalTokens: 156,
+              cost: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: 0,
+              },
+            },
+            stopReason: "stop",
+            timestamp: 3,
+          },
+        ],
+      }),
+    });
+
+    let replayedMessages: ReplayedMessage[] | null = null;
+
+    await runPreparedRoomTurn({
+      message: {
+        id: "user-msg-cache-2",
+        content: "Continue from there",
+        attachments: [],
+        sender: {
+          id: "local-user",
+          name: "You",
+          role: "participant",
+        },
+      },
+      settings: {
+        modelConfigId: null,
+        apiFormat: "responses",
+        model: "fake-model",
+        systemPrompt: "",
+        providerMode: "openai",
+        maxToolLoopSteps: 4,
+        thinkingLevel: "off",
+        enabledSkillIds: [],
+      },
+      room: {
+        id: "room-1",
+        title: "Primary Room",
+      },
+      attachedRooms: [
+        {
+          id: "room-1",
+          title: "Primary Room",
+          archived: false,
+          ownerParticipantId: "concierge",
+          ownerName: "Harbor Concierge",
+          currentAgentMembershipRole: "owner",
+          currentAgentIsOwner: true,
+          participants: [
+            {
+              participantId: "concierge",
+              name: "Harbor Concierge",
+              runtimeKind: "agent",
+              membershipRole: "owner",
+              enabled: true,
+              agentId: "concierge",
+            },
+            {
+              participantId: "local-user",
+              name: "You",
+              runtimeKind: "human",
+              membershipRole: "member",
+              enabled: true,
+            },
+          ],
+          messageCount: 2,
+          latestMessageAt: null,
+        },
+      ],
+      knownAgents: createKnownAgentCards(),
+      roomHistoryById: {
+        "room-1": [],
+      },
+      agent: {
+        id: "concierge",
+        label: "Harbor Concierge",
+        instruction: "Keep it short.",
+      },
+      conversationRunner: async (messages: ReplayedMessage[]) => {
+        replayedMessages = messages;
+        return {
+          assistantText: "Continuing now.",
+          toolEvents: [],
+          resolvedModel: "openai/gpt-4.1",
+          compatibility: {
+            providerKey: "openai",
+            providerLabel: "OpenAI",
+            baseUrl: "https://api.openai.com/v1",
+            chatCompletionsToolStyle: "tools",
+            responsesContinuation: "previous_response_id",
+            responsesPayloadMode: "json",
+            notes: [],
+          },
+          actualApiFormat: "responses",
+        };
+      },
+    });
+
+    if (!replayedMessages) {
+      assert.fail("Expected the second run to receive replayed messages.");
+    }
+
+    const replayedMessagesList = replayedMessages as ReplayedMessage[];
+    const replayedAssistant = replayedMessagesList.find((message: ReplayedMessage) => message.role === "assistant" && message.meta?.responseId === "resp-cache-1");
+    assert.ok(replayedAssistant);
+    assert.equal(replayedAssistant?.meta?.sessionId, "room:room-1:agent:concierge");
+    assert.equal(replayedAssistant?.meta?.usage?.cacheRead, 128);
+    assert.equal(replayedAssistant?.meta?.historyDelta?.length, 3);
+    assert.equal(replayedAssistant?.meta?.historyDelta?.[1]?.role, "toolResult");
 
     await resetAgentRoomSession("concierge");
   });

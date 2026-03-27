@@ -79,6 +79,18 @@ function createPiTool<TParameters extends TSchema>(definition: {
 function buildBaseTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
   return [
     createPiTool({
+      name: "bash",
+      label: "Bash",
+      description: "Run an unrestricted shell command in the server environment and inspect stdout, stderr, and exit status.",
+      parameters: Type.Object({
+        command: Type.String({ description: "Shell command to execute." }),
+        cwd: Type.Optional(Type.String({ description: "Optional working directory. Relative paths resolve from the server process cwd." })),
+        timeoutMs: Type.Optional(Type.Integer({ description: "Optional timeout in milliseconds." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
       name: "web_fetch",
       label: "Web Fetch",
       description: "Fetch a public webpage when you need live facts, then return readable text for synthesis.",
@@ -98,6 +110,36 @@ function buildBaseTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
         url: Type.Optional(Type.String({ description: "Required when using the web_fetch command." })),
         timezone: Type.Optional(Type.String({ description: "Optional IANA timezone." })),
         topic: Type.Optional(Type.String({ description: "Optional extra focus or question." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "skill_read",
+      label: "Skill Read",
+      description: "Read the full SKILL.md for one enabled workspace skill after the injected catalog shows it is the best match.",
+      parameters: Type.Object({
+        skillId: Type.String({ description: "The skill id from the injected skill catalog." }),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "project_context_list",
+      label: "Project Context List",
+      description: "List local project guidance files available for architecture, workflow, and configuration context.",
+      parameters: Type.Object({}),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "project_context_read",
+      label: "Project Context Read",
+      description: "Read one approved local project context file in focused line ranges.",
+      parameters: Type.Object({
+        path: Type.String({ description: "Relative path from project_context_list." }),
+        fromLine: Type.Optional(Type.Integer({ description: "Optional 1-based starting line number." })),
+        lineCount: Type.Optional(Type.Integer({ description: "Optional number of lines to read." })),
       }),
       scope,
       roomToolContext,

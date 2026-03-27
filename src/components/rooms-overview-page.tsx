@@ -3,24 +3,26 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { ROOM_AGENTS, formatTimestamp, getRoomAgentSummary, getRoomHumanSummary, getRoomPreview, useWorkspace } from "@/components/workspace-provider";
+import { formatTimestamp, getRoomAgentSummary, getRoomHumanSummary, getRoomPreview, useWorkspace } from "@/components/workspace-provider";
 
 export function RoomsOverviewPage() {
   const router = useRouter();
-  const { activeRooms, archivedRooms, agentStates, createRoom, archiveRoom, restoreRoom, deleteRoom, clearAllWorkspace, hydrated } = useWorkspace();
+  const { agents, activeRooms, archivedRooms, agentStates, createRoom, archiveRoom, restoreRoom, deleteRoom, clearAllWorkspace, hydrated } = useWorkspace();
   const [isClearingAll, setIsClearingAll] = useState(false);
 
   const runningCount = Object.values(agentStates).filter((state) => state.agentTurns.some((turn) => turn.status === "running")).length;
   const resolvedCount = Object.values(agentStates).filter((state) => Boolean(state.resolvedModel)).length;
+  const spotlightRoom = activeRooms[0] ?? null;
+  const secondaryRooms = spotlightRoom ? activeRooms.slice(1) : activeRooms;
 
   return (
     <div className="page-stack">
       <section className="hero-panel surface-panel page-enter">
         <div className="hero-copy">
           <p className="eyebrow-label">Room-first</p>
-          <h1>把聊天放回主舞台</h1>
+          <h1>先进入房间, 再展开执行细节</h1>
           <p>
-            现在首页只负责浏览和进入房间，不再把控制台、工具规则和高级配置全部堆在一个页面里。
+            总览页现在专注在两件事: 继续最近会话, 或者快速开一个新房间。执行轨迹和高级配置都退到第二层, 首页不再抢戏。
           </p>
         </div>
 
@@ -64,8 +66,8 @@ export function RoomsOverviewPage() {
           </button>
         </div>
 
-        <div className="agent-preset-row">
-          {ROOM_AGENTS.map((agent) => (
+        <div className="agent-preset-row launch-grid">
+          {agents.map((agent) => (
             <button
               key={agent.id}
               type="button"
@@ -75,6 +77,7 @@ export function RoomsOverviewPage() {
                 router.push(`/rooms/${room.id}`);
               }}
             >
+              <span className="preset-chip-kicker">快速开场</span>
               <strong>{agent.label}</strong>
               <span>{agent.summary}</span>
             </button>
@@ -103,41 +106,74 @@ export function RoomsOverviewPage() {
       <section className="section-panel surface-panel page-enter page-enter-delay-2">
         <div className="section-heading-row">
           <div>
-            <p className="section-label">最近房间</p>
-            <h2>继续最近的会话</h2>
+            <p className="section-label">继续推进</p>
+            <h2>从最近的房间继续</h2>
           </div>
         </div>
 
-        <div className="room-card-grid">
-          {activeRooms.map((room) => (
-            <article key={room.id} className="room-card">
+        {spotlightRoom ? (
+          <div className="overview-spotlight-grid">
+            <article className="room-card room-card-spotlight">
               <div className="room-card-heading">
                 <div>
-                  <h3>{room.title}</h3>
-                  <p>{getRoomPreview(room)}</p>
+                  <p className="section-label">最新活跃房间</p>
+                  <h3>{spotlightRoom.title}</h3>
+                  <p>{getRoomPreview(spotlightRoom)}</p>
                 </div>
-                <span>{formatTimestamp(room.updatedAt)}</span>
+                <span>{formatTimestamp(spotlightRoom.updatedAt)}</span>
               </div>
 
               <div className="meta-chip-row compact">
-                <span className="meta-chip">{getRoomAgentSummary(room)}</span>
-                <span className="meta-chip subtle">{getRoomHumanSummary(room)}</span>
-                <span className="meta-chip subtle">{room.roomMessages.length} 条消息</span>
+                <span className="meta-chip">{getRoomAgentSummary(spotlightRoom)}</span>
+                <span className="meta-chip subtle">{getRoomHumanSummary(spotlightRoom)}</span>
+                <span className="meta-chip subtle">{spotlightRoom.roomMessages.length} 条消息</span>
               </div>
 
               <div className="card-actions">
-                <Link href={`/rooms/${room.id}`} className="secondary-button">
-                  进入房间
+                <Link href={`/rooms/${spotlightRoom.id}`} className="primary-button">
+                  回到这个房间
                 </Link>
-                <button type="button" className="ghost-button" onClick={() => archiveRoom(room.id)}>
-                  归档
+                <button type="button" className="ghost-button" onClick={() => archiveRoom(spotlightRoom.id)}>
+                  稍后归档
                 </button>
               </div>
             </article>
-          ))}
 
-          {activeRooms.length === 0 ? <div className="empty-panel">现在还没有活跃房间，先创建一个开始吧。</div> : null}
-        </div>
+            <div className="stacked-list compact-gap room-list-rail">
+              {secondaryRooms.length > 0 ? (
+                secondaryRooms.map((room) => (
+                  <article key={room.id} className="room-card room-card-compact">
+                    <div className="room-card-heading">
+                      <div>
+                        <h3>{room.title}</h3>
+                        <p>{getRoomPreview(room)}</p>
+                      </div>
+                      <span>{formatTimestamp(room.updatedAt)}</span>
+                    </div>
+
+                    <div className="meta-chip-row compact">
+                      <span className="meta-chip subtle">{getRoomAgentSummary(room)}</span>
+                      <span className="meta-chip subtle">{room.roomMessages.length} 条消息</span>
+                    </div>
+
+                    <div className="card-actions">
+                      <Link href={`/rooms/${room.id}`} className="secondary-button">
+                        打开房间
+                      </Link>
+                      <button type="button" className="ghost-button" onClick={() => archiveRoom(room.id)}>
+                        归档
+                      </button>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <div className="empty-panel">当前只有一个活跃房间，已经放在左侧重点展示。</div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="empty-panel">现在还没有活跃房间，先创建一个开始吧。</div>
+        )}
       </section>
 
       {archivedRooms.length > 0 ? (

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { extractAssistantMetaFromConversationError, runConversation, streamConversation } from "@/lib/ai/openai-client";
-import { messageImageAttachmentSchema } from "@/lib/chat/schemas";
+import { assistantMessageMetaSchema, messageImageAttachmentSchema } from "@/lib/chat/schemas";
 import {
   DEFAULT_MAX_TOOL_LOOP_STEPS,
   MAX_MAX_TOOL_LOOP_STEPS,
@@ -14,32 +14,6 @@ import { createUuid } from "@/lib/utils/uuid";
 
 export const runtime = "nodejs";
 
-const assistantMetaSchema = z.object({
-  apiFormat: z.enum(["chat_completions", "responses"]),
-  compatibility: z.object({
-    providerKey: z.enum(["openai", "right_codes", "generic"]),
-    providerLabel: z.string(),
-    baseUrl: z.string(),
-    chatCompletionsToolStyle: z.enum(["tools", "functions"]),
-    responsesContinuation: z.enum(["previous_response_id", "replay"]),
-    responsesPayloadMode: z.enum(["json", "sse", "auto"]),
-    notes: z.array(z.string()),
-  }),
-  responseId: z.string().optional(),
-  sessionId: z.string().optional(),
-  continuation: z.object({
-    strategy: z.enum(["previous_response_id", "replay"]),
-    previousResponseId: z.string().optional(),
-  }).optional(),
-  usage: z.object({
-    input: z.number(),
-    output: z.number(),
-    cacheRead: z.number(),
-    cacheWrite: z.number(),
-    totalTokens: z.number(),
-  }).optional(),
-}).passthrough();
-
 const requestSchema = z.object({
   messages: z
     .array(
@@ -48,7 +22,7 @@ const requestSchema = z.object({
         role: z.enum(["user", "assistant"]),
         content: z.string().max(20_000),
         attachments: z.array(messageImageAttachmentSchema).max(3).optional().default([]),
-        meta: assistantMetaSchema.optional(),
+        meta: assistantMessageMetaSchema.optional(),
       }).superRefine((message, ctx) => {
         if (!message.content.trim() && message.attachments.length === 0) {
           ctx.addIssue({
@@ -89,45 +63,17 @@ function toAssistantResponse(
         content: result.assistantText,
         attachments: [],
         tools: result.toolEvents,
-      meta: {
-        apiFormat: result.actualApiFormat,
-        compatibility: result.compatibility,
-        ...(result.responseId
-          ? {
-              responseId: result.responseId,
-            }
-          : {}),
-        ...(result.sessionId
-          ? {
-              sessionId: result.sessionId,
-            }
-          : {}),
-        ...(result.continuation
-          ? {
-              continuation: result.continuation,
-            }
-          : {}),
-        ...(result.usage
-          ? {
-              usage: result.usage,
-            }
-          : {}),
-        ...(result.historyDelta
-          ? {
-              historyDelta: result.historyDelta,
-            }
-          : {}),
-        ...(result.recovery
-          ? {
-              recovery: result.recovery,
-            }
-          : {}),
-        ...(result.emptyCompletion
-          ? {
-              emptyCompletion: result.emptyCompletion,
-            }
-          : {}),
-      },
+        meta: {
+          apiFormat: result.actualApiFormat,
+          compatibility: result.compatibility,
+          ...(result.responseId ? { responseId: result.responseId } : {}),
+          ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+          ...(result.continuation ? { continuation: result.continuation } : {}),
+          ...(result.usage ? { usage: result.usage } : {}),
+          ...(result.historyDelta ? { historyDelta: result.historyDelta } : {}),
+          ...(result.recovery ? { recovery: result.recovery } : {}),
+          ...(result.emptyCompletion ? { emptyCompletion: result.emptyCompletion } : {}),
+        },
     },
     resolvedModel: result.resolvedModel,
     compatibility: result.compatibility,
@@ -200,31 +146,11 @@ export async function POST(request: Request) {
                   meta: {
                     apiFormat: result.actualApiFormat,
                     compatibility: result.compatibility,
-                    ...(result.responseId
-                      ? {
-                          responseId: result.responseId,
-                        }
-                      : {}),
-                    ...(result.sessionId
-                      ? {
-                          sessionId: result.sessionId,
-                        }
-                      : {}),
-                    ...(result.continuation
-                      ? {
-                          continuation: result.continuation,
-                        }
-                      : {}),
-                    ...(result.usage
-                      ? {
-                          usage: result.usage,
-                        }
-                      : {}),
-                    ...(result.historyDelta
-                      ? {
-                          historyDelta: result.historyDelta,
-                        }
-                      : {}),
+                    ...(result.responseId ? { responseId: result.responseId } : {}),
+                    ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+                    ...(result.continuation ? { continuation: result.continuation } : {}),
+                    ...(result.usage ? { usage: result.usage } : {}),
+                    ...(result.historyDelta ? { historyDelta: result.historyDelta } : {}),
                     ...(result.recovery
                       ? {
                           recovery: result.recovery,

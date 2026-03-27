@@ -6,6 +6,7 @@ import type {
   AgentSharedState,
   AssistantMessageMeta,
   AttachedRoomDefinition,
+  RoomAgentDefinition,
   RoomAgentId,
   RoomChatResponseBody,
   RoomHistoryMessageSummary,
@@ -20,7 +21,6 @@ import {
   applyMessageReceiptUpdate,
   createAgentSharedState,
   createTimestamp,
-  getRoomAgent,
 } from "@/lib/chat/workspace-domain";
 import { readRoomStream as processRoomStream } from "@/components/workspace/room-stream";
 import type { ActiveSchedulerRun } from "@/components/workspace/scheduler";
@@ -46,6 +46,24 @@ function updateTurn(
   return turns.map((turn) => (turn.id === turnId ? updater(turn) : turn));
 }
 
+export function appendMissingMatchingRoomMessages(room: RoomSession, messages: RoomMessage[]): RoomSession {
+  let nextRoom = room;
+
+  for (const message of messages) {
+    if (message.roomId !== room.id) {
+      continue;
+    }
+
+    if (nextRoom.roomMessages.some((entry) => entry.id === message.id)) {
+      continue;
+    }
+
+    nextRoom = appendMessageToRoom(nextRoom, message);
+  }
+
+  return nextRoom;
+}
+
 export function useRoomExecution(args: {
   roomsRef: MutableRefObject<RoomSession[]>;
   agentStatesRef: MutableRefObject<Record<RoomAgentId, AgentSharedState>>;
@@ -57,6 +75,7 @@ export function useRoomExecution(args: {
   updateAgentState: (agentId: RoomAgentId, updater: (state: AgentSharedState) => AgentSharedState) => void;
   applyReceiptUpdateToAllAgentConsoles: (update: RoomMessageReceiptUpdate) => void;
   applyRoomToolActions: (actions: RoomToolActionUnion[], actorAgentId: RoomAgentId) => void;
+  getAgentDefinition: (agentId: RoomAgentId) => RoomAgentDefinition;
   getAttachedRoomsForAgent: (agentId: RoomAgentId, currentRoomId: string, currentRoomTitle: string) => AttachedRoomDefinition[];
   getKnownAgentsForToolContext: () => AgentInfoCard[];
   getRoomHistoryByIdForAgent: (agentId: RoomAgentId) => Record<string, RoomHistoryMessageSummary[]>;
@@ -75,6 +94,7 @@ export function useRoomExecution(args: {
     updateAgentState,
     applyReceiptUpdateToAllAgentConsoles,
     applyRoomToolActions,
+    getAgentDefinition,
     getAttachedRoomsForAgent,
     getKnownAgentsForToolContext,
     getRoomHistoryByIdForAgent,
@@ -82,6 +102,24 @@ export function useRoomExecution(args: {
     mergeAgentTurns,
     normalizeAssistantMeta,
   } = args;
+
+  const applyMissingEmittedMessages = useCallback((messages: RoomMessage[]) => {
+    for (const message of messages) {
+      let appended = false;
+      updateRoomState(message.roomId, (room) => {
+        if (room.roomMessages.some((entry) => entry.id === message.id)) {
+          return room;
+        }
+
+        appended = true;
+        return appendMessageToRoom(room, message);
+      });
+
+      if (appended) {
+        maybeStartSchedulerForRoomMessage(message.roomId, message);
+      }
+    }
+  }, [maybeStartSchedulerForRoomMessage, updateRoomState]);
 
   const getActiveAgentRun = useCallback((agentId: RoomAgentId): ActiveRoomRun | null => {
     return activeRunsRef.current[agentId] ?? null;
@@ -190,14 +228,18 @@ export function useRoomExecution(args: {
           applyReceiptUpdateToAllAgentConsoles(update);
         },
         onDone: (event) => {
-          updateRoomState(initiatingRoomId, (room) => ({
-            ...room,
-            roomMessages: room.roomMessages.map((message) =>
-              message.id === event.turn.userMessage.id ? event.turn.userMessage : message,
-            ),
-            error: "",
-            updatedAt: createTimestamp(),
-          }));
+          updateRoomState(initiatingRoomId, (room) => {
+            return {
+              ...room,
+              roomMessages: room.roomMessages.map((message) =>
+                message.id === event.turn.userMessage.id ? event.turn.userMessage : message,
+              ),
+              error: "",
+              updatedAt: createTimestamp(),
+            };
+          });
+
+          applyMissingEmittedMessages(event.turn.emittedMessages);
 
           updateAgentTurns(agentId, (turns) =>
             updateTurn(turns, turnId, (turn) => ({
@@ -231,6 +273,7 @@ export function useRoomExecution(args: {
     },
     [
       applyReceiptUpdateToAllAgentConsoles,
+      applyMissingEmittedMessages,
       applyRoomToolActions,
       isCurrentAgentRun,
       maybeStartSchedulerForRoomMessage,
@@ -254,7 +297,7 @@ export function useRoomExecution(args: {
       }
 
       const roomTitle = roomSnapshot.title;
-      const agent = getRoomAgent(params.agentId);
+      const agent = getAgentDefinition(params.agentId);
       const previousActiveRun = getActiveAgentRun(agent.id);
       const pendingTurn: AgentRoomTurn = {
         id: createUuid(),
@@ -375,16 +418,10 @@ export function useRoomExecution(args: {
               }
             }
 
-            for (const emittedMessage of emittedMessages) {
-              nextRoom = appendMessageToRoom(nextRoom, emittedMessage);
-            }
-
             return nextRoom;
           });
 
-          for (const emittedMessage of emittedMessages) {
-            maybeStartSchedulerForRoomMessage(emittedMessage.roomId, emittedMessage);
-          }
+          applyMissingEmittedMessages(emittedMessages);
           for (const receiptUpdate of receiptUpdates) {
             applyReceiptUpdateToAllAgentConsoles(receiptUpdate);
           }
@@ -455,11 +492,12 @@ export function useRoomExecution(args: {
       applyRoomToolActions,
       finishAgentRun,
       getActiveAgentRun,
+      getAgentDefinition,
       getAttachedRoomsForAgent,
       getKnownAgentsForToolContext,
       getRoomHistoryByIdForAgent,
+      applyMissingEmittedMessages,
       isCurrentAgentRun,
-      maybeStartSchedulerForRoomMessage,
       mergeAgentTurns,
       readRoomStream,
       roomsRef,
