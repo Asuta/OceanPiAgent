@@ -50,9 +50,9 @@ export function createEmptyModelConfigDraft(index = 1) {
     name: `Model Config ${index}`,
     kind: "openai_compatible" as const,
     model: "",
-    apiFormat: "chat_completions" as const,
+    apiFormat: "responses" as const,
     baseUrl: "",
-    providerMode: "auto" as const,
+    providerMode: "openai" as const,
     apiKey: "",
     clearApiKey: false,
   };

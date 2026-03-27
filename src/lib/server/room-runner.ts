@@ -251,6 +251,11 @@ type RoomConversationRunner = (
   resolvedModel: string;
   compatibility: AssistantMessageMeta["compatibility"];
   actualApiFormat: AssistantMessageMeta["apiFormat"];
+  responseId?: string;
+  sessionId?: string;
+  continuation?: NonNullable<AssistantMessageMeta["continuation"]>;
+  usage?: NonNullable<AssistantMessageMeta["usage"]>;
+  historyDelta?: NonNullable<AssistantMessageMeta["historyDelta"]>;
   emptyCompletion?: NonNullable<AgentRoomTurn["meta"]>["emptyCompletion"];
   recovery?: NonNullable<AgentRoomTurn["meta"]>["recovery"];
 }>;
@@ -495,6 +500,37 @@ export async function runPreparedRoomTurn(
       assistantText: result.assistantText,
       resolvedModel: result.resolvedModel,
       compatibility: result.compatibility,
+      assistantMeta: {
+        apiFormat: result.actualApiFormat,
+        compatibility: result.compatibility,
+        ...(result.responseId
+          ? {
+              responseId: result.responseId,
+            }
+          : {}),
+        ...(result.sessionId
+          ? {
+              sessionId: result.sessionId,
+            }
+          : {}),
+        ...(result.continuation
+          ? {
+              continuation: result.continuation,
+            }
+          : {}),
+        ...(result.usage
+          ? {
+              usage: result.usage,
+            }
+          : {}),
+        ...(result.historyDelta
+          ? {
+              historyDelta: result.historyDelta,
+            }
+          : {}),
+        ...(result.recovery ? { recovery: result.recovery } : {}),
+        ...(result.emptyCompletion ? { emptyCompletion: result.emptyCompletion } : {}),
+      },
     });
 
     const turn = createTurn(
@@ -513,6 +549,31 @@ export async function runPreparedRoomTurn(
       {
         apiFormat: result.actualApiFormat,
         compatibility: result.compatibility,
+        ...(result.responseId
+          ? {
+              responseId: result.responseId,
+            }
+          : {}),
+        ...(result.sessionId
+          ? {
+              sessionId: result.sessionId,
+            }
+          : {}),
+        ...(result.continuation
+          ? {
+              continuation: result.continuation,
+            }
+          : {}),
+        ...(result.usage
+          ? {
+              usage: result.usage,
+            }
+          : {}),
+        ...(result.historyDelta
+          ? {
+              historyDelta: result.historyDelta,
+            }
+          : {}),
         ...(result.recovery ? { recovery: result.recovery } : {}),
         ...(result.emptyCompletion ? { emptyCompletion: result.emptyCompletion } : {}),
       },

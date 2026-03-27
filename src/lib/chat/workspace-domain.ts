@@ -27,10 +27,10 @@ export const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
 
 const DEFAULT_SETTINGS: ChatSettings = {
   modelConfigId: null,
-  apiFormat: "chat_completions",
+  apiFormat: "responses",
   model: "",
   systemPrompt: "",
-  providerMode: "auto",
+  providerMode: "openai",
   maxToolLoopSteps: DEFAULT_MAX_TOOL_LOOP_STEPS,
   thinkingLevel: "off",
   enabledSkillIds: [] as string[],

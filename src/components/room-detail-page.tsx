@@ -84,6 +84,34 @@ function formatRawTurnLog(turn: AgentRoomTurn, roomTitle: string) {
     }
   }
 
+  if (turn.meta?.usage) {
+    sections.push(
+      "",
+      "[usage]",
+      `input=${turn.meta.usage.input}`,
+      `output=${turn.meta.usage.output}`,
+      `cacheRead=${turn.meta.usage.cacheRead}`,
+      `cacheWrite=${turn.meta.usage.cacheWrite}`,
+      `totalTokens=${turn.meta.usage.totalTokens}`,
+    );
+  }
+
+  if (turn.meta?.sessionId || turn.meta?.responseId) {
+    sections.push("", "[assistant-meta]");
+    if (turn.meta?.sessionId) {
+      sections.push(`sessionId=${turn.meta.sessionId}`);
+    }
+    if (turn.meta?.continuation) {
+      sections.push(`continuationStrategy=${turn.meta.continuation.strategy}`);
+      if (turn.meta.continuation.previousResponseId) {
+        sections.push(`previousResponseId=${turn.meta.continuation.previousResponseId}`);
+      }
+    }
+    if (turn.meta?.responseId) {
+      sections.push(`responseId=${turn.meta.responseId}`);
+    }
+  }
+
   if (turn.meta?.emptyCompletion) {
     const diagnostic = turn.meta.emptyCompletion;
     sections.push(
@@ -409,6 +437,15 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
         : [],
     [consoleAgentState?.agentTurns, room],
   );
+  const latestRoomTurn = useMemo(() => {
+    if (roomTurns.length === 0) {
+      return null;
+    }
+
+    return [...roomTurns].sort(
+      (left, right) => getSortableTime(right.userMessage.createdAt) - getSortableTime(left.userMessage.createdAt),
+    )[0] ?? null;
+  }, [roomTurns]);
   const visibleConsoleTurns = useMemo(() => {
     const turns = consoleScope === "room" ? roomTurns : (consoleAgentState?.agentTurns ?? []);
     return [...turns].sort((left, right) => getSortableTime(left.userMessage.createdAt) - getSortableTime(right.userMessage.createdAt));
@@ -632,6 +669,21 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                 <p>{turn.assistantContent || "这一轮没有留下可见的内部文本。"}</p>
               </section>
 
+              {turn.meta?.usage ? (
+                <section className="trace-block">
+                  <span>模型用量</span>
+                  <div className="meta-chip-row compact">
+                    {turn.meta.sessionId ? <span className="meta-chip subtle">session {turn.meta.sessionId}</span> : null}
+                    {turn.meta.continuation ? <span className="meta-chip subtle">continuation {turn.meta.continuation.strategy}</span> : null}
+                    <span className="meta-chip subtle">input {turn.meta.usage.input}</span>
+                    <span className="meta-chip subtle">output {turn.meta.usage.output}</span>
+                    <span className="meta-chip subtle">cache read {turn.meta.usage.cacheRead}</span>
+                    <span className="meta-chip subtle">cache write {turn.meta.usage.cacheWrite}</span>
+                    <span className="meta-chip subtle">total {turn.meta.usage.totalTokens}</span>
+                  </div>
+                </section>
+              ) : null}
+
               {turn.emittedMessages.length > 0 ? (
                 <section className="trace-block">
                   <span>投递回房间的内容</span>
@@ -725,6 +777,19 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
             </div>
             <span className={isRunning ? "thread-status running" : "thread-status idle"}>{isRunning ? "处理中" : "空闲"}</span>
           </div>
+
+          {latestRoomTurn?.meta?.usage ? (
+            <div className="meta-chip-row compact top-gap">
+              <span className="meta-chip">最近一轮模型用量</span>
+              {latestRoomTurn.meta.sessionId ? <span className="meta-chip subtle">session {latestRoomTurn.meta.sessionId}</span> : null}
+              {latestRoomTurn.meta.continuation ? <span className="meta-chip subtle">continuation {latestRoomTurn.meta.continuation.strategy}</span> : null}
+              <span className="meta-chip subtle">input {latestRoomTurn.meta.usage.input}</span>
+              <span className="meta-chip subtle">output {latestRoomTurn.meta.usage.output}</span>
+              <span className="meta-chip subtle">cache read {latestRoomTurn.meta.usage.cacheRead}</span>
+              <span className="meta-chip subtle">cache write {latestRoomTurn.meta.usage.cacheWrite}</span>
+              <span className="meta-chip subtle">total {latestRoomTurn.meta.usage.totalTokens}</span>
+            </div>
+          ) : null}
 
           {isRunning ? (
             <div className="thread-live-banner" role="status" aria-live="polite">

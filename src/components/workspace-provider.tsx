@@ -97,10 +97,10 @@ const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
 
 const DEFAULT_SETTINGS: ChatSettings = {
   modelConfigId: null,
-  apiFormat: "chat_completions",
+  apiFormat: "responses",
   model: "",
   systemPrompt: "",
-  providerMode: "auto",
+  providerMode: "openai",
   maxToolLoopSteps: DEFAULT_MAX_TOOL_LOOP_STEPS,
   thinkingLevel: "off",
   enabledSkillIds: [],
@@ -683,6 +683,291 @@ function normalizeCompatibility(value: unknown): ProviderCompatibility | null {
   };
 }
 
+function normalizeAssistantUsage(value: unknown): NonNullable<AgentRoomTurn["meta"]>["usage"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const input = typeof value.input === "number" && Number.isFinite(value.input) ? value.input : null;
+  const output = typeof value.output === "number" && Number.isFinite(value.output) ? value.output : null;
+  const cacheRead = typeof value.cacheRead === "number" && Number.isFinite(value.cacheRead) ? value.cacheRead : null;
+  const cacheWrite = typeof value.cacheWrite === "number" && Number.isFinite(value.cacheWrite) ? value.cacheWrite : null;
+  const totalTokens = typeof value.totalTokens === "number" && Number.isFinite(value.totalTokens) ? value.totalTokens : null;
+
+  if (input === null || output === null || cacheRead === null || cacheWrite === null || totalTokens === null) {
+    return undefined;
+  }
+
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    totalTokens,
+  };
+}
+
+function normalizeAssistantContinuation(value: unknown): NonNullable<AgentRoomTurn["meta"]>["continuation"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  if (value.strategy !== "previous_response_id" && value.strategy !== "replay") {
+    return undefined;
+  }
+
+  return {
+    strategy: value.strategy,
+    ...(typeof value.previousResponseId === "string" && value.previousResponseId
+      ? {
+          previousResponseId: value.previousResponseId,
+        }
+      : {}),
+  };
+}
+
+function normalizeAssistantHistoryTextPart(value: unknown) {
+  if (!isRecord(value) || value.type !== "text" || typeof value.text !== "string") {
+    return undefined;
+  }
+
+  return {
+    type: "text" as const,
+    text: value.text,
+    ...(typeof value.textSignature === "string" && value.textSignature
+      ? {
+          textSignature: value.textSignature,
+        }
+      : {}),
+  };
+}
+
+function normalizeAssistantHistoryImagePart(value: unknown) {
+  if (!isRecord(value) || value.type !== "image" || typeof value.data !== "string" || typeof value.mimeType !== "string") {
+    return undefined;
+  }
+
+  return {
+    type: "image" as const,
+    data: value.data,
+    mimeType: value.mimeType,
+  };
+}
+
+function normalizeAssistantHistoryThinkingPart(value: unknown) {
+  if (!isRecord(value) || value.type !== "thinking" || typeof value.thinking !== "string") {
+    return undefined;
+  }
+
+  return {
+    type: "thinking" as const,
+    thinking: value.thinking,
+    ...(typeof value.thinkingSignature === "string" && value.thinkingSignature
+      ? {
+          thinkingSignature: value.thinkingSignature,
+        }
+      : {}),
+    ...(typeof value.redacted === "boolean"
+      ? {
+          redacted: value.redacted,
+        }
+      : {}),
+  };
+}
+
+function normalizeAssistantHistoryToolCallPart(value: unknown) {
+  if (!isRecord(value) || value.type !== "toolCall" || typeof value.id !== "string" || typeof value.name !== "string") {
+    return undefined;
+  }
+
+  const args = isRecord(value.arguments) ? value.arguments : {};
+  return {
+    type: "toolCall" as const,
+    id: value.id,
+    name: value.name,
+    arguments: args,
+    ...(typeof value.thoughtSignature === "string" && value.thoughtSignature
+      ? {
+          thoughtSignature: value.thoughtSignature,
+        }
+      : {}),
+  };
+}
+
+function normalizeAssistantHistoryUsage(value: unknown) {
+  if (!isRecord(value) || !isRecord(value.cost)) {
+    return undefined;
+  }
+
+  const input = typeof value.input === "number" && Number.isFinite(value.input) ? value.input : 0;
+  const output = typeof value.output === "number" && Number.isFinite(value.output) ? value.output : 0;
+  const cacheRead = typeof value.cacheRead === "number" && Number.isFinite(value.cacheRead) ? value.cacheRead : 0;
+  const cacheWrite = typeof value.cacheWrite === "number" && Number.isFinite(value.cacheWrite) ? value.cacheWrite : 0;
+  const totalTokens = typeof value.totalTokens === "number" && Number.isFinite(value.totalTokens) ? value.totalTokens : 0;
+
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    totalTokens,
+    cost: {
+      input: typeof value.cost.input === "number" && Number.isFinite(value.cost.input) ? value.cost.input : 0,
+      output: typeof value.cost.output === "number" && Number.isFinite(value.cost.output) ? value.cost.output : 0,
+      cacheRead: typeof value.cost.cacheRead === "number" && Number.isFinite(value.cost.cacheRead) ? value.cost.cacheRead : 0,
+      cacheWrite: typeof value.cost.cacheWrite === "number" && Number.isFinite(value.cost.cacheWrite) ? value.cost.cacheWrite : 0,
+      total: typeof value.cost.total === "number" && Number.isFinite(value.cost.total) ? value.cost.total : 0,
+    },
+  };
+}
+
+function normalizeAssistantHistoryMessage(value: unknown): NonNullable<NonNullable<AgentRoomTurn["meta"]>["historyDelta"]>[number] | undefined {
+  if (!isRecord(value) || typeof value.role !== "string") {
+    return undefined;
+  }
+
+  if (value.role === "user") {
+    let content: string | Array<
+      NonNullable<ReturnType<typeof normalizeAssistantHistoryTextPart>>
+      | NonNullable<ReturnType<typeof normalizeAssistantHistoryImagePart>>
+    > | null = null;
+
+    if (typeof value.content === "string") {
+      content = value.content;
+    } else if (Array.isArray(value.content)) {
+      const normalizedContent: Array<NonNullable<ReturnType<typeof normalizeAssistantHistoryTextPart>> | NonNullable<ReturnType<typeof normalizeAssistantHistoryImagePart>>> = [];
+      for (const item of value.content) {
+        const text = normalizeAssistantHistoryTextPart(item);
+        if (text) {
+          normalizedContent.push(text);
+          continue;
+        }
+
+        const image = normalizeAssistantHistoryImagePart(item);
+        if (image) {
+          normalizedContent.push(image);
+        }
+      }
+      content = normalizedContent;
+    }
+
+    if (content === null) {
+      return undefined;
+    }
+
+    return {
+      role: "user",
+      content,
+      timestamp: typeof value.timestamp === "number" && Number.isFinite(value.timestamp) ? value.timestamp : Date.now(),
+    };
+  }
+
+  if (value.role === "assistant") {
+    const usage = normalizeAssistantHistoryUsage(value.usage);
+    if (!Array.isArray(value.content) || !usage || typeof value.api !== "string" || typeof value.provider !== "string" || typeof value.model !== "string") {
+      return undefined;
+    }
+
+    const content: Array<
+      NonNullable<ReturnType<typeof normalizeAssistantHistoryTextPart>>
+      | NonNullable<ReturnType<typeof normalizeAssistantHistoryThinkingPart>>
+      | NonNullable<ReturnType<typeof normalizeAssistantHistoryToolCallPart>>
+    > = [];
+    for (const item of value.content) {
+      const text = normalizeAssistantHistoryTextPart(item);
+      if (text) {
+        content.push(text);
+        continue;
+      }
+
+      const thinking = normalizeAssistantHistoryThinkingPart(item);
+      if (thinking) {
+        content.push(thinking);
+        continue;
+      }
+
+      const toolCall = normalizeAssistantHistoryToolCallPart(item);
+      if (toolCall) {
+        content.push(toolCall);
+      }
+    }
+
+    if (value.stopReason !== "stop" && value.stopReason !== "length" && value.stopReason !== "toolUse" && value.stopReason !== "error" && value.stopReason !== "aborted") {
+      return undefined;
+    }
+
+    return {
+      role: "assistant",
+      content,
+      api: value.api,
+      provider: value.provider,
+      model: value.model,
+      usage,
+      stopReason: value.stopReason,
+      timestamp: typeof value.timestamp === "number" && Number.isFinite(value.timestamp) ? value.timestamp : Date.now(),
+      ...(typeof value.responseId === "string" && value.responseId
+        ? {
+            responseId: value.responseId,
+          }
+        : {}),
+      ...(typeof value.errorMessage === "string" && value.errorMessage
+        ? {
+            errorMessage: value.errorMessage,
+          }
+        : {}),
+    };
+  }
+
+  if (value.role === "toolResult") {
+    if (!Array.isArray(value.content) || typeof value.toolCallId !== "string" || typeof value.toolName !== "string") {
+      return undefined;
+    }
+
+    const content: Array<NonNullable<ReturnType<typeof normalizeAssistantHistoryTextPart>> | NonNullable<ReturnType<typeof normalizeAssistantHistoryImagePart>>> = [];
+    for (const item of value.content) {
+      const text = normalizeAssistantHistoryTextPart(item);
+      if (text) {
+        content.push(text);
+        continue;
+      }
+
+      const image = normalizeAssistantHistoryImagePart(item);
+      if (image) {
+        content.push(image);
+      }
+    }
+
+    return {
+      role: "toolResult",
+      toolCallId: value.toolCallId,
+      toolName: value.toolName,
+      content,
+      isError: typeof value.isError === "boolean" ? value.isError : false,
+      timestamp: typeof value.timestamp === "number" && Number.isFinite(value.timestamp) ? value.timestamp : Date.now(),
+      ...("details" in value
+        ? {
+            details: value.details,
+          }
+        : {}),
+    };
+  }
+
+  return undefined;
+}
+
+function normalizeAssistantHistoryDelta(value: unknown): NonNullable<AgentRoomTurn["meta"]>["historyDelta"] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = value.flatMap((item) => {
+    const message = normalizeAssistantHistoryMessage(item);
+    return message ? [message] : [];
+  });
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function normalizeAssistantMeta(value: unknown): AgentRoomTurn["meta"] | undefined {
   if (!isRecord(value) || !isRecord(value.compatibility)) {
     return undefined;
@@ -698,6 +983,9 @@ function normalizeAssistantMeta(value: unknown): AgentRoomTurn["meta"] | undefin
   }
 
   const apiFormat = value.apiFormat === "responses" ? "responses" : "chat_completions";
+  const continuation = normalizeAssistantContinuation(value.continuation);
+  const usage = normalizeAssistantUsage(value.usage);
+  const historyDelta = normalizeAssistantHistoryDelta(value.historyDelta);
 
   const emptyCompletion: NonNullable<AgentRoomTurn["meta"]>["emptyCompletion"] = isRecord(value.emptyCompletion)
     ? {
@@ -846,6 +1134,31 @@ function normalizeAssistantMeta(value: unknown): AgentRoomTurn["meta"] | undefin
   return {
     apiFormat,
     compatibility,
+    ...(typeof value.responseId === "string" && value.responseId
+      ? {
+          responseId: value.responseId,
+        }
+      : {}),
+    ...(typeof value.sessionId === "string" && value.sessionId
+      ? {
+          sessionId: value.sessionId,
+        }
+      : {}),
+    ...(continuation
+      ? {
+          continuation,
+        }
+      : {}),
+    ...(usage
+      ? {
+          usage,
+        }
+      : {}),
+    ...(historyDelta
+      ? {
+          historyDelta,
+        }
+      : {}),
     ...(emptyCompletion
       ? {
           emptyCompletion,
@@ -933,18 +1246,28 @@ function normalizeSettings(value: unknown): ChatSettings {
     return { ...DEFAULT_SETTINGS };
   }
 
+  const modelConfigId = typeof value.modelConfigId === "string" && value.modelConfigId.trim() ? value.modelConfigId : null;
+  const requestedApiFormat = value.apiFormat === "responses" ? "responses" : "chat_completions";
+  const requestedProviderMode =
+    value.providerMode === "openai" ||
+    value.providerMode === "right_codes" ||
+    value.providerMode === "generic" ||
+    value.providerMode === "auto"
+      ? value.providerMode
+      : "auto";
+  const requestedModel = typeof value.model === "string" ? value.model : "";
+  const shouldUpgradeLegacyDefaultRouting =
+    !modelConfigId
+    && !requestedModel.trim()
+    && requestedApiFormat === "chat_completions"
+    && requestedProviderMode === "auto";
+
   return {
-    modelConfigId: typeof value.modelConfigId === "string" && value.modelConfigId.trim() ? value.modelConfigId : null,
-    apiFormat: value.apiFormat === "responses" ? "responses" : "chat_completions",
-    model: typeof value.model === "string" ? value.model : "",
+    modelConfigId,
+    apiFormat: shouldUpgradeLegacyDefaultRouting ? "responses" : requestedApiFormat,
+    model: requestedModel,
     systemPrompt: typeof value.systemPrompt === "string" ? value.systemPrompt : "",
-    providerMode:
-      value.providerMode === "openai" ||
-      value.providerMode === "right_codes" ||
-      value.providerMode === "generic" ||
-      value.providerMode === "auto"
-        ? value.providerMode
-        : "auto",
+    providerMode: shouldUpgradeLegacyDefaultRouting ? "openai" : requestedProviderMode,
     maxToolLoopSteps: coerceMaxToolLoopSteps(value.maxToolLoopSteps),
     thinkingLevel: coerceThinkingLevel(value.thinkingLevel),
     enabledSkillIds: coerceSkillIds(value.enabledSkillIds),

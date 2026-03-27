@@ -63,17 +63,22 @@ function normalizeBaseUrl(value: string): string {
 }
 
 function toPublicModelConfig(value: StoredModelConfigRecord): ModelConfig {
+  const normalized = normalizeStoredModelConfig(value);
+  if (!normalized) {
+    throw new Error("Invalid model config record.");
+  }
+
   return {
-    id: value.id,
-    name: value.name,
-    kind: value.kind,
-    model: value.model,
-    apiFormat: value.apiFormat,
-    baseUrl: value.baseUrl,
-    providerMode: value.providerMode,
-    hasApiKey: Boolean(value.apiKey.trim()),
-    createdAt: value.createdAt,
-    updatedAt: value.updatedAt,
+    id: normalized.id,
+    name: normalized.name,
+    kind: normalized.kind,
+    model: normalized.model,
+    apiFormat: normalized.apiFormat,
+    baseUrl: normalized.baseUrl,
+    providerMode: normalized.providerMode,
+    hasApiKey: Boolean(normalized.apiKey.trim()),
+    createdAt: normalized.createdAt,
+    updatedAt: normalized.updatedAt,
   };
 }
 
@@ -83,11 +88,19 @@ function normalizeStoredModelConfig(value: unknown): StoredModelConfigRecord | n
     return null;
   }
 
+  const normalizedProviderMode =
+    parsed.data.kind === "openai_compatible"
+    && parsed.data.apiFormat === "responses"
+    && parsed.data.providerMode === "auto"
+      ? "openai"
+      : parsed.data.providerMode;
+
   return {
     ...parsed.data,
     name: parsed.data.name.trim(),
     model: parsed.data.model.trim(),
     baseUrl: normalizeBaseUrl(parsed.data.baseUrl),
+    providerMode: normalizedProviderMode,
     apiKey: parsed.data.apiKey.trim(),
   };
 }
