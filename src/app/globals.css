@@ -614,6 +614,7 @@ p {
 }
 
 .sidebar-room-card {
+  position: relative;
   width: 100%;
   min-width: 0;
   overflow: hidden;
@@ -623,6 +624,58 @@ p {
   border-radius: 18px;
   background: rgba(255, 252, 247, 0.56);
   box-shadow: none;
+}
+
+.sidebar-room-card-link {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.sidebar-room-actions {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 2;
+}
+
+.sidebar-room-actions .mini-button {
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(255, 252, 247, 0.92);
+  box-shadow: 0 8px 18px rgba(24, 53, 49, 0.08);
+  backdrop-filter: blur(10px);
+  opacity: 0;
+  transform: translateY(6px) scale(0.96);
+  pointer-events: none;
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease,
+    border-color 180ms ease,
+    background 180ms ease,
+    color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.sidebar-room-card:hover .sidebar-room-actions .mini-button,
+.sidebar-room-card:focus-within .sidebar-room-actions .mini-button {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+  border-color: rgba(15, 135, 115, 0.24);
+  background: rgba(255, 252, 247, 0.98);
+  box-shadow: 0 12px 24px rgba(15, 135, 115, 0.14);
+}
+
+.sidebar-room-actions .mini-button:hover,
+.sidebar-room-actions .mini-button:focus-visible {
+  border-color: rgba(15, 135, 115, 0.34);
+  background: linear-gradient(135deg, rgba(15, 135, 115, 0.16), rgba(255, 252, 247, 0.96));
+  color: var(--accent-strong);
+  box-shadow: 0 14px 28px rgba(15, 135, 115, 0.18);
 }
 
 .sidebar-room-card.active {
