@@ -1,17 +1,27 @@
-import { buildSkillsPrompt, getWorkspaceSkillsByIds } from "./skills";
+import { buildProjectContextPrompt } from "./project-context";
+import { buildSkillsCatalogPrompt, getWorkspaceSkillsByIds } from "./skills";
 import { registerBeforePromptBuildHook } from "./runtime-hooks";
 
 registerBeforePromptBuildHook(async ({ settings }) => {
-  if (!settings.enabledSkillIds.length) {
-    return;
+  const appendBlocks: string[] = [];
+
+  if (settings.enabledSkillIds.length) {
+    const skills = await getWorkspaceSkillsByIds(settings.enabledSkillIds);
+    if (skills.length > 0) {
+      appendBlocks.push(buildSkillsCatalogPrompt(skills));
+    }
   }
 
-  const skills = await getWorkspaceSkillsByIds(settings.enabledSkillIds);
-  if (skills.length === 0) {
+  const projectContextPrompt = await buildProjectContextPrompt();
+  if (projectContextPrompt) {
+    appendBlocks.push(projectContextPrompt);
+  }
+
+  if (appendBlocks.length === 0) {
     return;
   }
 
   return {
-    appendSystemContext: buildSkillsPrompt(skills),
+    appendSystemContext: appendBlocks.join("\n\n"),
   };
 });

@@ -778,7 +778,7 @@ export function SettingsPage() {
                 </ul>
               </>
             ) : (
-              <p className="muted-copy top-gap">当前没有发现 `skills/*/SKILL.md`。你可以在项目根目录里新增技能文件夹来扩展 prompt。</p>
+              <p className="muted-copy top-gap">当前没有发现 `skills/*/SKILL.md`。你可以在项目根目录里新增技能文件夹；启用后它们会进入技能目录，模型命中时再按需读取。</p>
             )}
           </section>
         </article>

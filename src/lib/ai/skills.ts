@@ -1,15 +1,20 @@
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-export interface WorkspaceSkill {
+export interface WorkspaceSkillCatalogEntry {
   id: string;
   title: string;
   summary: string;
-  prompt: string;
   sourcePath: string;
 }
 
-const SKILLS_DIR = path.join(process.cwd(), "skills");
+export interface WorkspaceSkill extends WorkspaceSkillCatalogEntry {
+  prompt: string;
+}
+
+function getSkillsDir(): string {
+  return path.join(process.cwd(), "skills");
+}
 
 function slugToTitle(value: string): string {
   return value
@@ -39,35 +44,44 @@ function extractTitle(markdown: string, fallbackId: string): string {
 }
 
 export async function ensureWorkspaceSkillsDir(): Promise<void> {
-  await mkdir(SKILLS_DIR, { recursive: true });
+  await mkdir(getSkillsDir(), { recursive: true });
 }
 
-export async function listWorkspaceSkills(): Promise<WorkspaceSkill[]> {
+async function loadWorkspaceSkill(skillId: string): Promise<WorkspaceSkill | null> {
+  const trimmedId = skillId.trim();
+  if (!trimmedId) {
+    return null;
+  }
+
+  const sourcePath = path.join(getSkillsDir(), trimmedId, "SKILL.md");
+  const prompt = await readFile(sourcePath, "utf8").catch(() => "");
+  if (!prompt.trim()) {
+    return null;
+  }
+
+  const title = extractTitle(prompt, trimmedId);
+  return {
+    id: trimmedId,
+    title,
+    summary: extractSummary(prompt, `${title} skill`),
+    prompt: prompt.trim(),
+    sourcePath,
+  } satisfies WorkspaceSkill;
+}
+
+export async function listWorkspaceSkills(): Promise<WorkspaceSkillCatalogEntry[]> {
   await ensureWorkspaceSkillsDir();
-  const dirEntries = await readdir(SKILLS_DIR, { withFileTypes: true });
+  const dirEntries = await readdir(getSkillsDir(), { withFileTypes: true });
   const skills = await Promise.all(
     dirEntries
       .filter((entry) => entry.isDirectory())
-      .map(async (entry) => {
-        const skillId = entry.name;
-        const sourcePath = path.join(SKILLS_DIR, skillId, "SKILL.md");
-        const prompt = await readFile(sourcePath, "utf8").catch(() => "");
-        if (!prompt.trim()) {
-          return null;
-        }
-
-        const title = extractTitle(prompt, skillId);
-        return {
-          id: skillId,
-          title,
-          summary: extractSummary(prompt, `${title} skill`),
-          prompt: prompt.trim(),
-          sourcePath,
-        } satisfies WorkspaceSkill;
-      }),
+      .map(async (entry) => loadWorkspaceSkill(entry.name)),
   );
 
-  return skills.filter((skill): skill is WorkspaceSkill => Boolean(skill)).sort((left, right) => left.title.localeCompare(right.title));
+  return skills
+    .filter((skill): skill is WorkspaceSkill => Boolean(skill))
+    .map((skill) => toSkillCatalogEntry(skill))
+    .sort((left, right) => left.title.localeCompare(right.title));
 }
 
 export async function getWorkspaceSkillsByIds(skillIds: string[]): Promise<WorkspaceSkill[]> {
@@ -76,18 +90,49 @@ export async function getWorkspaceSkillsByIds(skillIds: string[]): Promise<Works
     return [];
   }
 
-  const skills = await listWorkspaceSkills();
-  const byId = new Map(skills.map((skill) => [skill.id, skill]));
-  return normalizedIds.flatMap((skillId) => (byId.get(skillId) ? [byId.get(skillId)!] : []));
+  const skills = await Promise.all(normalizedIds.map((skillId) => loadWorkspaceSkill(skillId)));
+  return skills.filter((skill): skill is WorkspaceSkill => Boolean(skill));
 }
 
-export function buildSkillsPrompt(skills: WorkspaceSkill[]): string {
+export async function getWorkspaceSkillById(skillId: string): Promise<WorkspaceSkill | null> {
+  return loadWorkspaceSkill(skillId);
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function toSkillCatalogEntry(skill: WorkspaceSkill): WorkspaceSkillCatalogEntry {
+  return {
+    id: skill.id,
+    title: skill.title,
+    summary: skill.summary,
+    sourcePath: skill.sourcePath,
+  };
+}
+
+export function buildSkillsCatalogPrompt(skills: WorkspaceSkillCatalogEntry[]): string {
   if (skills.length === 0) {
     return "";
   }
 
   return [
     "Enabled workspace skills:",
-    ...skills.map((skill) => `## ${skill.title}\nSource: skills/${skill.id}/SKILL.md\n\n${skill.prompt}`),
+    "Review this catalog before replying. Read a skill only when one entry clearly matches the task.",
+    "<available_skills>",
+    ...skills.flatMap((skill) => [
+      "  <skill>",
+      `    <id>${escapeXml(skill.id)}</id>`,
+      `    <title>${escapeXml(skill.title)}</title>`,
+      `    <summary>${escapeXml(skill.summary)}</summary>`,
+      `    <source>${escapeXml(`skills/${skill.id}/SKILL.md`)}</source>`,
+      "  </skill>",
+    ]),
+    "</available_skills>",
   ].join("\n\n");
 }
