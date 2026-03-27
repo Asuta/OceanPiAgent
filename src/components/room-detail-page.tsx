@@ -262,9 +262,11 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const [uploadError, setUploadError] = useState("");
   const [isUploadingImages, setIsUploadingImages] = useState(false);
   const [titleDraftByRoomId, setTitleDraftByRoomId] = useState<Record<string, string>>({});
+  const [showStarterPrompts, setShowStarterPrompts] = useState(false);
   const threadListRef = useRef<HTMLDivElement | null>(null);
   const workbenchBodyRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const stickThreadToBottomRef = useRef(true);
   const lastThreadRoomIdRef = useRef<string | null>(null);
 
@@ -274,6 +276,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     setPendingAttachments([]);
     setUploadError("");
     setIsUploadingImages(false);
+    setShowStarterPrompts(false);
     if (imageInputRef.current) {
       imageInputRef.current.value = "";
     }
@@ -449,6 +452,16 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     const turns = consoleScope === "room" ? roomTurns : (consoleAgentState?.agentTurns ?? []);
     return [...turns].sort((left, right) => getSortableTime(left.userMessage.createdAt) - getSortableTime(right.userMessage.createdAt));
   }, [consoleAgentState?.agentTurns, consoleScope, roomTurns]);
+
+  useLayoutEffect(() => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "0px";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
+  }, [room?.id, roomDraft]);
   const consoleTurnGroups = useMemo(() => {
     if (!room) {
       return [] as Array<{ roomId: string; roomTitle: string; turns: typeof visibleConsoleTurns }>;
@@ -863,57 +876,93 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
           </div>
 
           <form
-            className="composer-card"
+            className="composer-card compact-composer"
             onSubmit={(event) => {
               event.preventDefault();
               void submitMessage();
             }}
           >
-            <div className="composer-topline">
-              <label className="field-block inline-field compact-width" htmlFor="room-sender-select">
-                <span>发送身份</span>
-                <select
-                  id="room-sender-select"
-                  className="text-input"
-                  value={selectedSender?.id ?? ""}
-                  onChange={(event) => setSelectedSender(room.id, event.target.value)}
-                  disabled={availableSenders.length === 0 || isRunning}
+            <div className="composer-toolbar">
+              <div className="composer-tool-group">
+                <label className="field-block inline-field compact-width composer-inline-field" htmlFor="room-sender-select">
+                  <span className="composer-inline-label">发送身份</span>
+                  <select
+                    id="room-sender-select"
+                    className="text-input composer-select"
+                    value={selectedSender?.id ?? ""}
+                    onChange={(event) => setSelectedSender(room.id, event.target.value)}
+                    disabled={availableSenders.length === 0 || isRunning}
+                  >
+                    {availableSenders.map((participant) => (
+                      <option key={participant.id} value={participant.id}>
+                        {participant.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept={ALLOWED_MESSAGE_IMAGE_MIME_TYPES.join(",")}
+                  multiple
+                  hidden
+                  onChange={handleImageSelection}
+                  disabled={isRunning || isUploadingImages || pendingAttachments.length >= MAX_MESSAGE_IMAGE_ATTACHMENTS}
+                />
+                <button
+                  type="button"
+                  className="secondary-button composer-toolbar-button"
+                  onClick={() => imageInputRef.current?.click()}
+                  disabled={isRunning || isUploadingImages || pendingAttachments.length >= MAX_MESSAGE_IMAGE_ATTACHMENTS}
+                  title={`最多 ${MAX_MESSAGE_IMAGE_ATTACHMENTS} 张，支持 PNG / JPEG / WebP，单张不超过 ${Math.floor(MAX_MESSAGE_IMAGE_BYTES / (1024 * 1024))} MB，也可直接粘贴截图。`}
                 >
-                  {availableSenders.map((participant) => (
-                    <option key={participant.id} value={participant.id}>
-                      {participant.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="composer-note">按 Enter 发送，Shift + Enter 换行。</div>
+                  {isUploadingImages ? "上传中..." : pendingAttachments.length > 0 ? `图片 ${pendingAttachments.length}` : "图片"}
+                </button>
+
+                {room.roomMessages.length > 0 ? (
+                  <button
+                    type="button"
+                    className="ghost-button composer-toolbar-button"
+                    onClick={() => setShowStarterPrompts((current) => !current)}
+                    aria-expanded={showStarterPrompts}
+                  >
+                    {showStarterPrompts ? "收起灵感" : "灵感"}
+                  </button>
+                ) : null}
+              </div>
+
+              <div className="composer-action-cluster">
+                <span className={`thread-status ${isRunning ? "running" : "idle"}`}>
+                  {isUploadingImages ? "图片上传中" : isRunning ? "Agent 处理中" : canSend ? "可发送" : "待输入"}
+                </span>
+                <button type="submit" className="primary-button composer-send-button" disabled={!canSend}>
+                  发送
+                </button>
+              </div>
             </div>
 
-            <div className="composer-upload-row">
-              <input
-                ref={imageInputRef}
-                type="file"
-                accept={ALLOWED_MESSAGE_IMAGE_MIME_TYPES.join(",")}
-                multiple
-                hidden
-                onChange={handleImageSelection}
-                disabled={isRunning || isUploadingImages || pendingAttachments.length >= MAX_MESSAGE_IMAGE_ATTACHMENTS}
+            <div className="composer-input-shell">
+              <textarea
+                ref={composerTextareaRef}
+                id="room-draft"
+                name="draft"
+                className="text-area composer-textarea"
+                value={roomDraft}
+                onChange={(event) => setDraft(room.id, event.target.value)}
+                onPaste={handleComposerPaste}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void submitMessage();
+                  }
+                }}
+                placeholder="输入新的房间消息，Enter 发送，Shift + Enter 换行，支持粘贴截图..."
               />
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => imageInputRef.current?.click()}
-                disabled={isRunning || isUploadingImages || pendingAttachments.length >= MAX_MESSAGE_IMAGE_ATTACHMENTS}
-              >
-                {isUploadingImages ? "上传中..." : "添加图片"}
-              </button>
-              <span className="composer-note">
-                最多 {MAX_MESSAGE_IMAGE_ATTACHMENTS} 张，支持 PNG / JPEG / WebP，单张不超过 {Math.floor(MAX_MESSAGE_IMAGE_BYTES / (1024 * 1024))} MB，也可直接粘贴截图。
-              </span>
             </div>
 
             {pendingAttachments.length > 0 ? (
-              <div className="composer-attachment-list">
+              <div className="composer-attachment-list compact">
                 {pendingAttachments.map((attachment) => (
                   <div key={attachment.id} className="composer-attachment-chip">
                     <Image
@@ -933,27 +982,8 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               </div>
             ) : null}
 
-            <textarea
-              id="room-draft"
-              name="draft"
-              className="text-area"
-              value={roomDraft}
-              onChange={(event) => setDraft(room.id, event.target.value)}
-              onPaste={handleComposerPaste}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void submitMessage();
-                }
-              }}
-              placeholder="输入新的房间消息，或只发送图片..."
-            />
-
-            {room.error ? <p className="error-text">{room.error}</p> : null}
-            {uploadError ? <p className="error-text">{uploadError}</p> : null}
-
-            {room.roomMessages.length > 0 ? (
-              <div className="quick-reply-row">
+            {room.roomMessages.length > 0 && showStarterPrompts ? (
+              <div className="quick-reply-row composer-quick-reply-row">
                 {STARTER_PROMPTS.map((prompt) => (
                   <button key={prompt} type="button" className="starter-prompt compact" onClick={() => setDraft(room.id, prompt)}>
                     {prompt}
@@ -962,19 +992,20 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               </div>
             ) : null}
 
-            <div className="composer-actions">
+            {room.error ? <p className="error-text">{room.error}</p> : null}
+            {uploadError ? <p className="error-text">{uploadError}</p> : null}
+
+            <div className="composer-footnote-row">
               <span className="composer-note">
                 {isUploadingImages
                   ? "图片上传完成后即可发送。"
                   : isRunning
-                  ? "当前 Agent 正在处理中；发送新消息会接管当前轮询。"
+                  ? "发送新消息会接管当前轮询。"
                   : localParticipantMissing
                     ? "你当前不在成员列表里；发送消息会自动重新加入。"
-                    : "房间状态现在会同步到服务端；本地仍保留一份缓存副本。"}
+                    : "房间状态会同步到服务端，本地仍保留缓存副本。"}
               </span>
-              <button type="submit" className="primary-button" disabled={!canSend}>
-                发送消息
-              </button>
+              <span className="composer-note">最多 {MAX_MESSAGE_IMAGE_ATTACHMENTS} 张图片，可直接粘贴截图。</span>
             </div>
           </form>
         </section>

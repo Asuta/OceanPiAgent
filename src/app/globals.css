@@ -1346,6 +1346,74 @@ p {
   background: var(--panel-solid);
 }
 
+.compact-composer {
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.composer-toolbar,
+.composer-tool-group,
+.composer-action-cluster,
+.composer-footnote-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.composer-toolbar,
+.composer-footnote-row {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.composer-tool-group,
+.composer-action-cluster {
+  align-items: center;
+}
+
+.composer-inline-field {
+  gap: 4px;
+}
+
+.composer-inline-label {
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.composer-select {
+  min-width: 136px;
+  padding: 9px 34px 9px 12px;
+}
+
+.composer-toolbar-button,
+.composer-send-button {
+  min-height: 40px;
+}
+
+.composer-toolbar-button {
+  padding: 9px 12px;
+}
+
+.composer-send-button {
+  padding: 10px 16px;
+}
+
+.composer-input-shell {
+  position: relative;
+}
+
+.composer-textarea {
+  min-height: 76px;
+  max-height: 220px;
+  padding: 12px 14px;
+  line-height: 1.55;
+  resize: none;
+  overflow: hidden;
+}
+
 .composer-upload-row {
   display: flex;
   flex-wrap: wrap;
@@ -1356,6 +1424,10 @@ p {
 .composer-attachment-list {
   display: grid;
   gap: 10px;
+}
+
+.composer-attachment-list.compact {
+  gap: 8px;
 }
 
 .composer-attachment-chip {
@@ -1392,8 +1464,12 @@ p {
   box-shadow: 0 -12px 24px rgba(24, 53, 49, 0.06);
 }
 
-.room-chat-shell .text-area {
-  min-height: 110px;
+.room-chat-shell .compact-composer {
+  padding: 10px 12px;
+}
+
+.room-chat-shell .composer-textarea {
+  min-height: 72px;
   max-height: 28vh;
 }
 
@@ -1432,6 +1508,10 @@ p {
 
 .quick-reply-row {
   padding-top: 2px;
+}
+
+.composer-quick-reply-row {
+  padding-top: 0;
 }
 
 .field-block {
@@ -1900,6 +1980,8 @@ p {
   .inline-action-row.stretch,
   .composer-topline,
   .composer-actions,
+  .composer-toolbar,
+  .composer-footnote-row,
   .section-heading-row,
   .settings-card-header,
   .trace-card summary,
@@ -1949,6 +2031,19 @@ p {
   .quick-reply-row,
   .launch-grid {
     flex-direction: column;
+  }
+
+  .composer-tool-group,
+  .composer-action-cluster {
+    width: 100%;
+  }
+
+  .composer-action-cluster {
+    justify-content: space-between;
+  }
+
+  .composer-send-button {
+    margin-left: auto;
   }
 
   .hero-copy h1,
