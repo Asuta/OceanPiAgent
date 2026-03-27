@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -32,6 +32,8 @@ test("tool registries expose the bash tool", () => {
 
   assert(chatTools.some((tool) => tool.function.name === "bash"));
   assert(responseTools.some((tool) => tool.name === "bash"));
+  assert(chatTools.some((tool) => tool.function.name === "skill_read"));
+  assert(responseTools.some((tool) => tool.name === "project_context_read"));
 });
 
 test("executeTool runs bash commands in the requested cwd", async () => {
@@ -97,4 +99,56 @@ test("executeTool reports timed out bash commands with details", async () => {
   assert.equal(result.event.details?.timedOut, true);
   assert.equal(result.event.details?.exitCode, null);
   assert.match(result.output, /Timed out after: 1000ms/);
+});
+
+test("executeTool reads a workspace skill by id", async () => {
+  await withTempCwd(async (tempDir) => {
+    await mkdir(path.join(tempDir, "skills", "alpha-skill"), { recursive: true });
+    await writeFile(
+      path.join(tempDir, "skills", "alpha-skill", "SKILL.md"),
+      "---\nname: alpha-skill\ndescription: Use when precision matters most.\n---\n\n# Alpha Skill\n\nBody-only guidance lives here.\n",
+      "utf8",
+    );
+
+    const result = await executeTool("skill_read", { skillId: "alpha-skill" });
+
+    assert.equal(result.event.status, "success");
+    assert.match(result.output, /"id": "alpha-skill"/);
+    assert.match(result.output, /"name": "alpha-skill"/);
+    assert.match(result.output, /Use when precision matters most\./);
+    assert.match(result.output, /Body-only guidance lives here\./);
+    assert.doesNotMatch(result.output, /---/);
+  });
+});
+
+test("executeTool lists and reads project context files", async () => {
+  await withTempCwd(async (tempDir) => {
+    await writeFile(
+      path.join(tempDir, "PROJECT_CONTEXT.md"),
+      "# Project Context\n\nUse project notes first.\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(tempDir, "AGENTS.md"),
+      "# Agent Rules\n\nKeep room output explicit.\n",
+      "utf8",
+    );
+    await mkdir(path.join(tempDir, "docs"), { recursive: true });
+    await writeFile(
+      path.join(tempDir, "docs", "README.md"),
+      "# Docs\n\nDetailed runtime notes live here.\n",
+      "utf8",
+    );
+
+    const listResult = await executeTool("project_context_list", {});
+    const readResult = await executeTool("project_context_read", { path: "PROJECT_CONTEXT.md" });
+
+    assert.equal(listResult.event.status, "success");
+    assert.match(listResult.output, /AGENTS\.md/);
+    assert.match(listResult.output, /PROJECT_CONTEXT\.md/);
+    assert.match(listResult.output, /docs\/README\.md/);
+
+    assert.equal(readResult.event.status, "success");
+    assert.match(readResult.output, /Use project notes first\./);
+  });
 });

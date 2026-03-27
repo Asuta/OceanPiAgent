@@ -114,6 +114,36 @@ function buildBaseTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
       scope,
       roomToolContext,
     }),
+    createPiTool({
+      name: "skill_read",
+      label: "Skill Read",
+      description: "Read the full SKILL.md for one enabled workspace skill after the injected catalog shows it is the best match.",
+      parameters: Type.Object({
+        skillId: Type.String({ description: "The skill id from the injected skill catalog." }),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "project_context_list",
+      label: "Project Context List",
+      description: "List local project guidance files available for architecture, workflow, and configuration context.",
+      parameters: Type.Object({}),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "project_context_read",
+      label: "Project Context Read",
+      description: "Read one approved local project context file in focused line ranges.",
+      parameters: Type.Object({
+        path: Type.String({ description: "Relative path from project_context_list." }),
+        fromLine: Type.Optional(Type.Integer({ description: "Optional 1-based starting line number." })),
+        lineCount: Type.Optional(Type.Integer({ description: "Optional number of lines to read." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
   ];
 }
 

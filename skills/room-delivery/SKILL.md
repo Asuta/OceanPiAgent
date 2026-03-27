@@ -1,3 +1,8 @@
+---
+name: room-delivery
+description: Use when the task depends on sending clean, intentional messages back into a room.
+---
+
 # Room Delivery Discipline
 
 Use this skill when the task depends on sending clean, intentional messages back into a room.

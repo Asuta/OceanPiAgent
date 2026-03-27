@@ -22,6 +22,9 @@ export type ToolName =
   | "bash"
   | "web_fetch"
   | "custom_command"
+  | "skill_read"
+  | "project_context_list"
+  | "project_context_read"
   | "send_message_to_room"
   | "read_no_reply"
   | "list_attached_rooms"
@@ -135,6 +138,20 @@ export const customCommandArgsSchema = z.object({
   timezone: optionalTrimmedString(120),
   topic: optionalTrimmedString(200),
 });
+
+export const skillReadArgsSchema = z
+  .object({
+    skillId: z.string().trim().min(1).max(120),
+  })
+  .strict();
+
+export const projectContextReadArgsSchema = z
+  .object({
+    path: z.string().trim().min(1).max(240),
+    fromLine: z.number().int().min(1).optional(),
+    lineCount: z.number().int().min(1).max(400).optional().default(200),
+  })
+  .strict();
 
 export const roomMessageArgsSchema = z.object({
   roomId: z.string().trim().min(1).max(120),

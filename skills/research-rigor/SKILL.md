@@ -1,3 +1,8 @@
+---
+name: research-rigor
+description: Use when the agent is investigating, verifying, or comparing information.
+---
+
 # Research Rigor
 
 Use this skill when the agent is investigating, verifying, or comparing information.
