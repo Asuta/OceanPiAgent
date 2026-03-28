@@ -808,6 +808,36 @@ function normalizeToolExecutionDetails(value: unknown): ToolExecution["details"]
   return Object.keys(details).length > 0 ? details : undefined;
 }
 
+function normalizeTurnTimelineEvent(value: unknown, index: number): NonNullable<AgentRoomTurn["timeline"]>[number] | null {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return null;
+  }
+
+  const id = typeof value.id === "string" && value.id ? value.id : createUuid();
+  const sequence = typeof value.sequence === "number" && Number.isFinite(value.sequence) ? Math.max(1, Math.round(value.sequence)) : index + 1;
+
+  if (value.type === "tool" && typeof value.toolId === "string" && value.toolId) {
+    return {
+      id,
+      sequence,
+      type: "tool",
+      toolId: value.toolId,
+    };
+  }
+
+  if (value.type === "room-message" && typeof value.messageId === "string" && value.messageId && typeof value.roomId === "string" && value.roomId) {
+    return {
+      id,
+      sequence,
+      type: "room-message",
+      messageId: value.messageId,
+      roomId: value.roomId,
+    };
+  }
+
+  return null;
+}
+
 function normalizeCompatibility(value: unknown): ProviderCompatibility | null {
   if (!isRecord(value) || typeof value.providerLabel !== "string" || typeof value.baseUrl !== "string") {
     return null;
@@ -1335,6 +1365,12 @@ function normalizeAgentTurn(value: unknown, fallbackAgentId: RoomAgentId): Agent
         .map((tool, index) => normalizeToolExecution(tool, index))
         .filter((tool): tool is ToolExecution => Boolean(tool))
     : [];
+  const timeline = Array.isArray(value.timeline)
+    ? value.timeline
+        .map((event, index) => normalizeTurnTimelineEvent(event, index))
+        .filter((event): event is NonNullable<AgentRoomTurn["timeline"]>[number] => Boolean(event))
+        .sort((left, right) => left.sequence - right.sequence)
+    : [];
 
   return {
     id: typeof value.id === "string" && value.id ? value.id : createUuid(),
@@ -1355,12 +1391,22 @@ function normalizeAgentTurn(value: unknown, fallbackAgentId: RoomAgentId): Agent
       receiptStatus: userMessage.receiptStatus,
       receiptUpdatedAt: userMessage.receiptUpdatedAt,
     },
+    ...(typeof value.anchorMessageId === "string" && value.anchorMessageId
+      ? {
+          anchorMessageId: value.anchorMessageId,
+        }
+      : {}),
     ...(typeof value.continuationSnapshot === "string" && value.continuationSnapshot
       ? {
           continuationSnapshot: value.continuationSnapshot,
         }
       : {}),
     assistantContent: typeof value.assistantContent === "string" ? value.assistantContent : "",
+    ...(timeline.length > 0
+      ? {
+          timeline,
+        }
+      : {}),
     tools,
     emittedMessages,
     status: isAgentTurnStatus(value.status) ? value.status : "completed",

@@ -22,6 +22,7 @@ export function useRoomScheduler(args: {
     roomId: string;
     agentId: RoomAgentId;
     inputMessage: RoomMessage;
+    anchorMessageId?: string;
     runRequestId?: string;
   }) => Promise<ExecuteAgentTurnResult>;
   defaultAgentId: RoomAgentId;
@@ -228,6 +229,7 @@ export function useRoomScheduler(args: {
           roomId,
           agentId: nextParticipant.agentId ?? defaultAgentId,
           inputMessage: schedulerPacket,
+          anchorMessageId: visibleTargetMessages[visibleTargetMessages.length - 1]?.id,
           runRequestId: requestId,
         });
 

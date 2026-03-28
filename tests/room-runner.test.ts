@@ -178,6 +178,10 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
     assert.equal(result.roomActions.length, 1);
     assert.equal(result.turn.userMessage.receiptStatus, "read_no_reply");
     assert.equal(result.turn.userMessage.receipts.length, 1);
+    assert.deepEqual(
+      result.turn.timeline?.map((event) => event.type),
+      ["tool", "room-message", "tool"],
+    );
 
     await resetAgentRoomSession("concierge");
   });

@@ -303,6 +303,21 @@ export interface ToolExecution {
   roomAction?: RoomToolActionUnion;
 }
 
+export type TurnTimelineEvent =
+  | {
+      id: string;
+      sequence: number;
+      type: "tool";
+      toolId: string;
+    }
+  | {
+      id: string;
+      sequence: number;
+      type: "room-message";
+      messageId: string;
+      roomId: string;
+    };
+
 export interface EmptyCompletionDiagnostic {
   createdAt: string;
   apiFormat: ApiFormat;
@@ -474,8 +489,10 @@ export interface AgentRoomTurn {
   id: string;
   agent: RoomAgentSnapshot;
   userMessage: RoomMessage;
+  anchorMessageId?: string;
   continuationSnapshot?: string;
   assistantContent: string;
+  timeline?: TurnTimelineEvent[];
   tools: ToolExecution[];
   emittedMessages: RoomMessage[];
   status: AgentTurnStatus;

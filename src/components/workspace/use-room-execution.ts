@@ -14,6 +14,7 @@ import type {
   RoomMessageReceiptUpdate,
   RoomSession,
   RoomToolActionUnion,
+  TurnTimelineEvent,
 } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 import {
@@ -44,6 +45,13 @@ function updateTurn(
   updater: (turn: AgentRoomTurn) => AgentRoomTurn,
 ): AgentRoomTurn[] {
   return turns.map((turn) => (turn.id === turnId ? updater(turn) : turn));
+}
+
+function appendTimelineEvent(turn: AgentRoomTurn, event: TurnTimelineEvent): AgentRoomTurn {
+  return {
+    ...turn,
+    timeline: [...(turn.timeline ?? []), event],
+  };
 }
 
 export function appendMissingMatchingRoomMessages(room: RoomSession, messages: RoomMessage[]): RoomSession {
@@ -192,7 +200,12 @@ export function useRoomExecution(args: {
         onTool: (tool) => {
           updateAgentTurns(agentId, (turns) =>
             updateTurn(turns, turnId, (turn) => ({
-              ...turn,
+              ...appendTimelineEvent(turn, {
+                id: `tool:${tool.id}`,
+                sequence: (turn.timeline?.length ?? 0) + 1,
+                type: "tool",
+                toolId: tool.id,
+              }),
               tools: [...turn.tools, tool],
             })),
           );
@@ -206,7 +219,13 @@ export function useRoomExecution(args: {
 
           updateAgentTurns(agentId, (turns) =>
             updateTurn(turns, turnId, (turn) => ({
-              ...turn,
+              ...appendTimelineEvent(turn, {
+                id: `room-message:${message.id}`,
+                sequence: (turn.timeline?.length ?? 0) + 1,
+                type: "room-message",
+                messageId: message.id,
+                roomId: message.roomId,
+              }),
               emittedMessages: [...turn.emittedMessages, message],
             })),
           );
@@ -245,6 +264,8 @@ export function useRoomExecution(args: {
             updateTurn(turns, turnId, (turn) => ({
               ...event.turn,
               id: turnId,
+              anchorMessageId: event.turn.anchorMessageId ?? turn.anchorMessageId,
+              timeline: event.turn.timeline ?? turn.timeline ?? [],
               ...(turn.continuationSnapshot ? { continuationSnapshot: turn.continuationSnapshot } : {}),
             })),
           );
@@ -289,6 +310,7 @@ export function useRoomExecution(args: {
       roomId: string;
       agentId: RoomAgentId;
       inputMessage: RoomMessage;
+      anchorMessageId?: string;
       runRequestId?: string;
     }): Promise<ExecuteAgentTurnResult> => {
       const roomSnapshot = roomsRef.current.find((room) => room.id === params.roomId);
@@ -306,7 +328,9 @@ export function useRoomExecution(args: {
           label: agent.label,
         },
         userMessage: params.inputMessage,
+        ...(params.anchorMessageId ? { anchorMessageId: params.anchorMessageId } : {}),
         assistantContent: "",
+        timeline: [],
         tools: [],
         emittedMessages: [],
         status: "running",
@@ -360,6 +384,7 @@ export function useRoomExecution(args: {
             attachedRooms: getAttachedRoomsForAgent(agent.id, params.roomId, roomTitle),
             knownAgents: getKnownAgentsForToolContext(),
             roomHistoryById: getRoomHistoryByIdForAgent(agent.id),
+            ...(params.anchorMessageId ? { anchorMessageId: params.anchorMessageId } : {}),
             agent: {
               id: agent.id,
               label: agent.label,
@@ -430,6 +455,8 @@ export function useRoomExecution(args: {
             updateTurn(turns, pendingTurn.id, (turn) => ({
               ...payload.turn,
               id: pendingTurn.id,
+              anchorMessageId: payload.turn.anchorMessageId ?? turn.anchorMessageId,
+              timeline: payload.turn.timeline ?? turn.timeline ?? [],
               ...(turn.continuationSnapshot ? { continuationSnapshot: turn.continuationSnapshot } : {}),
             })),
           );
