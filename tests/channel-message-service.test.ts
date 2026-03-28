@@ -3,9 +3,10 @@ import test from "node:test";
 import { ROOM_AGENTS } from "@/lib/chat/catalog";
 import { createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
 import type { MessageImageAttachment } from "@/lib/chat/types";
-import type { ChannelBinding, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
+import type { ChannelBinding, ChannelMessageLink, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
 import { resetChannelDeliveryStateForTest } from "@/lib/server/channel-delivery-queue";
 import { receiveExternalMessage } from "@/lib/server/channel-message-service";
+import type { RunRoomTurnResult } from "@/lib/server/room-runner";
 
 const COMPATIBILITY = {
   providerKey: "generic" as const,
@@ -27,12 +28,34 @@ const SAMPLE_ATTACHMENT: MessageImageAttachment = {
   url: "/api/uploads/image/images/feishu.jpg",
 };
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitFor(predicate: () => boolean, attempts = 100): Promise<void> {
+  for (let index = 0; index < attempts; index += 1) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 test("receiveExternalMessage creates a bound room and delivers emitted replies", async () => {
   await resetChannelDeliveryStateForTest();
 
   let state = createDefaultWorkspaceState();
   let binding: ChannelBinding | null = null;
   let capturedBinding: ChannelBinding | undefined;
+  let ackReactionApplied = false;
+  let doneReactionApplied = false;
+  let messageLink = null as null | { externalMessageId: string; roomMessageId: string };
   const outboundMessages: ExternalOutboundMessage[] = [];
 
   const result = await receiveExternalMessage(
@@ -72,6 +95,34 @@ test("receiveExternalMessage creates a bound room and delivers emitted replies",
         };
         capturedBinding = binding;
         return binding;
+      },
+      findChannelMessageLink: async () => null,
+      upsertChannelMessageLink: async (nextLink: ChannelMessageLink) => {
+        messageLink = {
+          externalMessageId: nextLink.externalMessageId,
+          roomMessageId: nextLink.roomMessageId,
+        };
+        return nextLink;
+      },
+      applyFeishuAckReaction: async (link) => {
+        ackReactionApplied = true;
+        return {
+          ...link,
+          ackReaction: {
+            emojiType: "OK",
+            appliedAt: "2026-03-27T10:00:30.000Z",
+          },
+        };
+      },
+      applyFeishuDoneReaction: async (link) => {
+        doneReactionApplied = true;
+        return {
+          ...link,
+          doneReaction: {
+            emojiType: "DONE",
+            appliedAt: "2026-03-27T10:00:31.000Z",
+          },
+        };
       },
       listAgentDefinitions: async () => ROOM_AGENTS,
       runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => ({
@@ -125,6 +176,9 @@ test("receiveExternalMessage creates a bound room and delivers emitted replies",
   assert.equal(createdBinding.peerId, "ou_123");
   assert.equal(outboundMessages.length, 1);
   assert.equal(outboundMessages[0]?.content, "Visible Feishu reply");
+  assert.equal(ackReactionApplied, true);
+  assert.equal(doneReactionApplied, false);
+  assert.equal(messageLink?.externalMessageId, "msg-1");
 
   const feishuRoom = state.rooms.find((room) => room.id === createdBinding.roomId);
   assert.ok(feishuRoom);
@@ -178,6 +232,10 @@ test("receiveExternalMessage deduplicates repeated inbound message ids", async (
       return nextBinding;
     },
     touchChannelBinding: async () => binding,
+    findChannelMessageLink: async () => null,
+    upsertChannelMessageLink: async (nextLink: ChannelMessageLink) => nextLink,
+    applyFeishuAckReaction: async (link: ChannelMessageLink) => link,
+    applyFeishuDoneReaction: async (link: ChannelMessageLink) => link,
     listAgentDefinitions: async () => ROOM_AGENTS,
     runRoomTurnNonStreaming: async () => {
       runCount += 1;
@@ -217,6 +275,8 @@ test("receiveExternalMessage preserves inbound Feishu image attachments", async 
 
   let state = createDefaultWorkspaceState();
   let binding: ChannelBinding | null = null;
+  let ackReactionApplied = false;
+  let doneReactionApplied = false;
 
   await receiveExternalMessage(
     {
@@ -244,6 +304,16 @@ test("receiveExternalMessage preserves inbound Feishu image attachments", async 
         return nextBinding;
       },
       touchChannelBinding: async () => binding,
+      findChannelMessageLink: async () => null,
+      upsertChannelMessageLink: async (nextLink: ChannelMessageLink) => nextLink,
+      applyFeishuAckReaction: async (link) => {
+        ackReactionApplied = true;
+        return link;
+      },
+      applyFeishuDoneReaction: async (link) => {
+        doneReactionApplied = true;
+        return link;
+      },
       listAgentDefinitions: async () => ROOM_AGENTS,
       runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => ({
         turn: {
@@ -278,4 +348,279 @@ test("receiveExternalMessage preserves inbound Feishu image attachments", async 
   assert.ok(inboundMessage);
   assert.equal(inboundMessage?.attachments.length, 1);
   assert.equal(inboundMessage?.attachments[0]?.filename, "feishu.jpg");
+  assert.equal(ackReactionApplied, true);
+  assert.equal(doneReactionApplied, false);
+});
+
+test("receiveExternalMessage applies DONE reaction only for read-no-reply", async () => {
+  await resetChannelDeliveryStateForTest();
+
+  let state = createDefaultWorkspaceState();
+  let binding: ChannelBinding | null = null;
+  let ackReactionApplied = false;
+  let doneReactionApplied = false;
+
+  await receiveExternalMessage(
+    {
+      channel: "feishu",
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "ou_done",
+      senderId: "ou_done",
+      senderName: "Quiet User",
+      messageId: "msg-done-1",
+      messageType: "text",
+      text: "ok",
+      attachments: [],
+      agentId: "concierge",
+    },
+    {
+      loadWorkspaceEnvelope: async () => ({ version: 1, updatedAt: new Date().toISOString(), state }),
+      mutateWorkspace: async (mutator) => {
+        state = await mutator(state);
+        return { version: 1, updatedAt: new Date().toISOString(), state };
+      },
+      findChannelBinding: async () => binding,
+      upsertChannelBinding: async (nextBinding) => {
+        binding = nextBinding;
+        return nextBinding;
+      },
+      touchChannelBinding: async () => binding,
+      findChannelMessageLink: async () => null,
+      upsertChannelMessageLink: async (nextLink: ChannelMessageLink) => nextLink,
+      applyFeishuAckReaction: async (link) => {
+        ackReactionApplied = true;
+        return link;
+      },
+      applyFeishuDoneReaction: async (link) => {
+        doneReactionApplied = true;
+        return link;
+      },
+      listAgentDefinitions: async () => ROOM_AGENTS,
+      runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => ({
+        turn: {
+          id: "turn-done-1",
+          agent: {
+            id: agentId,
+            label: "Harbor Concierge",
+          },
+          userMessage: {
+            ...createRoomMessage(roomId, "user", message.content, "user", { sender: message.sender }),
+            id: message.id,
+          },
+          assistantContent: "",
+          tools: [],
+          emittedMessages: [],
+          status: "completed",
+          resolvedModel: "generic/fake-model",
+        },
+        resolvedModel: "generic/fake-model",
+        compatibility: COMPATIBILITY,
+        emittedMessages: [],
+        receiptUpdates: [],
+        roomActions: [{ type: "read_no_reply", roomId, messageId: message.id }],
+      }),
+      deliverMessages: async () => {},
+    },
+  );
+
+  assert.equal(ackReactionApplied, true);
+  assert.equal(doneReactionApplied, true);
+});
+
+test("receiveExternalMessage appends newer Feishu messages immediately and skips superseded results", async () => {
+  await resetChannelDeliveryStateForTest();
+
+  let state = createDefaultWorkspaceState();
+  let binding: ChannelBinding | null = null;
+  const firstDeferred = createDeferred<RunRoomTurnResult>();
+  const runOrder: string[] = [];
+  const outboundMessages: ExternalOutboundMessage[] = [];
+
+  const baseDeps = {
+    loadWorkspaceEnvelope: async () => ({ version: 1, updatedAt: new Date().toISOString(), state }),
+    mutateWorkspace: async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+      state = await mutator(state);
+      return { version: 1, updatedAt: new Date().toISOString(), state };
+    },
+    findChannelBinding: async () => binding,
+    upsertChannelBinding: async (nextBinding: ChannelBinding) => {
+      binding = nextBinding;
+      return nextBinding;
+    },
+    touchChannelBinding: async () => binding,
+    findChannelMessageLink: async () => null,
+    upsertChannelMessageLink: async (nextLink: ChannelMessageLink) => nextLink,
+    applyFeishuAckReaction: async (link: ChannelMessageLink) => link,
+    applyFeishuDoneReaction: async (link: ChannelMessageLink) => link,
+    listAgentDefinitions: async () => ROOM_AGENTS,
+    deliverMessages: async (messages: ExternalOutboundMessage[]) => {
+      outboundMessages.push(...messages);
+    },
+  };
+
+  const firstRunPromise = receiveExternalMessage(
+    {
+      channel: "feishu",
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "ou_interrupt",
+      senderId: "ou_interrupt",
+      senderName: "Interrupt User",
+      messageId: "msg-interrupt-1",
+      messageType: "text",
+      text: "Keep working",
+      attachments: [],
+      agentId: "concierge",
+    },
+    {
+      ...baseDeps,
+      runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => {
+        runOrder.push(message.id);
+        if (message.id === "feishu:default:msg-interrupt-1") {
+          const result = await firstDeferred.promise;
+          return result as never;
+        }
+        return {
+          turn: {
+            id: "turn-interrupt-2",
+            agent: {
+              id: agentId,
+              label: "Harbor Concierge",
+            },
+            userMessage: {
+              ...createRoomMessage(roomId, "user", message.content, "user", { sender: message.sender }),
+              id: message.id,
+            },
+            assistantContent: "Stopped the previous task.",
+            tools: [],
+            emittedMessages: [
+              createRoomMessage(roomId, "assistant", "Stopped the previous task.", "agent_emit", {
+                sender: {
+                  id: agentId,
+                  name: "Harbor Concierge",
+                  role: "participant",
+                },
+              }),
+            ],
+            status: "completed",
+            resolvedModel: "generic/fake-model",
+          },
+          resolvedModel: "generic/fake-model",
+          compatibility: COMPATIBILITY,
+          emittedMessages: [
+            createRoomMessage(roomId, "assistant", "Stopped the previous task.", "agent_emit", {
+              sender: {
+                id: agentId,
+                name: "Harbor Concierge",
+                role: "participant",
+              },
+            }),
+          ],
+          receiptUpdates: [],
+          roomActions: [],
+        };
+      },
+    },
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const secondRunPromise = receiveExternalMessage(
+    {
+      channel: "feishu",
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "ou_interrupt",
+      senderId: "ou_interrupt",
+      senderName: "Interrupt User",
+      messageId: "msg-interrupt-2",
+      messageType: "text",
+      text: "Stop. Do not continue.",
+      attachments: [],
+      agentId: "concierge",
+    },
+    {
+      ...baseDeps,
+      runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => {
+        runOrder.push(message.id);
+        return {
+          turn: {
+            id: "turn-interrupt-2",
+            agent: {
+              id: agentId,
+              label: "Harbor Concierge",
+            },
+            userMessage: {
+              ...createRoomMessage(roomId, "user", message.content, "user", { sender: message.sender }),
+              id: message.id,
+            },
+            assistantContent: "Okay, I stopped.",
+            tools: [],
+            emittedMessages: [
+              createRoomMessage(roomId, "assistant", "Okay, I stopped.", "agent_emit", {
+                sender: {
+                  id: agentId,
+                  name: "Harbor Concierge",
+                  role: "participant",
+                },
+              }),
+            ],
+            status: "completed",
+            resolvedModel: "generic/fake-model",
+          },
+          resolvedModel: "generic/fake-model",
+          compatibility: COMPATIBILITY,
+          emittedMessages: [
+            createRoomMessage(roomId, "assistant", "Okay, I stopped.", "agent_emit", {
+              sender: {
+                id: agentId,
+                name: "Harbor Concierge",
+                role: "participant",
+              },
+            }),
+          ],
+          receiptUpdates: [],
+          roomActions: [],
+        };
+      },
+    },
+  );
+
+  await waitFor(() => state.rooms.some((entry) => entry.roomMessages.some((messageEntry) => messageEntry.id === "feishu:default:msg-interrupt-2")));
+  const roomBeforeFirstCompletes = state.rooms.find((entry) => entry.title === "Feishu - Interrupt User");
+  assert.ok(roomBeforeFirstCompletes?.roomMessages.some((entry) => entry.id === "feishu:default:msg-interrupt-2"));
+
+  const firstRoomId = roomBeforeFirstCompletes?.id ?? "room-1";
+  firstDeferred.resolve({
+    turn: {
+      id: "turn-interrupt-1",
+      agent: {
+        id: "concierge",
+        label: "Harbor Concierge",
+      },
+      userMessage: createRoomMessage(firstRoomId, "user", "Keep working", "user"),
+      assistantContent: "This older result should be skipped.",
+      tools: [],
+      emittedMessages: [createRoomMessage(firstRoomId, "assistant", "This older result should be skipped.", "agent_emit")],
+      status: "completed",
+      resolvedModel: "generic/fake-model",
+    },
+    resolvedModel: "generic/fake-model",
+    compatibility: COMPATIBILITY,
+    emittedMessages: [createRoomMessage(firstRoomId, "assistant", "This older result should be skipped.", "agent_emit")],
+    receiptUpdates: [],
+    roomActions: [],
+  });
+
+  await Promise.all([firstRunPromise, secondRunPromise]);
+
+  const finalRoom = state.rooms.find((entry) => entry.id === binding?.roomId);
+  assert.ok(finalRoom);
+  assert.ok(finalRoom?.roomMessages.some((entry) => entry.id === "feishu:default:msg-interrupt-1"));
+  assert.ok(finalRoom?.roomMessages.some((entry) => entry.id === "feishu:default:msg-interrupt-2"));
+  assert.ok(finalRoom?.roomMessages.some((entry) => entry.content === "Okay, I stopped."));
+  assert.ok(!finalRoom?.roomMessages.some((entry) => entry.content === "This older result should be skipped."));
+  assert.ok(outboundMessages.some((entry) => entry.content === "Okay, I stopped."));
+  assert.ok(!outboundMessages.some((entry) => entry.content === "This older result should be skipped."));
+  assert.deepEqual(runOrder, ["feishu:default:msg-interrupt-1", "feishu:default:msg-interrupt-2"]);
 });

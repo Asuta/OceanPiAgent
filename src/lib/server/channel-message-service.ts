@@ -2,8 +2,10 @@ import type { RoomAgentDefinition, RoomMessage, RoomWorkspaceState } from "@/lib
 import { createAgentSharedState, createExternalRoomSession, createRoomMessage, createTimestamp, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
 import { findChannelBinding, touchChannelBinding, upsertChannelBinding } from "@/lib/server/channel-bindings-store";
 import { beginInboundMessage, finishInboundMessage, runSerializedDelivery } from "@/lib/server/channel-delivery-queue";
+import { createChannelMessageLink, findChannelMessageLink, upsertChannelMessageLink } from "@/lib/server/channel-message-links-store";
+import { applyFeishuAckReaction, applyFeishuDoneReaction } from "@/lib/server/channels/feishu/reaction-policy";
 import { applyFeishuRoomMetadata, buildFeishuRoomTitle } from "@/lib/server/channels/feishu/room-metadata";
-import type { ChannelBinding, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
+import type { ChannelBinding, ChannelMessageLink, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
 import { listAgentDefinitions } from "@/lib/server/agent-registry";
 import { appendFeishuRuntimeLog } from "@/lib/server/channel-runtime-log";
 import { runRoomTurnNonStreaming } from "@/lib/server/room-runner";
@@ -19,6 +21,10 @@ export interface ExternalMessageServiceDependencies {
   findChannelBinding?: typeof findChannelBinding;
   upsertChannelBinding?: typeof upsertChannelBinding;
   touchChannelBinding?: typeof touchChannelBinding;
+  findChannelMessageLink?: typeof findChannelMessageLink;
+  upsertChannelMessageLink?: typeof upsertChannelMessageLink;
+  applyFeishuAckReaction?: typeof applyFeishuAckReaction;
+  applyFeishuDoneReaction?: typeof applyFeishuDoneReaction;
   listAgentDefinitions?: () => Promise<RoomAgentDefinition[]>;
   runRoomTurnNonStreaming?: typeof runRoomTurnNonStreaming;
   deliverMessages?: (messages: ExternalOutboundMessage[]) => Promise<void>;
@@ -33,6 +39,13 @@ export interface ExternalMessageProcessResult {
   status: "processed" | "duplicate";
   roomId?: string;
   emittedCount?: number;
+}
+
+interface PreparedExternalMessageProcessing {
+  binding: ChannelBinding;
+  inboundRoomMessage: RoomMessage;
+  workspace: RoomWorkspaceState;
+  messageLink: ChannelMessageLink;
 }
 
 function buildQueueKey(message: ExternalInboundMessage): string {
@@ -53,6 +66,99 @@ function buildInboundRoomMessageId(message: ExternalInboundMessage): string {
 
 function buildExternalRoomTitle(message: ExternalInboundMessage): string {
   return buildFeishuRoomTitle(message.senderName || message.senderId || message.peerId, message.peerId);
+}
+
+function hasReadNoReplyForInboundMessage(result: Awaited<ReturnType<typeof runRoomTurnNonStreaming>>, roomId: string, roomMessageId: string): boolean {
+  return result.roomActions.some((action) => action.type === "read_no_reply" && action.roomId === roomId && action.messageId === roomMessageId);
+}
+
+function hasNewerUserMessageInRoom(workspace: RoomWorkspaceState, roomId: string, roomMessageId: string): boolean {
+  const room = workspace.rooms.find((entry) => entry.id === roomId);
+  if (!room) {
+    return false;
+  }
+
+  const currentMessage = room.roomMessages.find((entry) => entry.id === roomMessageId);
+  if (!currentMessage) {
+    return false;
+  }
+
+  return room.roomMessages.some((entry) => entry.seq > currentMessage.seq && entry.role === "user");
+}
+
+async function ensureChannelMessageLink(args: {
+  message: ExternalInboundMessage;
+  binding: ChannelBinding;
+  roomMessageId: string;
+  deps: Required<ExternalMessageServiceDependencies>;
+}): Promise<ChannelMessageLink> {
+  const existing = await args.deps.findChannelMessageLink({
+    channel: args.message.channel,
+    accountId: args.message.accountId,
+    externalMessageId: args.message.messageId,
+  });
+  if (existing) {
+    return existing;
+  }
+
+  return args.deps.upsertChannelMessageLink(createChannelMessageLink({
+    linkId: createUuid(),
+    channel: args.message.channel,
+    accountId: args.message.accountId,
+    peerKind: args.message.peerKind,
+    peerId: args.message.peerId,
+    externalMessageId: args.message.messageId,
+    roomId: args.binding.roomId,
+    roomMessageId: args.roomMessageId,
+    messageType: args.message.messageType,
+    createdAt: createTimestamp(),
+  }));
+}
+
+async function prepareExternalMessageProcessing(
+  message: ExternalInboundMessage,
+  deps: Required<ExternalMessageServiceDependencies>,
+): Promise<PreparedExternalMessageProcessing | null> {
+  return runSerializedDelivery(buildQueueKey(message), async () => {
+    const dedupeKey = buildMessageDedupKey(message);
+    const dedupeState = await beginInboundMessage(dedupeKey);
+    if (dedupeState !== "started") {
+      deps.logger({
+        level: "info",
+        message: "Skipped duplicate inbound Feishu message",
+        details: {
+          peerId: message.peerId,
+          messageId: message.messageId,
+          messageType: message.messageType,
+          dedupeState,
+        },
+      });
+      return null;
+    }
+
+    let accepted = false;
+    try {
+      const { binding } = await ensureBindingAndWorkspace(message, deps);
+      const inboundRoomMessage = createInboundRoomMessage(message, binding);
+      const workspaceWithMessage = await appendInboundMessageToWorkspace(inboundRoomMessage, binding, message.senderName, deps);
+      let messageLink = await ensureChannelMessageLink({
+        message,
+        binding,
+        roomMessageId: inboundRoomMessage.id,
+        deps,
+      });
+      messageLink = await deps.applyFeishuAckReaction(messageLink, { logger: deps.logger });
+      accepted = true;
+      return {
+        binding,
+        inboundRoomMessage,
+        workspace: workspaceWithMessage.state,
+        messageLink,
+      };
+    } finally {
+      await finishInboundMessage(dedupeKey, accepted);
+    }
+  });
 }
 
 function createInboundRoomMessage(message: ExternalInboundMessage, binding: ChannelBinding): RoomMessage {
@@ -204,114 +310,129 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
     findChannelBinding: overrides.findChannelBinding ?? findChannelBinding,
     upsertChannelBinding: overrides.upsertChannelBinding ?? upsertChannelBinding,
     touchChannelBinding: overrides.touchChannelBinding ?? touchChannelBinding,
+    findChannelMessageLink: overrides.findChannelMessageLink ?? findChannelMessageLink,
+    upsertChannelMessageLink: overrides.upsertChannelMessageLink ?? upsertChannelMessageLink,
+    applyFeishuAckReaction: overrides.applyFeishuAckReaction ?? applyFeishuAckReaction,
+    applyFeishuDoneReaction: overrides.applyFeishuDoneReaction ?? applyFeishuDoneReaction,
     listAgentDefinitions: overrides.listAgentDefinitions ?? listAgentDefinitions,
     runRoomTurnNonStreaming: overrides.runRoomTurnNonStreaming ?? runRoomTurnNonStreaming,
     deliverMessages: overrides.deliverMessages ?? (async () => {}),
     logger: overrides.logger ?? appendFeishuRuntimeLog,
   };
 
-  return runSerializedDelivery(buildQueueKey(message), async () => {
-    const dedupeKey = buildMessageDedupKey(message);
-    const dedupeState = await beginInboundMessage(dedupeKey);
-    if (dedupeState !== "started") {
-      deps.logger({
-        level: "info",
-        message: "Skipped duplicate inbound Feishu message",
-        details: {
-          peerId: message.peerId,
-          messageId: message.messageId,
-          messageType: message.messageType,
-          dedupeState,
-        },
-      });
-      return { status: "duplicate" };
-    }
+  const prepared = await prepareExternalMessageProcessing(message, deps);
+  if (!prepared) {
+    return { status: "duplicate" };
+  }
+  const processing = prepared;
 
-    let succeeded = false;
-    try {
-      const { binding } = await ensureBindingAndWorkspace(message, deps);
-      const inboundRoomMessage = createInboundRoomMessage(message, binding);
-      const workspaceWithMessage = await appendInboundMessageToWorkspace(inboundRoomMessage, binding, message.senderName, deps);
-      const settings = workspaceWithMessage.state.agentStates[binding.agentId]?.settings ?? createAgentSharedState().settings;
-      const result = await deps.runRoomTurnNonStreaming({
-        workspace: workspaceWithMessage.state,
-        roomId: binding.roomId,
-        agentId: binding.agentId,
-        message: {
-          id: inboundRoomMessage.id,
-          content: inboundRoomMessage.content,
-          attachments: inboundRoomMessage.attachments,
-          sender: inboundRoomMessage.sender,
-        },
-        settings,
-      });
+  try {
+    const settings = processing.workspace.agentStates[processing.binding.agentId]?.settings ?? createAgentSharedState().settings;
+    const result = await deps.runRoomTurnNonStreaming({
+      workspace: processing.workspace,
+      roomId: processing.binding.roomId,
+      agentId: processing.binding.agentId,
+      message: {
+        id: processing.inboundRoomMessage.id,
+        content: processing.inboundRoomMessage.content,
+        attachments: processing.inboundRoomMessage.attachments,
+        sender: processing.inboundRoomMessage.sender,
+      },
+      settings,
+    });
 
-      await deps.mutateWorkspace((workspace) => applyRoomTurnToWorkspace({
+    let wasSuperseded = false;
+    await deps.mutateWorkspace((workspace) => {
+      if (hasNewerUserMessageInRoom(workspace, processing.binding.roomId, processing.inboundRoomMessage.id)) {
+        wasSuperseded = true;
+        return workspace;
+      }
+
+      return applyRoomTurnToWorkspace({
         workspace,
-        agentId: binding.agentId,
-        targetRoomId: binding.roomId,
+        agentId: processing.binding.agentId,
+        targetRoomId: processing.binding.roomId,
         turn: result.turn,
         resolvedModel: result.resolvedModel,
         compatibility: result.compatibility,
         emittedMessages: result.emittedMessages,
         receiptUpdates: result.receiptUpdates,
         roomActions: result.roomActions,
-      }));
-
-      await deps.touchChannelBinding({
-        channel: binding.channel,
-        accountId: binding.accountId,
-        peerKind: binding.peerKind,
-        peerId: binding.peerId,
       });
+    });
 
-      const outboundMessages = createExternalOutboundMessages(binding, result.emittedMessages);
-      if (outboundMessages.length === 0 && result.turn.status === "error") {
-        outboundMessages.push({
-          channel: binding.channel,
-          accountId: binding.accountId,
-          peerKind: binding.peerKind,
-          peerId: binding.peerId,
-          roomId: binding.roomId,
-          content: EXTERNAL_ERROR_REPLY,
-        });
-      }
-      await deps.deliverMessages(outboundMessages);
+    await deps.touchChannelBinding({
+      channel: processing.binding.channel,
+      accountId: processing.binding.accountId,
+      peerKind: processing.binding.peerKind,
+      peerId: processing.binding.peerId,
+    });
 
+    if (wasSuperseded) {
       deps.logger({
+        level: "info",
+        message: "Skipped superseded Feishu turn result",
+        details: {
+          peerId: processing.binding.peerId,
+          roomId: processing.binding.roomId,
+          messageId: message.messageId,
+          messageType: message.messageType,
+        },
+      });
+      return {
+        status: "processed",
+        roomId: processing.binding.roomId,
+        emittedCount: 0,
+      };
+    }
+
+    const outboundMessages = createExternalOutboundMessages(processing.binding, result.emittedMessages);
+    if (outboundMessages.length === 0 && result.turn.status === "error") {
+      outboundMessages.push({
+        channel: processing.binding.channel,
+        accountId: processing.binding.accountId,
+        peerKind: processing.binding.peerKind,
+        peerId: processing.binding.peerId,
+        roomId: processing.binding.roomId,
+        content: EXTERNAL_ERROR_REPLY,
+      });
+    }
+    await deps.deliverMessages(outboundMessages);
+
+    if (hasReadNoReplyForInboundMessage(result, processing.binding.roomId, processing.inboundRoomMessage.id)) {
+      await deps.applyFeishuDoneReaction(processing.messageLink, { logger: deps.logger });
+    }
+
+    deps.logger({
         level: result.turn.status === "error" ? "warn" : "info",
         message: "Processed inbound Feishu message",
         details: {
-          peerId: binding.peerId,
-          roomId: binding.roomId,
-          messageId: message.messageId,
-          messageType: message.messageType,
-          attachmentCount: message.attachments.length,
-          emittedCount: outboundMessages.length,
-          turnStatus: result.turn.status,
-        },
-      });
-
-      succeeded = true;
-      return {
-        status: "processed",
-        roomId: binding.roomId,
+        peerId: processing.binding.peerId,
+        roomId: processing.binding.roomId,
+        messageId: message.messageId,
+        messageType: message.messageType,
+        attachmentCount: message.attachments.length,
         emittedCount: outboundMessages.length,
-      };
-    } catch (error) {
-      deps.logger({
-        level: "error",
-        message: "Failed to process inbound Feishu message",
-        details: {
-          peerId: message.peerId,
-          messageId: message.messageId,
-          messageType: message.messageType,
-          error: error instanceof Error ? error.message : "Unknown channel processing error.",
-        },
-      });
-      throw error;
-    } finally {
-      await finishInboundMessage(dedupeKey, succeeded);
-    }
-  });
+        turnStatus: result.turn.status,
+      },
+    });
+
+    return {
+      status: "processed",
+      roomId: processing.binding.roomId,
+      emittedCount: outboundMessages.length,
+    };
+  } catch (error) {
+    deps.logger({
+      level: "error",
+      message: "Failed to process inbound Feishu message",
+      details: {
+        peerId: message.peerId,
+        messageId: message.messageId,
+        messageType: message.messageType,
+        error: error instanceof Error ? error.message : "Unknown channel processing error.",
+      },
+    });
+    throw error;
+  }
 }
