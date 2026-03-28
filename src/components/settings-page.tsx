@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useTheme } from "@/components/theme-provider";
 import {
   applyModelConfigToSettings,
   buildLegacyModelConfigSeed,
@@ -37,6 +38,7 @@ import {
   getCompatibilityModeLabel,
   useWorkspace,
 } from "@/components/workspace-provider";
+import { RESOLVED_THEME_LABELS, THEME_OPTION_LABELS, THEME_PREFERENCES } from "@/lib/theme";
 
 const PROVIDER_MODE_OPTIONS: Array<{ value: ProviderMode; label: string }> = [
   { value: "auto", label: "自动" },
@@ -290,6 +292,7 @@ async function deleteModelConfigRequest(configId: string): Promise<void> {
 }
 
 export function SettingsPage() {
+  const { mounted: themeMounted, resolvedTheme, setThemePreference, systemTheme, themePreference } = useTheme();
   const {
     agents,
     agentStates,
@@ -1057,6 +1060,103 @@ export function SettingsPage() {
           <button type="button" className={settingsTab === "runtime" ? "tab-button active" : "tab-button"} onClick={() => setSettingsTab("runtime")}>
             运行与诊断
           </button>
+        </div>
+      </section>
+
+      <section className="surface-panel appearance-panel page-enter page-enter-delay-1">
+        <div className="settings-card-header">
+          <div>
+            <p className="section-label">Appearance</p>
+            <h2>为工作台加上昼夜切换</h2>
+            <p>默认跟随系统颜色, 也可以手动锁定浅色或深色。深色模式保留现在的海绿色品牌感, 但把纸面氛围翻成夜航风格。</p>
+          </div>
+          <div className="meta-chip-row compact align-end">
+            <span className="meta-chip">{themeMounted ? THEME_OPTION_LABELS[themePreference] : "跟随系统"}</span>
+            <span className="meta-chip subtle">{themeMounted ? `当前${RESOLVED_THEME_LABELS[resolvedTheme]}` : "读取中"}</span>
+          </div>
+        </div>
+
+        <div className="appearance-grid">
+          <section className="subtle-panel">
+            <p className="section-label">Mode</p>
+            <strong className="panel-lead">把选择权给用户, 但第一次打开时先尊重设备环境。</strong>
+            <div className="theme-toggle-cluster top-gap" role="group" aria-label="选择界面主题">
+              {THEME_PREFERENCES.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  aria-pressed={themePreference === option}
+                  className={themePreference === option ? "theme-toggle-button active" : "theme-toggle-button"}
+                  onClick={() => setThemePreference(option)}
+                >
+                  {THEME_OPTION_LABELS[option]}
+                </button>
+              ))}
+            </div>
+            <p className="muted-copy top-gap">
+              {themeMounted
+                ? `当前设备偏好是${RESOLVED_THEME_LABELS[systemTheme]}。手动模式会覆盖系统设置, 并保存在当前浏览器。`
+                : "正在读取设备主题偏好。"}
+            </p>
+
+            <div className="theme-palette-grid top-gap">
+              <article className="palette-card">
+                <span className="palette-swatch bg" />
+                <strong>海雾背景</strong>
+                <p>页面底色和大面积氛围渐变。</p>
+              </article>
+              <article className="palette-card">
+                <span className="palette-swatch panel" />
+                <strong>玻璃面板</strong>
+                <p>卡片、侧栏和输入容器的承载层。</p>
+              </article>
+              <article className="palette-card">
+                <span className="palette-swatch accent" />
+                <strong>潮汐青</strong>
+                <p>主按钮、激活状态和运行提示。</p>
+              </article>
+              <article className="palette-card">
+                <span className="palette-swatch warn" />
+                <strong>铜琥提示</strong>
+                <p>过程消息、提醒态和辅助强调。</p>
+              </article>
+            </div>
+          </section>
+
+          <section className="subtle-panel">
+            <p className="section-label">Preview</p>
+            <strong className="panel-lead">浅色保持纸面和暖雾, 深色改成低照度海面与冷玻璃。</strong>
+            <div className="theme-preview-grid top-gap">
+              <article className={resolvedTheme === "light" ? "theme-preview-card active" : "theme-preview-card"} data-preview="light">
+                <div className="theme-preview-shell">
+                  <div className="theme-preview-topline">
+                    <strong>浅色</strong>
+                    <span>Warm Paper</span>
+                  </div>
+                  <div className="theme-preview-hero" />
+                  <div className="theme-preview-row">
+                    <div className="theme-preview-panel" />
+                    <div className="theme-preview-panel accent" />
+                  </div>
+                </div>
+              </article>
+
+              <article className={resolvedTheme === "dark" ? "theme-preview-card active" : "theme-preview-card"} data-preview="dark">
+                <div className="theme-preview-shell">
+                  <div className="theme-preview-topline">
+                    <strong>深色</strong>
+                    <span>Night Tide</span>
+                  </div>
+                  <div className="theme-preview-hero" />
+                  <div className="theme-preview-row">
+                    <div className="theme-preview-panel" />
+                    <div className="theme-preview-panel accent" />
+                  </div>
+                </div>
+              </article>
+            </div>
+            <p className="muted-copy top-gap">深色模式里的强调色会比浅色更亮一点, 这样在聊天流、状态条和输入区上更容易保持层次。</p>
+          </section>
         </div>
       </section>
 

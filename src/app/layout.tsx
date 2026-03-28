@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, Space_Grotesk } from "next/font/google";
+import { ThemeProvider } from "@/components/theme-provider";
 import { WorkspaceProvider } from "@/components/workspace-provider";
 import { WorkspaceShell } from "@/components/workspace-shell";
+import { getThemeInitScript } from "@/lib/theme";
 import "./globals.css";
 
 const sans = Space_Grotesk({
@@ -22,11 +24,16 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="zh-CN" data-scroll-behavior="smooth">
+    <html lang="zh-CN" data-scroll-behavior="smooth" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: getThemeInitScript() }} />
+      </head>
       <body className={`${sans.variable} ${mono.variable}`}>
-        <WorkspaceProvider>
-          <WorkspaceShell>{children}</WorkspaceShell>
-        </WorkspaceProvider>
+        <ThemeProvider>
+          <WorkspaceProvider>
+            <WorkspaceShell>{children}</WorkspaceShell>
+          </WorkspaceProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

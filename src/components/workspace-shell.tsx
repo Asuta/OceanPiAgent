@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useTheme } from "@/components/theme-provider";
 import { formatTimestamp, getRoomPreview, useWorkspace } from "@/components/workspace-provider";
+import { RESOLVED_THEME_LABELS, THEME_OPTION_LABELS, THEME_PREFERENCES } from "@/lib/theme";
 
 function getShellTitle(pathname: string) {
   if (pathname.startsWith("/settings")) {
@@ -30,6 +32,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const { mounted: themeMounted, resolvedTheme, setThemePreference, systemTheme, themePreference } = useTheme();
   const { activeRooms, archivedRooms, activeRoomId, archiveRoom, createRoom, hydrated, isRoomRunning, setActiveRoomId } = useWorkspace();
 
   const shellTitle = useMemo(() => getShellTitle(pathname), [pathname]);
@@ -182,6 +185,28 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
             <p className="eyebrow-label">Workspace</p>
             <h2>{shellTitle.title}</h2>
             <p>{shellTitle.subtitle}</p>
+          </div>
+          <div className="topbar-actions">
+            <div className="theme-toggle-cluster compact" role="group" aria-label="切换浅色和深色模式">
+              {THEME_PREFERENCES.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  aria-pressed={themePreference === option}
+                  className={themePreference === option ? "theme-toggle-button active" : "theme-toggle-button"}
+                  onClick={() => setThemePreference(option)}
+                >
+                  {THEME_OPTION_LABELS[option]}
+                </button>
+              ))}
+            </div>
+            <span className="meta-chip subtle theme-status-chip">
+              {themeMounted
+                ? themePreference === "system"
+                  ? `系统${RESOLVED_THEME_LABELS[systemTheme]}`
+                  : `当前${RESOLVED_THEME_LABELS[resolvedTheme]}`
+                : "外观"}
+            </span>
           </div>
         </header>
 
