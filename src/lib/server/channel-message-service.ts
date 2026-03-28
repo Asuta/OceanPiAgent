@@ -2,8 +2,10 @@ import type { RoomAgentDefinition, RoomMessage, RoomWorkspaceState } from "@/lib
 import { createAgentSharedState, createExternalRoomSession, createRoomMessage, createTimestamp, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
 import { findChannelBinding, touchChannelBinding, upsertChannelBinding } from "@/lib/server/channel-bindings-store";
 import { beginInboundMessage, finishInboundMessage, runSerializedDelivery } from "@/lib/server/channel-delivery-queue";
+import { createChannelMessageLink, findChannelMessageLink, upsertChannelMessageLink } from "@/lib/server/channel-message-links-store";
+import { applyFeishuAckReaction, applyFeishuDoneReaction } from "@/lib/server/channels/feishu/reaction-policy";
 import { applyFeishuRoomMetadata, buildFeishuRoomTitle } from "@/lib/server/channels/feishu/room-metadata";
-import type { ChannelBinding, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
+import type { ChannelBinding, ChannelMessageLink, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
 import { listAgentDefinitions } from "@/lib/server/agent-registry";
 import { appendFeishuRuntimeLog } from "@/lib/server/channel-runtime-log";
 import { runRoomTurnNonStreaming } from "@/lib/server/room-runner";
@@ -19,6 +21,10 @@ export interface ExternalMessageServiceDependencies {
   findChannelBinding?: typeof findChannelBinding;
   upsertChannelBinding?: typeof upsertChannelBinding;
   touchChannelBinding?: typeof touchChannelBinding;
+  findChannelMessageLink?: typeof findChannelMessageLink;
+  upsertChannelMessageLink?: typeof upsertChannelMessageLink;
+  applyFeishuAckReaction?: typeof applyFeishuAckReaction;
+  applyFeishuDoneReaction?: typeof applyFeishuDoneReaction;
   listAgentDefinitions?: () => Promise<RoomAgentDefinition[]>;
   runRoomTurnNonStreaming?: typeof runRoomTurnNonStreaming;
   deliverMessages?: (messages: ExternalOutboundMessage[]) => Promise<void>;
@@ -53,6 +59,39 @@ function buildInboundRoomMessageId(message: ExternalInboundMessage): string {
 
 function buildExternalRoomTitle(message: ExternalInboundMessage): string {
   return buildFeishuRoomTitle(message.senderName || message.senderId || message.peerId, message.peerId);
+}
+
+function hasReadNoReplyForInboundMessage(result: Awaited<ReturnType<typeof runRoomTurnNonStreaming>>, roomId: string, roomMessageId: string): boolean {
+  return result.roomActions.some((action) => action.type === "read_no_reply" && action.roomId === roomId && action.messageId === roomMessageId);
+}
+
+async function ensureChannelMessageLink(args: {
+  message: ExternalInboundMessage;
+  binding: ChannelBinding;
+  roomMessageId: string;
+  deps: Required<ExternalMessageServiceDependencies>;
+}): Promise<ChannelMessageLink> {
+  const existing = await args.deps.findChannelMessageLink({
+    channel: args.message.channel,
+    accountId: args.message.accountId,
+    externalMessageId: args.message.messageId,
+  });
+  if (existing) {
+    return existing;
+  }
+
+  return args.deps.upsertChannelMessageLink(createChannelMessageLink({
+    linkId: createUuid(),
+    channel: args.message.channel,
+    accountId: args.message.accountId,
+    peerKind: args.message.peerKind,
+    peerId: args.message.peerId,
+    externalMessageId: args.message.messageId,
+    roomId: args.binding.roomId,
+    roomMessageId: args.roomMessageId,
+    messageType: args.message.messageType,
+    createdAt: createTimestamp(),
+  }));
 }
 
 function createInboundRoomMessage(message: ExternalInboundMessage, binding: ChannelBinding): RoomMessage {
@@ -204,6 +243,10 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
     findChannelBinding: overrides.findChannelBinding ?? findChannelBinding,
     upsertChannelBinding: overrides.upsertChannelBinding ?? upsertChannelBinding,
     touchChannelBinding: overrides.touchChannelBinding ?? touchChannelBinding,
+    findChannelMessageLink: overrides.findChannelMessageLink ?? findChannelMessageLink,
+    upsertChannelMessageLink: overrides.upsertChannelMessageLink ?? upsertChannelMessageLink,
+    applyFeishuAckReaction: overrides.applyFeishuAckReaction ?? applyFeishuAckReaction,
+    applyFeishuDoneReaction: overrides.applyFeishuDoneReaction ?? applyFeishuDoneReaction,
     listAgentDefinitions: overrides.listAgentDefinitions ?? listAgentDefinitions,
     runRoomTurnNonStreaming: overrides.runRoomTurnNonStreaming ?? runRoomTurnNonStreaming,
     deliverMessages: overrides.deliverMessages ?? (async () => {}),
@@ -232,6 +275,13 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
       const { binding } = await ensureBindingAndWorkspace(message, deps);
       const inboundRoomMessage = createInboundRoomMessage(message, binding);
       const workspaceWithMessage = await appendInboundMessageToWorkspace(inboundRoomMessage, binding, message.senderName, deps);
+      let messageLink = await ensureChannelMessageLink({
+        message,
+        binding,
+        roomMessageId: inboundRoomMessage.id,
+        deps,
+      });
+      messageLink = await deps.applyFeishuAckReaction(messageLink, { logger: deps.logger });
       const settings = workspaceWithMessage.state.agentStates[binding.agentId]?.settings ?? createAgentSharedState().settings;
       const result = await deps.runRoomTurnNonStreaming({
         workspace: workspaceWithMessage.state,
@@ -277,6 +327,10 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
         });
       }
       await deps.deliverMessages(outboundMessages);
+
+      if (hasReadNoReplyForInboundMessage(result, binding.roomId, inboundRoomMessage.id)) {
+        await deps.applyFeishuDoneReaction(messageLink, { logger: deps.logger });
+      }
 
       deps.logger({
         level: result.turn.status === "error" ? "warn" : "info",

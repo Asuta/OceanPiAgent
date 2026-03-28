@@ -3,7 +3,7 @@ import test from "node:test";
 import { ROOM_AGENTS } from "@/lib/chat/catalog";
 import { createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
 import type { MessageImageAttachment } from "@/lib/chat/types";
-import type { ChannelBinding, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
+import type { ChannelBinding, ChannelMessageLink, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
 import { resetChannelDeliveryStateForTest } from "@/lib/server/channel-delivery-queue";
 import { receiveExternalMessage } from "@/lib/server/channel-message-service";
 
@@ -33,6 +33,9 @@ test("receiveExternalMessage creates a bound room and delivers emitted replies",
   let state = createDefaultWorkspaceState();
   let binding: ChannelBinding | null = null;
   let capturedBinding: ChannelBinding | undefined;
+  let ackReactionApplied = false;
+  let doneReactionApplied = false;
+  let messageLink = null as null | { externalMessageId: string; roomMessageId: string };
   const outboundMessages: ExternalOutboundMessage[] = [];
 
   const result = await receiveExternalMessage(
@@ -72,6 +75,34 @@ test("receiveExternalMessage creates a bound room and delivers emitted replies",
         };
         capturedBinding = binding;
         return binding;
+      },
+      findChannelMessageLink: async () => null,
+      upsertChannelMessageLink: async (nextLink: ChannelMessageLink) => {
+        messageLink = {
+          externalMessageId: nextLink.externalMessageId,
+          roomMessageId: nextLink.roomMessageId,
+        };
+        return nextLink;
+      },
+      applyFeishuAckReaction: async (link) => {
+        ackReactionApplied = true;
+        return {
+          ...link,
+          ackReaction: {
+            emojiType: "OK",
+            appliedAt: "2026-03-27T10:00:30.000Z",
+          },
+        };
+      },
+      applyFeishuDoneReaction: async (link) => {
+        doneReactionApplied = true;
+        return {
+          ...link,
+          doneReaction: {
+            emojiType: "DONE",
+            appliedAt: "2026-03-27T10:00:31.000Z",
+          },
+        };
       },
       listAgentDefinitions: async () => ROOM_AGENTS,
       runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => ({
@@ -125,6 +156,9 @@ test("receiveExternalMessage creates a bound room and delivers emitted replies",
   assert.equal(createdBinding.peerId, "ou_123");
   assert.equal(outboundMessages.length, 1);
   assert.equal(outboundMessages[0]?.content, "Visible Feishu reply");
+  assert.equal(ackReactionApplied, true);
+  assert.equal(doneReactionApplied, false);
+  assert.equal(messageLink?.externalMessageId, "msg-1");
 
   const feishuRoom = state.rooms.find((room) => room.id === createdBinding.roomId);
   assert.ok(feishuRoom);
@@ -178,6 +212,10 @@ test("receiveExternalMessage deduplicates repeated inbound message ids", async (
       return nextBinding;
     },
     touchChannelBinding: async () => binding,
+    findChannelMessageLink: async () => null,
+    upsertChannelMessageLink: async (nextLink: ChannelMessageLink) => nextLink,
+    applyFeishuAckReaction: async (link: ChannelMessageLink) => link,
+    applyFeishuDoneReaction: async (link: ChannelMessageLink) => link,
     listAgentDefinitions: async () => ROOM_AGENTS,
     runRoomTurnNonStreaming: async () => {
       runCount += 1;
@@ -217,6 +255,8 @@ test("receiveExternalMessage preserves inbound Feishu image attachments", async 
 
   let state = createDefaultWorkspaceState();
   let binding: ChannelBinding | null = null;
+  let ackReactionApplied = false;
+  let doneReactionApplied = false;
 
   await receiveExternalMessage(
     {
@@ -244,6 +284,16 @@ test("receiveExternalMessage preserves inbound Feishu image attachments", async 
         return nextBinding;
       },
       touchChannelBinding: async () => binding,
+      findChannelMessageLink: async () => null,
+      upsertChannelMessageLink: async (nextLink: ChannelMessageLink) => nextLink,
+      applyFeishuAckReaction: async (link) => {
+        ackReactionApplied = true;
+        return link;
+      },
+      applyFeishuDoneReaction: async (link) => {
+        doneReactionApplied = true;
+        return link;
+      },
       listAgentDefinitions: async () => ROOM_AGENTS,
       runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => ({
         turn: {
@@ -278,4 +328,82 @@ test("receiveExternalMessage preserves inbound Feishu image attachments", async 
   assert.ok(inboundMessage);
   assert.equal(inboundMessage?.attachments.length, 1);
   assert.equal(inboundMessage?.attachments[0]?.filename, "feishu.jpg");
+  assert.equal(ackReactionApplied, true);
+  assert.equal(doneReactionApplied, false);
+});
+
+test("receiveExternalMessage applies DONE reaction only for read-no-reply", async () => {
+  await resetChannelDeliveryStateForTest();
+
+  let state = createDefaultWorkspaceState();
+  let binding: ChannelBinding | null = null;
+  let ackReactionApplied = false;
+  let doneReactionApplied = false;
+
+  await receiveExternalMessage(
+    {
+      channel: "feishu",
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "ou_done",
+      senderId: "ou_done",
+      senderName: "Quiet User",
+      messageId: "msg-done-1",
+      messageType: "text",
+      text: "ok",
+      attachments: [],
+      agentId: "concierge",
+    },
+    {
+      loadWorkspaceEnvelope: async () => ({ version: 1, updatedAt: new Date().toISOString(), state }),
+      mutateWorkspace: async (mutator) => {
+        state = await mutator(state);
+        return { version: 1, updatedAt: new Date().toISOString(), state };
+      },
+      findChannelBinding: async () => binding,
+      upsertChannelBinding: async (nextBinding) => {
+        binding = nextBinding;
+        return nextBinding;
+      },
+      touchChannelBinding: async () => binding,
+      findChannelMessageLink: async () => null,
+      upsertChannelMessageLink: async (nextLink: ChannelMessageLink) => nextLink,
+      applyFeishuAckReaction: async (link) => {
+        ackReactionApplied = true;
+        return link;
+      },
+      applyFeishuDoneReaction: async (link) => {
+        doneReactionApplied = true;
+        return link;
+      },
+      listAgentDefinitions: async () => ROOM_AGENTS,
+      runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => ({
+        turn: {
+          id: "turn-done-1",
+          agent: {
+            id: agentId,
+            label: "Harbor Concierge",
+          },
+          userMessage: {
+            ...createRoomMessage(roomId, "user", message.content, "user", { sender: message.sender }),
+            id: message.id,
+          },
+          assistantContent: "",
+          tools: [],
+          emittedMessages: [],
+          status: "completed",
+          resolvedModel: "generic/fake-model",
+        },
+        resolvedModel: "generic/fake-model",
+        compatibility: COMPATIBILITY,
+        emittedMessages: [],
+        receiptUpdates: [],
+        roomActions: [{ type: "read_no_reply", roomId, messageId: message.id }],
+      }),
+      deliverMessages: async () => {},
+    },
+  );
+
+  assert.equal(ackReactionApplied, true);
+  assert.equal(doneReactionApplied, true);
 });

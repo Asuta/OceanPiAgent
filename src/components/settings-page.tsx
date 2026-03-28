@@ -80,6 +80,8 @@ interface FeishuRuntimeStatus {
   accountId: string;
   defaultAgentId: string;
   allowOpenIds: string[];
+  ackReactionEmojiType: string;
+  doneReactionEmojiType: string;
   lastError: string | null;
   startedAt: string | null;
   lastInboundAt: string | null;
@@ -1473,6 +1475,14 @@ export function SettingsPage() {
                 <div>
                   <span>Last inbound</span>
                   <strong>{feishuRuntimeStatus?.lastInboundAt ? formatTimestamp(feishuRuntimeStatus.lastInboundAt) : "No messages yet"}</strong>
+                </div>
+                <div>
+                  <span>ACK reaction</span>
+                  <strong>{feishuRuntimeStatus?.ackReactionEmojiType || "OK"}</strong>
+                </div>
+                <div>
+                  <span>DONE reaction</span>
+                  <strong>{feishuRuntimeStatus?.doneReactionEmojiType || "DONE"}</strong>
                 </div>
               </div>
 

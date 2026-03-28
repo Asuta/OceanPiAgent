@@ -12,6 +12,8 @@ type FeishuRuntimeStatus = {
   accountId: string;
   defaultAgentId: string;
   allowOpenIds: string[];
+  ackReactionEmojiType: string;
+  doneReactionEmojiType: string;
   lastError: string | null;
   startedAt: string | null;
   lastInboundAt: string | null;
@@ -37,6 +39,8 @@ function createStatus(): FeishuRuntimeStatus {
     accountId: config.accountId,
     defaultAgentId: config.defaultAgentId,
     allowOpenIds: [...config.allowOpenIds],
+    ackReactionEmojiType: config.ackReactionEmojiType,
+    doneReactionEmojiType: config.doneReactionEmojiType,
     lastError: null,
     startedAt: null,
     lastInboundAt: null,
@@ -72,6 +76,8 @@ export function ensureChannelRuntimeStarted(): void {
   status.accountId = config.accountId;
   status.defaultAgentId = config.defaultAgentId;
   status.allowOpenIds = [...config.allowOpenIds];
+  status.ackReactionEmojiType = config.ackReactionEmojiType;
+  status.doneReactionEmojiType = config.doneReactionEmojiType;
 
   if (!config.enabled) {
     status.status = config.configured ? "idle" : "disabled";

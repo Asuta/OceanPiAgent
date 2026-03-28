@@ -6,6 +6,8 @@ export interface FeishuChannelConfig {
   appSecret: string;
   defaultAgentId: string;
   allowOpenIds: string[];
+  ackReactionEmojiType: string;
+  doneReactionEmojiType: string;
 }
 
 function isTruthyEnv(value: string | undefined): boolean {
@@ -39,5 +41,7 @@ export function readFeishuChannelConfig(): FeishuChannelConfig {
     appSecret,
     defaultAgentId: process.env.FEISHU_DEFAULT_AGENT_ID?.trim() || "concierge",
     allowOpenIds: parseList(process.env.FEISHU_ALLOW_OPEN_IDS),
+    ackReactionEmojiType: process.env.FEISHU_REACTION_ACK?.trim() || "OK",
+    doneReactionEmojiType: process.env.FEISHU_REACTION_DONE?.trim() || "DONE",
   };
 }

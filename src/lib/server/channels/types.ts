@@ -6,6 +6,28 @@ export type ExternalPeerKind = "direct" | "group";
 
 export type ExternalInboundMessageType = "text" | "image" | "post" | "file" | "audio" | "video" | "sticker" | "unknown";
 
+export interface ChannelMessageReactionState {
+  emojiType: string;
+  appliedAt: string;
+  reactionId?: string;
+}
+
+export interface ChannelMessageLink {
+  linkId: string;
+  channel: ExternalChannelId;
+  accountId: string;
+  peerKind: ExternalPeerKind;
+  peerId: string;
+  externalMessageId: string;
+  roomId: string;
+  roomMessageId: string;
+  messageType: ExternalInboundMessageType;
+  ackReaction?: ChannelMessageReactionState;
+  doneReaction?: ChannelMessageReactionState;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ExternalInboundMessage {
   channel: ExternalChannelId;
   accountId: string;
