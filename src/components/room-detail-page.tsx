@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import {
   ALLOWED_MESSAGE_IMAGE_MIME_TYPES,
   MAX_MESSAGE_IMAGE_ATTACHMENTS,
@@ -20,6 +20,8 @@ import {
   useWorkspace,
 } from "@/components/workspace-provider";
 import { RoomCronPanel } from "@/components/room-cron-panel";
+import { buildRoomThreadToolEntries, type RoomThreadToolEntry } from "@/components/workspace/room-thread";
+import { ToolHistoryInline } from "@/components/workspace/tool-history-inline";
 import type { AgentRoomTurn, MessageImageAttachment, RoomAgentId, RoomMessage, RoomParticipant } from "@/lib/chat/types";
 
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
@@ -335,8 +337,21 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   }, [room?.id]);
 
   const latestMessage = room?.roomMessages.at(-1) ?? null;
+  const roomThreadToolEntries = useMemo<Map<string, RoomThreadToolEntry[]>>(
+    () =>
+      room
+        ? buildRoomThreadToolEntries({
+            roomId: room.id,
+            roomMessages: room.roomMessages,
+            agentStates,
+          })
+        : new Map<string, RoomThreadToolEntry[]>(),
+    [agentStates, room],
+  );
+  const visibleInlineTools = useMemo(() => Array.from(roomThreadToolEntries.values()).flat(), [roomThreadToolEntries]);
+  const latestInlineTool = visibleInlineTools.at(-1) ?? null;
   const threadScrollKey = room
-    ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}:${latestMessage?.attachments.length ?? 0}`
+    ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}:${latestMessage?.attachments.length ?? 0}:${visibleInlineTools.length}:${latestInlineTool?.turn.id ?? ""}:${latestInlineTool?.tool.id ?? ""}:${latestInlineTool?.event.sequence ?? 0}`
     : "";
 
   useLayoutEffect(() => {
@@ -816,60 +831,74 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               room.roomMessages.map((message, index) => {
                 const shouldShowState = message.role === "assistant" && (message.kind !== "answer" || message.status !== "completed");
                 const isLatestMessage = index === room.roomMessages.length - 1;
+                const inlineToolEntries = roomThreadToolEntries.get(message.id) ?? [];
                 return (
-                  <article
-                    key={message.id}
-                    className={`${getMessageCardClass(message)}${isLatestMessage ? " is-latest" : ""}`}
-                    style={isLatestMessage ? undefined : { animationDelay: `${Math.min(index * 34, 180)}ms` }}
-                  >
-                    <div className={`message-avatar ${message.role}`} aria-hidden="true">
-                      {getSenderMonogram(message.sender.name)}
-                    </div>
-                    <div className="thread-message-content">
-                      <div className="thread-message-topline">
-                        <div className="thread-message-heading">
-                          <span className="thread-message-kicker">{getMessageKicker(message)}</span>
-                          <strong>{message.sender.name}</strong>
-                        </div>
-                        <span>{formatTimestamp(message.createdAt)}</span>
+                  <Fragment key={message.id}>
+                    <article
+                      className={`${getMessageCardClass(message)}${isLatestMessage ? " is-latest" : ""}`}
+                      style={isLatestMessage ? undefined : { animationDelay: `${Math.min(index * 34, 180)}ms` }}
+                    >
+                      <div className={`message-avatar ${message.role}`} aria-hidden="true">
+                        {getSenderMonogram(message.sender.name)}
                       </div>
-
-                      {(shouldShowState || message.receipts.length > 0) && (
-                        <div className="message-state-row">
-                          {shouldShowState ? <span className="meta-chip subtle">{ROOM_KIND_LABELS[message.kind]}</span> : null}
-                          {shouldShowState ? <span className="meta-chip subtle">{ROOM_STATUS_LABELS[message.status]}</span> : null}
-                          {message.final === false ? <span className="meta-chip subtle">过程消息</span> : null}
-                          {message.receipts.length > 0 ? <span className="meta-chip subtle">已读不回</span> : null}
+                      <div className="thread-message-content">
+                        <div className="thread-message-topline">
+                          <div className="thread-message-heading">
+                            <span className="thread-message-kicker">{getMessageKicker(message)}</span>
+                            <strong>{message.sender.name}</strong>
+                          </div>
+                          <span>{formatTimestamp(message.createdAt)}</span>
                         </div>
-                      )}
 
-                      {message.content ? <div className="thread-message-body">{message.content}</div> : null}
+                        {(shouldShowState || message.receipts.length > 0) && (
+                          <div className="message-state-row">
+                            {shouldShowState ? <span className="meta-chip subtle">{ROOM_KIND_LABELS[message.kind]}</span> : null}
+                            {shouldShowState ? <span className="meta-chip subtle">{ROOM_STATUS_LABELS[message.status]}</span> : null}
+                            {message.final === false ? <span className="meta-chip subtle">过程消息</span> : null}
+                            {message.receipts.length > 0 ? <span className="meta-chip subtle">已读不回</span> : null}
+                          </div>
+                        )}
 
-                      {message.attachments.length > 0 ? (
-                        <div className="message-image-grid">
-                          {message.attachments.map((attachment) => (
-                            <a key={attachment.id} className="message-image-link" href={attachment.url} target="_blank" rel="noreferrer">
-                              <Image
-                                src={attachment.url}
-                                alt={attachment.filename}
-                                className="message-image-preview"
-                                width={240}
-                                height={180}
-                                unoptimized
-                              />
-                              <span>{attachment.filename}</span>
-                            </a>
-                          ))}
-                        </div>
-                      ) : null}
+                        {message.content ? <div className="thread-message-body">{message.content}</div> : null}
 
-                      {message.receipts.length > 0 ? (
-                        <div className="message-receipt-note">
-                          {message.receipts.map((receipt) => `✓ ${receipt.participantName}`).join("  ")}
-                        </div>
-                      ) : null}
-                    </div>
-                  </article>
+                        {message.attachments.length > 0 ? (
+                          <div className="message-image-grid">
+                            {message.attachments.map((attachment) => (
+                              <a key={attachment.id} className="message-image-link" href={attachment.url} target="_blank" rel="noreferrer">
+                                <Image
+                                  src={attachment.url}
+                                  alt={attachment.filename}
+                                  className="message-image-preview"
+                                  width={240}
+                                  height={180}
+                                  unoptimized
+                                />
+                                <span>{attachment.filename}</span>
+                              </a>
+                            ))}
+                          </div>
+                        ) : null}
+
+                        {message.receipts.length > 0 ? (
+                          <div className="message-receipt-note">
+                            {message.receipts.map((receipt) => `✓ ${receipt.participantName}`).join("  ")}
+                          </div>
+                        ) : null}
+                      </div>
+                    </article>
+
+                    {inlineToolEntries.length > 0 ? (
+                      <div className="thread-turn-inline-stack">
+                        {inlineToolEntries.map((entry) => (
+                          <ToolHistoryInline
+                            key={entry.id}
+                            entry={entry}
+                            defaultOpen={entry.turn.status !== "completed" || entry.tool.status === "error" || (isLatestMessage && entry.isLatestForAnchor)}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                  </Fragment>
                 );
               })
             )}

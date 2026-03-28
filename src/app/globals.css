@@ -1174,6 +1174,21 @@ html[data-theme="dark"] .meta-chip.subtle {
   background: rgba(237, 244, 240, 0.06);
 }
 
+html[data-theme="dark"] .thread-tool-inline {
+  border-color: rgba(46, 184, 153, 0.16);
+  background: linear-gradient(180deg, rgba(18, 27, 27, 0.86), rgba(14, 22, 22, 0.92));
+}
+
+html[data-theme="dark"] .thread-tool-inline.is-active {
+  border-color: rgba(46, 184, 153, 0.22);
+  background: linear-gradient(180deg, rgba(25, 44, 40, 0.9), rgba(16, 26, 26, 0.96));
+}
+
+html[data-theme="dark"] .thread-tool-inline.is-error {
+  border-color: rgba(225, 134, 114, 0.22);
+  background: linear-gradient(180deg, rgba(62, 33, 31, 0.88), rgba(27, 17, 17, 0.94));
+}
+
 html[data-theme="dark"] .code-pair-grid pre,
 html[data-theme="dark"] .raw-log-block pre {
   background: rgba(0, 0, 0, 0.22);
@@ -1797,6 +1812,73 @@ html[data-theme="dark"] .thread-list::before {
   line-height: 1.5;
 }
 
+.thread-turn-inline-stack {
+  display: grid;
+  gap: 10px;
+  margin: -2px 0 4px 64px;
+}
+
+.thread-tool-inline {
+  overflow: hidden;
+  border: 1px solid rgba(15, 135, 115, 0.14);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(249, 251, 248, 0.98), rgba(244, 248, 245, 0.96));
+  box-shadow: 0 14px 28px rgba(24, 53, 49, 0.06);
+  animation: messageIn 360ms ease both;
+}
+
+.thread-tool-inline.is-active {
+  border-color: rgba(15, 135, 115, 0.2);
+  background: linear-gradient(180deg, rgba(239, 248, 244, 0.98), rgba(247, 251, 249, 0.96));
+}
+
+.thread-tool-inline.is-error {
+  border-color: rgba(171, 73, 55, 0.2);
+  background: linear-gradient(180deg, rgba(255, 248, 246, 0.98), rgba(253, 241, 237, 0.96));
+}
+
+.thread-tool-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.thread-tool-summary::-webkit-details-marker {
+  display: none;
+}
+
+.thread-tool-inline[open] .thread-tool-summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.thread-tool-summary-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.thread-tool-kicker {
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.thread-tool-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 16px 16px;
+}
+
+.muted-trace-block {
+  opacity: 0.92;
+}
+
 .composer-card {
   display: grid;
   gap: 12px;
@@ -2405,6 +2487,7 @@ html[data-theme="dark"] .thread-list::before {
   .sidebar-room-card,
   .subtle-panel,
   .trace-card,
+  .thread-tool-inline,
   .micro-card,
   .participant-row-card {
     border-radius: 18px;
@@ -2460,6 +2543,7 @@ html[data-theme="dark"] .thread-list::before {
   .composer-footnote-row,
   .section-heading-row,
   .settings-card-header,
+  .thread-tool-summary,
   .trace-card summary,
   .tool-step summary {
     grid-template-columns: 1fr;
@@ -2496,6 +2580,10 @@ html[data-theme="dark"] .thread-list::before {
 
   .thread-message-card {
     grid-template-columns: 1fr;
+  }
+
+  .thread-turn-inline-stack {
+    margin-left: 0;
   }
 
   .message-avatar {

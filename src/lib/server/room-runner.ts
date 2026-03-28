@@ -20,6 +20,7 @@ import type {
   RoomToolActionUnion,
   RoomToolContext,
   ToolExecution,
+  TurnTimelineEvent,
 } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 import {
@@ -142,6 +143,25 @@ function createMessageReceiptUpdate(
   };
 }
 
+function createToolTimelineEvent(tool: ToolExecution, sequence: number): TurnTimelineEvent {
+  return {
+    id: `tool:${tool.id}`,
+    sequence,
+    type: "tool",
+    toolId: tool.id,
+  };
+}
+
+function createRoomMessageTimelineEvent(message: RoomMessage, sequence: number): TurnTimelineEvent {
+  return {
+    id: `room-message:${message.id}`,
+    sequence,
+    type: "room-message",
+    messageId: message.id,
+    roomId: message.roomId,
+  };
+}
+
 function createTurn(
   agent: AgentRoomTurn["agent"],
   roomId: string,
@@ -149,10 +169,12 @@ function createTurn(
   userSender: RoomSender,
   userContent: string,
   userAttachments: MessageImageAttachment[],
+  anchorMessageId: string | undefined,
   userMessageReceipts: RoomMessageReceipt[],
   userMessageReceiptStatus: RoomMessageReceiptStatus,
   userMessageReceiptUpdatedAt: string | null,
   assistantContent: string,
+  timeline: TurnTimelineEvent[],
   tools: ToolExecution[],
   emittedMessages: RoomMessage[],
   meta: AgentRoomTurn["meta"],
@@ -174,7 +196,13 @@ function createTurn(
       userMessageReceiptStatus,
       userMessageReceiptUpdatedAt,
     ),
+    ...(anchorMessageId
+      ? {
+          anchorMessageId,
+        }
+      : {}),
     assistantContent,
+    timeline,
     tools,
     emittedMessages,
     status,
@@ -299,6 +327,7 @@ interface BaseRoomTurnInput {
   attachedRooms: AttachedRoomDefinition[];
   knownAgents: AgentInfoCard[];
   roomHistoryById: Record<string, RoomHistoryMessageSummary[]>;
+  anchorMessageId?: string;
   modelConfigOverrides?: ModelConfigExecutionOverrides;
   signal?: AbortSignal;
   conversationRunner?: RoomConversationRunner;
@@ -311,6 +340,7 @@ export interface RunRoomTurnInput {
   roomId: string;
   agentId: RoomAgentId;
   message: BaseRoomTurnInput["message"];
+  anchorMessageId?: string;
   settings: ChatSettings;
   signal?: AbortSignal;
 }
@@ -335,9 +365,11 @@ class RoomTurnExecutionError extends Error {
     userSender: RoomSender;
     userContent: string;
     userAttachments: MessageImageAttachment[];
+    anchorMessageId?: string;
     toolEvents: ToolExecution[];
     emittedMessages: RoomMessage[];
     receiptUpdates: RoomMessageReceiptUpdate[];
+    timeline: TurnTimelineEvent[];
     currentUserReceipts: RoomMessageReceipt[];
     currentUserReceiptStatus: RoomMessageReceiptStatus;
     currentUserReceiptUpdatedAt: string | null;
@@ -380,6 +412,7 @@ async function buildPreparedInputFromWorkspace(args: RunRoomTurnInput): Promise<
     attachedRooms: getAttachedRoomsForAgent(args.workspace, args.agentId, room.id),
     knownAgents: createKnownAgentCards(agentDefinitions),
     roomHistoryById: getRoomHistoryByIdForAgent(args.workspace, args.agentId),
+    anchorMessageId: args.anchorMessageId,
     signal: args.signal,
   };
 }
@@ -431,6 +464,7 @@ export async function runPreparedRoomTurn(
   const toolEvents: ToolExecution[] = [];
   const emittedMessages: RoomMessage[] = [];
   const receiptUpdates: RoomMessageReceiptUpdate[] = [];
+  const timeline: TurnTimelineEvent[] = [];
   let currentUserReceiptStatus: RoomMessageReceiptStatus = "none";
   let currentUserReceiptUpdatedAt: string | null = null;
   let currentUserReceipts: RoomMessageReceipt[] = [];
@@ -463,12 +497,14 @@ export async function runPreparedRoomTurn(
           }
 
           toolEvents.push(tool);
+          timeline.push(createToolTimelineEvent(tool, timeline.length + 1));
           recordAgentToolEvent(args.agent.id, runContext.requestId, tool);
           callbacks?.onTool?.(tool);
 
           if (tool.roomMessage) {
             const roomMessage = createEmittedRoomMessage(tool.roomMessage, agent);
             emittedMessages.push(roomMessage);
+            timeline.push(createRoomMessageTimelineEvent(roomMessage, timeline.length + 1));
             callbacks?.onRoomMessage?.(roomMessage);
           }
 
@@ -522,10 +558,12 @@ export async function runPreparedRoomTurn(
       args.message.sender,
       args.message.content,
       args.message.attachments,
+      args.anchorMessageId,
       currentUserReceipts,
       currentUserReceiptStatus,
       currentUserReceiptUpdatedAt,
       result.assistantText,
+      timeline,
       toolEvents.length > 0 ? toolEvents : result.toolEvents,
       emittedMessages,
       {
@@ -564,9 +602,11 @@ export async function runPreparedRoomTurn(
         userSender: args.message.sender,
         userContent: args.message.content,
         userAttachments: args.message.attachments,
+        anchorMessageId: args.anchorMessageId,
         toolEvents,
         emittedMessages,
         receiptUpdates,
+        timeline,
         currentUserReceipts,
         currentUserReceiptStatus,
         currentUserReceiptUpdatedAt,
@@ -594,10 +634,12 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
         error.partial.userSender,
         error.partial.userContent,
         error.partial.userAttachments,
+        error.partial.anchorMessageId,
         error.partial.currentUserReceipts,
         error.partial.currentUserReceiptStatus,
         error.partial.currentUserReceiptUpdatedAt,
         "",
+        error.partial.timeline,
         error.partial.toolEvents,
         error.partial.emittedMessages,
         error.assistantMeta,

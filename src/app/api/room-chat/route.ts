@@ -137,6 +137,7 @@ const requestSchema = z.object({
     )
     .optional()
     .default({}),
+  anchorMessageId: z.string().trim().min(1).max(120).optional(),
   agent: z.object({
     id: agentIdSchema,
     label: z.string().trim().min(1).max(120),
@@ -156,6 +157,7 @@ function toPreparedInput(payload: {
   attachedRooms: AttachedRoomDefinition[];
   knownAgents: AgentInfoCard[];
   roomHistoryById: Record<string, RoomHistoryMessageSummary[]>;
+  anchorMessageId?: string;
   agent: RunPreparedRoomTurnInput["agent"];
   modelConfigOverrides?: RunPreparedRoomTurnInput["modelConfigOverrides"];
   signal?: AbortSignal;
@@ -167,6 +169,7 @@ function toPreparedInput(payload: {
     attachedRooms: payload.attachedRooms,
     knownAgents: payload.knownAgents,
     roomHistoryById: payload.roomHistoryById,
+    anchorMessageId: payload.anchorMessageId,
     agent: payload.agent,
     modelConfigOverrides: payload.modelConfigOverrides,
     signal: payload.signal,
