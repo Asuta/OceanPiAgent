@@ -16,7 +16,7 @@ export type ModelConfigKind = (typeof MODEL_CONFIG_KINDS)[number];
 
 export type ToolScope = "default" | "room";
 
-export const DEFAULT_MAX_TOOL_LOOP_STEPS = 50;
+export const DEFAULT_MAX_TOOL_LOOP_STEPS = 200;
 
 export const MIN_MAX_TOOL_LOOP_STEPS = 1;
 

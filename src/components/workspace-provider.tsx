@@ -96,6 +96,7 @@ import { useRoomScheduler } from "@/components/workspace/use-room-scheduler";
 const DEFAULT_AGENT_ID: RoomAgentId = "concierge";
 const ROOM_LOOP_MAX_ROUNDS = 20;
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
+const LEGACY_DEFAULT_MAX_TOOL_LOOP_STEPS = 6;
 
 const DEFAULT_SETTINGS: ChatSettings = {
   modelConfigId: null,
@@ -1445,7 +1446,10 @@ function normalizeSettings(value: unknown): ChatSettings {
       value.providerMode === "auto"
         ? value.providerMode
         : "auto",
-    maxToolLoopSteps: coerceMaxToolLoopSteps(value.maxToolLoopSteps),
+    maxToolLoopSteps:
+      value.maxToolLoopSteps === LEGACY_DEFAULT_MAX_TOOL_LOOP_STEPS
+        ? DEFAULT_MAX_TOOL_LOOP_STEPS
+        : coerceMaxToolLoopSteps(value.maxToolLoopSteps),
     thinkingLevel: coerceThinkingLevel(value.thinkingLevel),
     enabledSkillIds: coerceSkillIds(value.enabledSkillIds),
   };
