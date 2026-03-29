@@ -360,10 +360,50 @@ function updateRoomMessage(
   return changed ? nextMessages : messages;
 }
 
+function mergeRoomMessage(existing: RoomMessage, next: RoomMessage): RoomMessage {
+  return {
+    ...existing,
+    ...next,
+    id: existing.id,
+    roomId: existing.roomId,
+    seq: existing.seq,
+    role: existing.role,
+    sender: existing.sender,
+    source: existing.source,
+    createdAt: existing.createdAt,
+  };
+}
+
+export function upsertRoomMessages(messages: RoomMessage[], message: RoomMessage): RoomMessage[] {
+  const existingIndex = messages.findIndex((entry) => entry.id === message.id);
+  if (existingIndex < 0) {
+    return [...messages, message];
+  }
+
+  const nextMessages = [...messages];
+  nextMessages[existingIndex] = mergeRoomMessage(messages[existingIndex], message);
+  return nextMessages;
+}
+
 export function appendMessageToRoom(room: RoomSession, message: RoomMessage): RoomSession {
   return {
     ...room,
     roomMessages: [...room.roomMessages, { ...message, roomId: room.id, seq: message.seq || getNextRoomMessageSeq(room) }],
+    updatedAt: createTimestamp(),
+  };
+}
+
+export function upsertMessageToRoom(room: RoomSession, message: RoomMessage): RoomSession {
+  const existingMessage = room.roomMessages.find((entry) => entry.id === message.id);
+  if (!existingMessage) {
+    return appendMessageToRoom(room, message);
+  }
+
+  return {
+    ...room,
+    roomMessages: room.roomMessages.map((entry) =>
+      entry.id === message.id ? mergeRoomMessage(entry, { ...message, roomId: room.id, seq: entry.seq }) : entry,
+    ),
     updatedAt: createTimestamp(),
   };
 }

@@ -152,9 +152,10 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "send_message_to_room",
       label: "Send Message To Room",
-      description: "Deliver user-visible content into any attached room, whether you are sending in the current room or relaying into another room.",
+      description: "Deliver user-visible content into any attached room, whether you are sending in the current room or relaying into another room. Reuse the same optional messageKey if one visible room bubble should stream and grow over time.",
       parameters: Type.Object({
         roomId: Type.String({ description: "Target attached room id." }),
+        messageKey: Type.Optional(Type.String({ description: "Stable key to keep updating the same visible room bubble across repeated calls." })),
         content: Type.String({ description: "Exact user-visible content to send." }),
         kind: Type.Optional(ROOM_MESSAGE_KIND_ENUM),
         status: Type.Optional(ROOM_MESSAGE_STATUS_ENUM),

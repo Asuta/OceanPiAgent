@@ -9,6 +9,14 @@ export interface RoomThreadToolEntry {
   isLatestForAnchor: boolean;
 }
 
+export interface RoomThreadDraftEntry {
+  id: string;
+  turn: AgentRoomTurn;
+  anchorMessageId: string;
+  segment: NonNullable<AgentRoomTurn["draftSegments"]>[number];
+  event: Extract<TurnTimelineEvent, { type: "draft-segment" }>;
+}
+
 function getSortableTime(value: string) {
   const timestamp = Date.parse(value || "");
   return Number.isNaN(timestamp) ? 0 : timestamp;
@@ -36,32 +44,57 @@ function sortTurnTimeline(events: TurnTimelineEvent[]): TurnTimelineEvent[] {
   return [...events].sort((left, right) => left.sequence - right.sequence);
 }
 
+function getDraftSegmentsForTurn(turn: AgentRoomTurn): NonNullable<AgentRoomTurn["draftSegments"]> {
+  if (turn.draftSegments && turn.draftSegments.length > 0) {
+    return turn.draftSegments;
+  }
+
+  if (!turn.assistantContent.trim()) {
+    return [];
+  }
+
+  return [
+    {
+      id: `${turn.id}-legacy-draft`,
+      sequence: 1,
+      content: turn.assistantContent,
+      status: turn.status === "running" || turn.status === "continued" ? "streaming" : "completed",
+    },
+  ];
+}
+
 function createFallbackTimeline(turn: AgentRoomTurn): TurnTimelineEvent[] {
   const timeline: TurnTimelineEvent[] = [];
-  let sequence = 1;
+
+  for (const segment of getDraftSegmentsForTurn(turn)) {
+    timeline.push({
+      id: `draft-segment:${segment.id}`,
+      sequence: segment.sequence,
+      type: "draft-segment",
+      segmentId: segment.id,
+    });
+  }
 
   for (const tool of turn.tools) {
     timeline.push({
       id: `tool:${tool.id}`,
-      sequence,
+      sequence: tool.sequence,
       type: "tool",
       toolId: tool.id,
     });
-    sequence += 1;
   }
 
   for (const message of sortRoomMessages(turn.emittedMessages)) {
     timeline.push({
       id: `room-message:${message.id}`,
-      sequence,
+      sequence: message.seq || timeline.length + 1,
       type: "room-message",
       messageId: message.id,
       roomId: message.roomId,
     });
-    sequence += 1;
   }
 
-  return timeline;
+  return sortTurnTimeline(timeline);
 }
 
 function getLegacySchedulerAnchorMessageId(turn: AgentRoomTurn): string | undefined {
@@ -129,6 +162,10 @@ export function buildRoomThreadToolEntries(args: {
         continue;
       }
 
+      if (event.type !== "tool") {
+        continue;
+      }
+
       const tool = toolsById.get(event.toolId);
       if (!tool || !messageIds.has(currentAnchorMessageId)) {
         continue;
@@ -173,6 +210,79 @@ export function buildRoomThreadToolEntries(args: {
         ...entry,
         isLatestForAnchor: index === sortedEntries.length - 1,
       })),
+    );
+  }
+
+  return groupedEntries;
+}
+
+export function buildRoomThreadDraftEntries(args: {
+  roomId: string;
+  roomMessages: RoomMessage[];
+  agentStates: Record<RoomAgentId, AgentSharedState>;
+}): Map<string, RoomThreadDraftEntry[]> {
+  const messageIds = new Set(args.roomMessages.map((message) => message.id));
+  const groupedEntries = new Map<string, RoomThreadDraftEntry[]>();
+
+  for (const turn of getRoomTurnsForTimeline({ roomId: args.roomId, agentStates: args.agentStates })) {
+    const timeline = turn.timeline && turn.timeline.length > 0 ? sortTurnTimeline(turn.timeline) : createFallbackTimeline(turn);
+    const draftSegmentsById = new Map(getDraftSegmentsForTurn(turn).map((segment) => [segment.id, segment]));
+    if (timeline.length === 0 || draftSegmentsById.size === 0) {
+      continue;
+    }
+
+    let currentAnchorMessageId = turn.anchorMessageId ?? getLegacySchedulerAnchorMessageId(turn) ?? turn.userMessage.id;
+    if (!messageIds.has(currentAnchorMessageId)) {
+      continue;
+    }
+
+    for (const event of timeline) {
+      if (event.type === "room-message") {
+        if (event.roomId === args.roomId && messageIds.has(event.messageId)) {
+          currentAnchorMessageId = event.messageId;
+        }
+        continue;
+      }
+
+      if (event.type !== "draft-segment") {
+        continue;
+      }
+
+      const segment = draftSegmentsById.get(event.segmentId);
+      if (!segment || (!segment.content.trim() && segment.status !== "streaming") || !messageIds.has(currentAnchorMessageId)) {
+        continue;
+      }
+
+      const entry: RoomThreadDraftEntry = {
+        id: `${turn.id}:${event.id}`,
+        turn,
+        anchorMessageId: currentAnchorMessageId,
+        segment,
+        event,
+      };
+      const existing = groupedEntries.get(currentAnchorMessageId);
+      if (existing) {
+        existing.push(entry);
+      } else {
+        groupedEntries.set(currentAnchorMessageId, [entry]);
+      }
+    }
+  }
+
+  for (const [anchorMessageId, entries] of groupedEntries) {
+    groupedEntries.set(
+      anchorMessageId,
+      [...entries].sort((left, right) => {
+        if (left.event.sequence !== right.event.sequence) {
+          return left.event.sequence - right.event.sequence;
+        }
+        const leftTime = getSortableTime(left.turn.userMessage.createdAt);
+        const rightTime = getSortableTime(right.turn.userMessage.createdAt);
+        if (leftTime !== rightTime) {
+          return leftTime - rightTime;
+        }
+        return left.id.localeCompare(right.id);
+      }),
     );
   }
 

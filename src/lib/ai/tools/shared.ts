@@ -155,6 +155,7 @@ export const projectContextReadArgsSchema = z
 
 export const roomMessageArgsSchema = z.object({
   roomId: z.string().trim().min(1).max(120),
+  messageKey: z.string().trim().min(1).max(120).optional(),
   content: z.string().trim().min(1).max(4_000),
   kind: z.enum(["answer", "progress", "warning", "error", "clarification"]).optional().default("answer"),
   status: z.enum(["pending", "streaming", "completed", "failed"]).optional().default("completed"),
@@ -549,6 +550,7 @@ export function createRoomMessageResult(args: z.infer<typeof roomMessageArgsSche
     output: `Sent a room message (${args.kind}/${args.status}/${args.final ? "final" : "non-final"}).`,
     roomMessage: {
       roomId: args.roomId,
+      ...(args.messageKey ? { messageKey: args.messageKey } : {}),
       content: args.content,
       kind: args.kind,
       status: args.status,
@@ -692,6 +694,29 @@ export function appendVisibleHistoryMessage(
 
   const createdAt = new Date().toISOString();
   const currentHistory = context.roomHistoryById[roomId] ?? [];
+  const existingIndex = message.messageKey
+    ? currentHistory.findIndex(
+        (entry) => entry.messageKey === message.messageKey && entry.senderId === message.senderId,
+      )
+    : -1;
+
+  if (existingIndex >= 0) {
+    const existingMessage = currentHistory[existingIndex];
+    const nextHistory = [...currentHistory];
+    nextHistory[existingIndex] = {
+      ...existingMessage,
+      ...message,
+      messageId: existingMessage.messageId,
+      seq: existingMessage.seq,
+      createdAt: existingMessage.createdAt,
+      receipts: message.receipts ? [...message.receipts] : [...existingMessage.receipts],
+    };
+    context.roomHistoryById[roomId] = nextHistory;
+    room.messageCount = nextHistory.length;
+    room.latestMessageAt = nextHistory[nextHistory.length - 1]?.createdAt ?? room.latestMessageAt;
+    return;
+  }
+
   const nextMessage: RoomHistoryMessageSummary = {
     messageId: createUuid(),
     seq: (currentHistory[currentHistory.length - 1]?.seq ?? 0) + 1,

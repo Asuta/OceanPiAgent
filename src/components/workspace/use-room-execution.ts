@@ -6,6 +6,7 @@ import type {
   AgentSharedState,
   AssistantMessageMeta,
   AttachedRoomDefinition,
+  DraftTextSegment,
   RoomAgentDefinition,
   RoomAgentId,
   RoomChatResponseBody,
@@ -18,10 +19,11 @@ import type {
 } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 import {
-  appendMessageToRoom,
   applyMessageReceiptUpdate,
   createAgentSharedState,
   createTimestamp,
+  upsertMessageToRoom,
+  upsertRoomMessages,
 } from "@/lib/chat/workspace-domain";
 import { readRoomStream as processRoomStream } from "@/components/workspace/room-stream";
 import type { ActiveSchedulerRun } from "@/components/workspace/scheduler";
@@ -48,9 +50,65 @@ function updateTurn(
 }
 
 function appendTimelineEvent(turn: AgentRoomTurn, event: TurnTimelineEvent): AgentRoomTurn {
+  if (event.type === "room-message" && (turn.timeline ?? []).some((entry) => entry.type === "room-message" && entry.messageId === event.messageId)) {
+    return turn;
+  }
+
   return {
     ...turn,
     timeline: [...(turn.timeline ?? []), event],
+  };
+}
+
+function appendDraftDelta(turn: AgentRoomTurn, delta: string): AgentRoomTurn {
+  const draftSegments = turn.draftSegments ?? [];
+  const lastSegment = draftSegments[draftSegments.length - 1];
+  if (lastSegment && lastSegment.status === "streaming") {
+    const nextDraftSegments = [...draftSegments];
+    nextDraftSegments[nextDraftSegments.length - 1] = {
+      ...lastSegment,
+      content: `${lastSegment.content}${delta}`,
+    };
+    return {
+      ...turn,
+      assistantContent: `${turn.assistantContent}${delta}`,
+      draftSegments: nextDraftSegments,
+    };
+  }
+
+  const segment: DraftTextSegment = {
+    id: createUuid(),
+    sequence: (turn.timeline?.length ?? 0) + 1,
+    content: delta,
+    status: "streaming",
+  };
+  return {
+    ...appendTimelineEvent(turn, {
+      id: `draft-segment:${segment.id}`,
+      sequence: segment.sequence,
+      type: "draft-segment",
+      segmentId: segment.id,
+    }),
+    assistantContent: `${turn.assistantContent}${delta}`,
+    draftSegments: [...draftSegments, segment],
+  };
+}
+
+function finalizeLatestDraftSegment(turn: AgentRoomTurn): AgentRoomTurn {
+  const draftSegments = turn.draftSegments ?? [];
+  const lastSegment = draftSegments[draftSegments.length - 1];
+  if (!lastSegment || lastSegment.status !== "streaming") {
+    return turn;
+  }
+
+  const nextDraftSegments = [...draftSegments];
+  nextDraftSegments[nextDraftSegments.length - 1] = {
+    ...lastSegment,
+    status: "completed",
+  };
+  return {
+    ...turn,
+    draftSegments: nextDraftSegments,
   };
 }
 
@@ -62,11 +120,7 @@ export function appendMissingMatchingRoomMessages(room: RoomSession, messages: R
       continue;
     }
 
-    if (nextRoom.roomMessages.some((entry) => entry.id === message.id)) {
-      continue;
-    }
-
-    nextRoom = appendMessageToRoom(nextRoom, message);
+    nextRoom = upsertMessageToRoom(nextRoom, message);
   }
 
   return nextRoom;
@@ -116,11 +170,11 @@ export function useRoomExecution(args: {
       let appended = false;
       updateRoomState(message.roomId, (room) => {
         if (room.roomMessages.some((entry) => entry.id === message.id)) {
-          return room;
+          return upsertMessageToRoom(room, message);
         }
 
         appended = true;
-        return appendMessageToRoom(room, message);
+        return upsertMessageToRoom(room, message);
       });
 
       if (appended) {
@@ -186,21 +240,21 @@ export function useRoomExecution(args: {
       emittedMessages: RoomMessage[];
       receiptUpdates: RoomMessageReceiptUpdate[];
     }> => {
+      const previewMessageIds = new Set<string>();
+      const previewMessageRoomIdById = new Map<string, string>();
+
       return processRoomStream({
         response,
         shouldContinue: () => isCurrentAgentRun(agentId, requestId),
         onTextDelta: (delta) => {
           updateAgentTurns(agentId, (turns) =>
-            updateTurn(turns, turnId, (turn) => ({
-              ...turn,
-              assistantContent: `${turn.assistantContent}${delta}`,
-            })),
+            updateTurn(turns, turnId, (turn) => appendDraftDelta(turn, delta)),
           );
         },
         onTool: (tool) => {
           updateAgentTurns(agentId, (turns) =>
             updateTurn(turns, turnId, (turn) => ({
-              ...appendTimelineEvent(turn, {
+              ...appendTimelineEvent(finalizeLatestDraftSegment(turn), {
                 id: `tool:${tool.id}`,
                 sequence: (turn.timeline?.length ?? 0) + 1,
                 type: "tool",
@@ -213,8 +267,15 @@ export function useRoomExecution(args: {
             applyRoomToolActions([tool.roomAction], agentId);
           }
         },
+        onRoomMessagePreview: (message) => {
+          previewMessageIds.add(message.id);
+          previewMessageRoomIdById.set(message.id, message.roomId);
+          updateRoomState(message.roomId, (room) => upsertMessageToRoom(room, message));
+        },
         onRoomMessage: (message) => {
-          updateRoomState(message.roomId, (room) => appendMessageToRoom(room, message));
+          previewMessageIds.delete(message.id);
+          previewMessageRoomIdById.delete(message.id);
+          updateRoomState(message.roomId, (room) => upsertMessageToRoom(room, message));
           maybeStartSchedulerForRoomMessage(message.roomId, message);
 
           updateAgentTurns(agentId, (turns) =>
@@ -226,7 +287,7 @@ export function useRoomExecution(args: {
                 messageId: message.id,
                 roomId: message.roomId,
               }),
-              emittedMessages: [...turn.emittedMessages, message],
+              emittedMessages: upsertRoomMessages(turn.emittedMessages, message),
             })),
           );
         },
@@ -259,6 +320,27 @@ export function useRoomExecution(args: {
           });
 
           applyMissingEmittedMessages(event.turn.emittedMessages);
+
+          const finalizedMessageIds = new Set(event.turn.emittedMessages.map((message) => message.id));
+          for (const previewMessageId of previewMessageIds) {
+            if (finalizedMessageIds.has(previewMessageId)) {
+              continue;
+            }
+
+            const previewRoomId = previewMessageRoomIdById.get(previewMessageId) ?? initiatingRoomId;
+            updateRoomState(previewRoomId, (room) => {
+              const hasPreview = room.roomMessages.some((message) => message.id === previewMessageId);
+              if (!hasPreview) {
+                return room;
+              }
+
+              return {
+                ...room,
+                roomMessages: room.roomMessages.filter((message) => message.id !== previewMessageId),
+                updatedAt: createTimestamp(),
+              };
+            });
+          }
 
           updateAgentTurns(agentId, (turns) =>
             updateTurn(turns, turnId, (turn) => ({
@@ -330,6 +412,7 @@ export function useRoomExecution(args: {
         userMessage: params.inputMessage,
         ...(params.anchorMessageId ? { anchorMessageId: params.anchorMessageId } : {}),
         assistantContent: "",
+        draftSegments: [],
         timeline: [],
         tools: [],
         emittedMessages: [],

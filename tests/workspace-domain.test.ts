@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createAgentOwnedRoomSession,
+  createRoomMessage,
   createRoomSession,
   reduceRoomManagementActions,
   syncRoomParticipants,
+  upsertMessageToRoom,
 } from "@/lib/chat/workspace-domain";
 
 test("shared room reducer creates rooms and logs the owner action", () => {
@@ -51,4 +53,34 @@ test("shared participant sync prunes scheduler state for removed agents", () => 
   assert.deepEqual(Object.keys(synced.scheduler.agentReceiptRevisionByParticipantId), ["concierge"]);
   assert.equal(synced.scheduler.activeParticipantId, null);
   assert.equal(synced.scheduler.nextAgentParticipantId, "concierge");
+});
+
+test("upsertMessageToRoom keeps sequence while updating streamed assistant messages", () => {
+  const room = createRoomSession(1);
+  const initialMessage = createRoomMessage(room.id, "assistant", "Working", "agent_emit", {
+    sender: {
+      id: "concierge",
+      name: "Harbor Concierge",
+      role: "participant",
+    },
+    status: "streaming",
+    final: false,
+  });
+  initialMessage.id = "stream-1";
+
+  const roomWithStreamingMessage = upsertMessageToRoom(room, initialMessage);
+  const completedMessage = {
+    ...initialMessage,
+    content: "Working, done.",
+    status: "completed" as const,
+    final: true,
+  };
+
+  const updatedRoom = upsertMessageToRoom(roomWithStreamingMessage, completedMessage);
+
+  assert.equal(updatedRoom.roomMessages.length, 1);
+  assert.equal(updatedRoom.roomMessages[0]?.id, "stream-1");
+  assert.equal(updatedRoom.roomMessages[0]?.seq, 1);
+  assert.equal(updatedRoom.roomMessages[0]?.content, "Working, done.");
+  assert.equal(updatedRoom.roomMessages[0]?.status, "completed");
 });

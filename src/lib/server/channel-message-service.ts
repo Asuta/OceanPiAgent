@@ -292,7 +292,7 @@ async function appendInboundMessageToWorkspace(
 
 function createExternalOutboundMessages(binding: ChannelBinding, emittedMessages: RoomMessage[]): ExternalOutboundMessage[] {
   return emittedMessages
-    .filter((message) => message.roomId === binding.roomId && message.content.trim())
+    .filter((message) => message.roomId === binding.roomId && message.final && message.status === "completed" && message.content.trim())
     .map((message) => ({
       channel: binding.channel,
       accountId: binding.accountId,

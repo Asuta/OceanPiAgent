@@ -175,7 +175,7 @@ test("compactPersistedAgentRuntime falls back to the local rule summary when LLM
   });
 });
 
-test("compactPersistedAgentRuntime keeps image-bearing messages in persisted history", async () => {
+test("compactPersistedAgentRuntime prunes image-bearing messages when they fall outside the kept window", async () => {
   await withRuntimeModules(async (runtimeStore, agentCompaction) => {
     const agentId = "operator";
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => {
@@ -197,7 +197,6 @@ test("compactPersistedAgentRuntime keeps image-bearing messages in persisted his
       ].join("\n");
     });
 
-    await seedConversation(runtimeStore, agentId);
     await runtimeStore.appendPersistedHistoryMessage({
       agentId,
       message: {
@@ -216,6 +215,7 @@ test("compactPersistedAgentRuntime keeps image-bearing messages in persisted his
         attachments: [TEST_IMAGE_ATTACHMENT],
       },
     });
+    await seedConversation(runtimeStore, agentId);
 
     const result = await runtimeStore.compactPersistedAgentRuntime({
       agentId,
@@ -224,7 +224,7 @@ test("compactPersistedAgentRuntime keeps image-bearing messages in persisted his
     });
 
     assert.equal(result.compacted, true);
-    assert.ok(result.history.some((message) => message.attachments.some((attachment) => attachment.id === TEST_IMAGE_ATTACHMENT.id)));
+    assert.ok(!result.history.some((message) => message.attachments.some((attachment) => attachment.id === TEST_IMAGE_ATTACHMENT.id)));
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });

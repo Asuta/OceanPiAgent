@@ -214,6 +214,14 @@ export async function POST(request: Request) {
                   }),
                 );
               },
+              onRoomMessagePreview: (message) => {
+                controller.enqueue(
+                  encodeSseEvent({
+                    type: "room-message-preview",
+                    message,
+                  }),
+                );
+              },
               onRoomMessage: (message) => {
                 controller.enqueue(
                   encodeSseEvent({
