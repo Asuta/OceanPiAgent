@@ -306,6 +306,22 @@ const roomMessageSchema = z.object({
   receiptUpdatedAt: z.string().nullable(),
 }).strict();
 
+const turnTimelineEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    id: z.string(),
+    sequence: z.number().int(),
+    type: z.literal("tool"),
+    toolId: z.string(),
+  }).strict(),
+  z.object({
+    id: z.string(),
+    sequence: z.number().int(),
+    type: z.literal("room-message"),
+    messageId: z.string(),
+    roomId: z.string(),
+  }).strict(),
+]);
+
 const agentRoomTurnSchema = z.object({
   id: z.string(),
   agent: z.object({
@@ -313,8 +329,10 @@ const agentRoomTurnSchema = z.object({
     label: z.string(),
   }).strict(),
   userMessage: roomMessageSchema,
+  anchorMessageId: z.string().optional(),
   continuationSnapshot: z.string().optional(),
   assistantContent: z.string(),
+  timeline: z.array(turnTimelineEventSchema).optional(),
   tools: z.array(toolExecutionSchema),
   emittedMessages: z.array(roomMessageSchema),
   status: agentTurnStatusSchema,
