@@ -838,7 +838,34 @@ function normalizeTurnTimelineEvent(value: unknown, index: number): NonNullable<
     };
   }
 
+  if (value.type === "draft-segment" && typeof value.segmentId === "string" && value.segmentId) {
+    return {
+      id,
+      sequence,
+      type: "draft-segment",
+      segmentId: value.segmentId,
+    };
+  }
+
   return null;
+}
+
+function normalizeDraftTextSegment(value: unknown, index: number): NonNullable<AgentRoomTurn["draftSegments"]>[number] | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = typeof value.id === "string" && value.id ? value.id : createUuid();
+  const sequence = typeof value.sequence === "number" && Number.isFinite(value.sequence) ? Math.max(1, Math.round(value.sequence)) : index + 1;
+  const content = typeof value.content === "string" ? value.content : "";
+  const status = value.status === "streaming" ? "streaming" : "completed";
+
+  return {
+    id,
+    sequence,
+    content,
+    status,
+  };
 }
 
 function normalizeCompatibility(value: unknown): ProviderCompatibility | null {
@@ -1374,6 +1401,12 @@ function normalizeAgentTurn(value: unknown, fallbackAgentId: RoomAgentId): Agent
         .filter((event): event is NonNullable<AgentRoomTurn["timeline"]>[number] => Boolean(event))
         .sort((left, right) => left.sequence - right.sequence)
     : [];
+  const draftSegments = Array.isArray(value.draftSegments)
+    ? value.draftSegments
+        .map((segment, index) => normalizeDraftTextSegment(segment, index))
+        .filter((segment): segment is NonNullable<AgentRoomTurn["draftSegments"]>[number] => Boolean(segment))
+        .sort((left, right) => left.sequence - right.sequence)
+    : [];
 
   return {
     id: typeof value.id === "string" && value.id ? value.id : createUuid(),
@@ -1405,6 +1438,11 @@ function normalizeAgentTurn(value: unknown, fallbackAgentId: RoomAgentId): Agent
         }
       : {}),
     assistantContent: typeof value.assistantContent === "string" ? value.assistantContent : "",
+    ...(draftSegments.length > 0
+      ? {
+          draftSegments,
+        }
+      : {}),
     ...(timeline.length > 0
       ? {
           timeline,

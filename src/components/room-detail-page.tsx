@@ -20,7 +20,8 @@ import {
   useWorkspace,
 } from "@/components/workspace-provider";
 import { RoomCronPanel } from "@/components/room-cron-panel";
-import { buildRoomThreadToolEntries, type RoomThreadToolEntry } from "@/components/workspace/room-thread";
+import { DraftHistoryInline } from "@/components/workspace/draft-history-inline";
+import { buildRoomThreadDraftEntries, buildRoomThreadToolEntries, type RoomThreadDraftEntry, type RoomThreadToolEntry } from "@/components/workspace/room-thread";
 import { ToolHistoryInline } from "@/components/workspace/tool-history-inline";
 import type { AgentRoomTurn, MessageImageAttachment, RoomAgentId, RoomMessage, RoomParticipant } from "@/lib/chat/types";
 
@@ -348,10 +349,23 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
         : new Map<string, RoomThreadToolEntry[]>(),
     [agentStates, room],
   );
+  const roomThreadDraftEntries = useMemo<Map<string, RoomThreadDraftEntry[]>>(
+    () =>
+      room
+        ? buildRoomThreadDraftEntries({
+            roomId: room.id,
+            roomMessages: room.roomMessages,
+            agentStates,
+          })
+        : new Map<string, RoomThreadDraftEntry[]>(),
+    [agentStates, room],
+  );
   const visibleInlineTools = useMemo(() => Array.from(roomThreadToolEntries.values()).flat(), [roomThreadToolEntries]);
+  const visibleInlineDrafts = useMemo(() => Array.from(roomThreadDraftEntries.values()).flat(), [roomThreadDraftEntries]);
   const latestInlineTool = visibleInlineTools.at(-1) ?? null;
+  const latestInlineDraft = visibleInlineDrafts.at(-1) ?? null;
   const threadScrollKey = room
-    ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}:${latestMessage?.attachments.length ?? 0}:${visibleInlineTools.length}:${latestInlineTool?.turn.id ?? ""}:${latestInlineTool?.tool.id ?? ""}:${latestInlineTool?.event.sequence ?? 0}`
+    ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}:${latestMessage?.attachments.length ?? 0}:${visibleInlineTools.length}:${latestInlineTool?.turn.id ?? ""}:${latestInlineTool?.tool.id ?? ""}:${latestInlineTool?.event.sequence ?? 0}:${visibleInlineDrafts.length}:${latestInlineDraft?.turn.id ?? ""}:${latestInlineDraft?.turn.status ?? ""}:${latestInlineDraft?.turn.assistantContent.length ?? 0}`
     : "";
 
   useLayoutEffect(() => {
@@ -832,6 +846,11 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                 const shouldShowState = message.role === "assistant" && (message.kind !== "answer" || message.status !== "completed");
                 const isLatestMessage = index === room.roomMessages.length - 1;
                 const inlineToolEntries = roomThreadToolEntries.get(message.id) ?? [];
+                const inlineDraftEntries = roomThreadDraftEntries.get(message.id) ?? [];
+                const inlineArtifacts = [
+                  ...inlineToolEntries.map((entry) => ({ kind: "tool" as const, sequence: entry.event.sequence, id: entry.id, entry })),
+                  ...inlineDraftEntries.map((entry) => ({ kind: "draft" as const, sequence: entry.event.sequence, id: entry.id, entry })),
+                ].sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id));
                 return (
                   <Fragment key={message.id}>
                     <article
@@ -887,14 +906,22 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                       </div>
                     </article>
 
-                    {inlineToolEntries.length > 0 ? (
-                      <div className="thread-turn-inline-stack">
-                        {inlineToolEntries.map((entry) => (
-                          <ToolHistoryInline
-                            key={entry.id}
-                            entry={entry}
-                            defaultOpen={false}
-                          />
+                    {inlineArtifacts.length > 0 ? (
+                      <div className="thread-turn-inline-stack draft-stack">
+                        {inlineArtifacts.map((artifact) => (
+                          artifact.kind === "tool" ? (
+                            <ToolHistoryInline
+                              key={artifact.id}
+                              entry={artifact.entry}
+                              defaultOpen={false}
+                            />
+                          ) : (
+                            <DraftHistoryInline
+                              key={artifact.id}
+                              entry={artifact.entry}
+                              defaultOpen={artifact.entry.segment.status === "streaming"}
+                            />
+                          )
                         ))}
                       </div>
                     ) : null}

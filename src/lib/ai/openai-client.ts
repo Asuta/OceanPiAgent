@@ -5,6 +5,7 @@ import {
   getResponsesContinuationOrder,
   shouldFallbackToResponsesReplay,
 } from "@/lib/ai/provider-compat";
+import { extractRoomMessagePreviewFromToolArgs } from "@/lib/ai/room-message-preview";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { resolvePiModel } from "@/lib/ai/pi-model-resolver";
 import { getPiAgentTools, type PiToolResultDetails } from "@/lib/ai/pi-agent-tools";
@@ -24,6 +25,7 @@ import type {
   ModelConfigExecutionOverrides,
   ProviderCompatibility,
   RecoveryDiagnostic,
+  RoomMessagePreviewEmission,
   RoomToolContext,
   ToolExecution,
   ToolScope,
@@ -69,6 +71,7 @@ interface ResponsesContinuationContext {
 interface StreamConversationCallbacks {
   onTextDelta?: (delta: string) => void;
   onTool?: (tool: ToolExecution) => void;
+  onRoomMessagePreview?: (preview: RoomMessagePreviewEmission) => void;
 }
 
 interface ConversationOptions {
@@ -675,11 +678,33 @@ async function runConversationAttempt(args: {
   let assistantText = "";
   let toolTurnCount = 0;
   let toolLoopErrorMessage = "";
+  const lastRoomMessagePreviewByToolCallId = new Map<string, string>();
 
   const unsubscribe = agent.subscribe((event) => {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       assistantText += event.assistantMessageEvent.delta;
       args.callbacks?.onTextDelta?.(event.assistantMessageEvent.delta);
+      return;
+    }
+
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_delta") {
+      const contentBlock = event.assistantMessageEvent.partial.content[event.assistantMessageEvent.contentIndex];
+      if (contentBlock?.type !== "toolCall") {
+        return;
+      }
+
+      const preview = extractRoomMessagePreviewFromToolArgs(contentBlock.id, contentBlock.name, contentBlock.arguments);
+      if (!preview) {
+        return;
+      }
+
+      const previewSignature = JSON.stringify(preview);
+      if (lastRoomMessagePreviewByToolCallId.get(preview.toolCallId) === previewSignature) {
+        return;
+      }
+
+      lastRoomMessagePreviewByToolCallId.set(preview.toolCallId, previewSignature);
+      args.callbacks?.onRoomMessagePreview?.(preview);
       return;
     }
 

@@ -63,11 +63,14 @@ test("appendMissingMatchingRoomMessages only appends messages for the target roo
   assert.equal(nextRoom.roomMessages[0]?.id, "message-local");
 });
 
-test("appendMissingMatchingRoomMessages skips duplicates already in the room", () => {
-  const localMessage = createRoomMessage({ id: "message-local", roomId: "room-1", content: "local" });
+test("appendMissingMatchingRoomMessages updates duplicates already in the room", () => {
+  const localMessage = createRoomMessage({ id: "message-local", roomId: "room-1", content: "local", status: "streaming", final: false });
+  const completedMessage = createRoomMessage({ id: "message-local", roomId: "room-1", content: "local done", status: "completed", final: true });
 
-  const nextRoom = appendMissingMatchingRoomMessages(createRoom("room-1", [localMessage]), [localMessage]);
+  const nextRoom = appendMissingMatchingRoomMessages(createRoom("room-1", [localMessage]), [completedMessage]);
 
   assert.equal(nextRoom.roomMessages.length, 1);
   assert.equal(nextRoom.roomMessages[0]?.id, "message-local");
+  assert.equal(nextRoom.roomMessages[0]?.content, "local done");
+  assert.equal(nextRoom.roomMessages[0]?.status, "completed");
 });

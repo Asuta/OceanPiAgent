@@ -163,6 +163,7 @@ export interface AttachedRoomDefinition {
 
 export interface RoomHistoryMessageSummary {
   messageId: string;
+  messageKey?: string;
   seq: number;
   senderId: string;
   senderName: string;
@@ -238,10 +239,15 @@ export type RoomToolActionUnion = RoomToolAction | RoomManagementToolAction;
 
 export interface RoomMessageEmission {
   roomId: string;
+  messageKey?: string;
   content: string;
   kind: AgentVisibleRoomMessageKind;
   status: RoomMessageStatus;
   final: boolean;
+}
+
+export interface RoomMessagePreviewEmission extends RoomMessageEmission {
+  toolCallId: string;
 }
 
 export interface RoomMessage {
@@ -306,6 +312,13 @@ export interface ToolExecution {
   roomAction?: RoomToolActionUnion;
 }
 
+export interface DraftTextSegment {
+  id: string;
+  sequence: number;
+  content: string;
+  status: "streaming" | "completed";
+}
+
 export type TurnTimelineEvent =
   | {
       id: string;
@@ -319,6 +332,12 @@ export type TurnTimelineEvent =
       type: "room-message";
       messageId: string;
       roomId: string;
+    }
+  | {
+      id: string;
+      sequence: number;
+      type: "draft-segment";
+      segmentId: string;
     };
 
 export interface EmptyCompletionDiagnostic {
@@ -496,6 +515,7 @@ export interface AgentRoomTurn {
   anchorMessageId?: string;
   continuationSnapshot?: string;
   assistantContent: string;
+  draftSegments?: DraftTextSegment[];
   timeline?: TurnTimelineEvent[];
   tools: ToolExecution[];
   emittedMessages: RoomMessage[];
@@ -622,6 +642,10 @@ export type RoomChatStreamEvent =
   | {
       type: "tool";
       tool: ToolExecution;
+    }
+  | {
+      type: "room-message-preview";
+      message: RoomMessage;
     }
   | {
       type: "room-message";

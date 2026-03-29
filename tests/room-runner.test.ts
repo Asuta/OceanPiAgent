@@ -180,10 +180,361 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
     assert.equal(result.roomActions.length, 1);
     assert.equal(result.turn.userMessage.receiptStatus, "read_no_reply");
     assert.equal(result.turn.userMessage.receipts.length, 1);
+    assert.equal(result.turn.draftSegments?.length, 1);
+    assert.equal(result.turn.draftSegments?.[0]?.content, "Done. ");
+    assert.deepEqual(
+      result.turn.timeline?.map((event) => event.type),
+      ["draft-segment", "tool", "room-message", "tool"],
+    );
+
+    await resetAgentRoomSession("concierge");
+  });
+});
+
+test("runPreparedRoomTurn upserts streamed room messages that reuse a message key", async () => {
+  await withTempCwd(async () => {
+    const seenMessages: string[] = [];
+    const result = await runPreparedRoomTurn(
+      {
+        message: {
+          id: "user-msg-stream",
+          content: "Stream it",
+          attachments: [],
+          sender: {
+            id: "local-user",
+            name: "You",
+            role: "participant",
+          },
+        },
+        settings: {
+          modelConfigId: null,
+          apiFormat: "chat_completions",
+          model: "fake-model",
+          systemPrompt: "",
+          providerMode: "auto",
+          maxToolLoopSteps: 4,
+          thinkingLevel: "off",
+          enabledSkillIds: [],
+        },
+        room: {
+          id: "room-1",
+          title: "Primary Room",
+        },
+        attachedRooms: [
+          {
+            id: "room-1",
+            title: "Primary Room",
+            archived: false,
+            ownerParticipantId: "concierge",
+            ownerName: "Harbor Concierge",
+            currentAgentMembershipRole: "owner",
+            currentAgentIsOwner: true,
+            participants: [],
+            messageCount: 1,
+            latestMessageAt: null,
+          },
+        ],
+        knownAgents: createKnownAgentCards(),
+        roomHistoryById: {
+          "room-1": [],
+        },
+        agent: {
+          id: "concierge",
+          label: "Harbor Concierge",
+          instruction: "Keep it short.",
+        },
+        conversationRunner: async (_messages, _settings, callbacks) => {
+          callbacks?.onTool?.({
+            id: "tool-1",
+            sequence: 1,
+            toolName: "send_message_to_room",
+            displayName: "Send Message To Room",
+            inputSummary: "send",
+            inputText: "{}",
+            resultPreview: "sent",
+            outputText: "sent",
+            status: "success",
+            durationMs: 12,
+            roomMessage: {
+              roomId: "room-1",
+              messageKey: "reply",
+              content: "Visible",
+              kind: "answer",
+              status: "streaming",
+              final: false,
+            },
+          });
+          callbacks?.onTool?.({
+            id: "tool-2",
+            sequence: 2,
+            toolName: "send_message_to_room",
+            displayName: "Send Message To Room",
+            inputSummary: "send",
+            inputText: "{}",
+            resultPreview: "sent",
+            outputText: "sent",
+            status: "success",
+            durationMs: 10,
+            roomMessage: {
+              roomId: "room-1",
+              messageKey: "reply",
+              content: "Visible answer",
+              kind: "answer",
+              status: "completed",
+              final: true,
+            },
+          });
+
+          return {
+            assistantText: "Done.",
+            toolEvents: [],
+            resolvedModel: "fake-provider/fake-model",
+            compatibility: {
+              providerKey: "generic",
+              providerLabel: "Generic",
+              baseUrl: "https://example.test/v1",
+              chatCompletionsToolStyle: "tools",
+              responsesContinuation: "replay",
+              responsesPayloadMode: "json",
+              notes: [],
+            },
+            actualApiFormat: "chat_completions",
+          };
+        },
+      },
+      {
+        onRoomMessage: (message) => seenMessages.push(`${message.id}:${message.status}:${message.content}`),
+      },
+    );
+
+    assert.equal(result.emittedMessages.length, 1);
+    assert.equal(result.emittedMessages[0]?.content, "Visible answer");
+    assert.equal(result.emittedMessages[0]?.status, "completed");
+    assert.equal(result.turn.emittedMessages.length, 1);
+    assert.equal(result.turn.draftSegments?.length ?? 0, 0);
     assert.deepEqual(
       result.turn.timeline?.map((event) => event.type),
       ["tool", "room-message", "tool"],
     );
+    assert.equal(seenMessages.length, 2);
+    assert.equal(seenMessages[0]?.split(":")[0], seenMessages[1]?.split(":")[0]);
+
+    await resetAgentRoomSession("concierge");
+  });
+});
+
+test("runPreparedRoomTurn splits draft segments when tool calls interrupt generation", async () => {
+  await withTempCwd(async () => {
+    const result = await runPreparedRoomTurn({
+      message: {
+        id: "user-msg-draft-split",
+        content: "Split drafts",
+        attachments: [],
+        sender: {
+          id: "local-user",
+          name: "You",
+          role: "participant",
+        },
+      },
+      settings: {
+        modelConfigId: null,
+        apiFormat: "chat_completions",
+        model: "fake-model",
+        systemPrompt: "",
+        providerMode: "auto",
+        maxToolLoopSteps: 4,
+        thinkingLevel: "off",
+        enabledSkillIds: [],
+      },
+      room: {
+        id: "room-1",
+        title: "Primary Room",
+      },
+      attachedRooms: [
+        {
+          id: "room-1",
+          title: "Primary Room",
+          archived: false,
+          ownerParticipantId: "concierge",
+          ownerName: "Harbor Concierge",
+          currentAgentMembershipRole: "owner",
+          currentAgentIsOwner: true,
+          participants: [],
+          messageCount: 1,
+          latestMessageAt: null,
+        },
+      ],
+      knownAgents: createKnownAgentCards(),
+      roomHistoryById: {
+        "room-1": [],
+      },
+      agent: {
+        id: "concierge",
+        label: "Harbor Concierge",
+        instruction: "Keep it short.",
+      },
+      conversationRunner: async (_messages, _settings, callbacks) => {
+        callbacks?.onTextDelta?.("First draft. ");
+        callbacks?.onTool?.({
+          id: "tool-split-1",
+          sequence: 1,
+          toolName: "webfetch",
+          displayName: "Web Fetch",
+          inputSummary: "fetch",
+          inputText: "{}",
+          resultPreview: "ok",
+          outputText: "ok",
+          status: "success",
+          durationMs: 10,
+        });
+        callbacks?.onTextDelta?.("Second draft. ");
+
+        return {
+          assistantText: "Second draft.",
+          toolEvents: [],
+          resolvedModel: "fake-provider/fake-model",
+          compatibility: {
+            providerKey: "generic",
+            providerLabel: "Generic",
+            baseUrl: "https://example.test/v1",
+            chatCompletionsToolStyle: "tools",
+            responsesContinuation: "replay",
+            responsesPayloadMode: "json",
+            notes: [],
+          },
+          actualApiFormat: "chat_completions",
+        };
+      },
+    });
+
+    assert.deepEqual(
+      result.turn.draftSegments?.map((segment) => ({ content: segment.content, status: segment.status })),
+      [
+        { content: "First draft. ", status: "completed" },
+        { content: "Second draft. ", status: "completed" },
+      ],
+    );
+    assert.deepEqual(
+      result.turn.timeline?.map((event) => event.type),
+      ["draft-segment", "tool", "draft-segment"],
+    );
+
+    await resetAgentRoomSession("concierge");
+  });
+});
+
+test("runPreparedRoomTurn keeps preview and final send_message room bubbles on the same id", async () => {
+  await withTempCwd(async () => {
+    const previewIds: string[] = [];
+    const finalIds: string[] = [];
+
+    const result = await runPreparedRoomTurn(
+      {
+        message: {
+          id: "user-msg-preview-stream",
+          content: "Preview this",
+          attachments: [],
+          sender: {
+            id: "local-user",
+            name: "You",
+            role: "participant",
+          },
+        },
+        settings: {
+          modelConfigId: null,
+          apiFormat: "chat_completions",
+          model: "fake-model",
+          systemPrompt: "",
+          providerMode: "auto",
+          maxToolLoopSteps: 4,
+          thinkingLevel: "off",
+          enabledSkillIds: [],
+        },
+        room: {
+          id: "room-1",
+          title: "Primary Room",
+        },
+        attachedRooms: [
+          {
+            id: "room-1",
+            title: "Primary Room",
+            archived: false,
+            ownerParticipantId: "concierge",
+            ownerName: "Harbor Concierge",
+            currentAgentMembershipRole: "owner",
+            currentAgentIsOwner: true,
+            participants: [],
+            messageCount: 1,
+            latestMessageAt: null,
+          },
+        ],
+        knownAgents: createKnownAgentCards(),
+        roomHistoryById: {
+          "room-1": [],
+        },
+        agent: {
+          id: "concierge",
+          label: "Harbor Concierge",
+          instruction: "Keep it short.",
+        },
+        conversationRunner: async (_messages, _settings, callbacks) => {
+          callbacks?.onRoomMessagePreview?.({
+            toolCallId: "tool-preview-1",
+            roomId: "room-1",
+            messageKey: "reply",
+            content: "Hello wor",
+            kind: "answer",
+            status: "streaming",
+            final: false,
+          });
+          callbacks?.onTool?.({
+            id: "tool-preview-1",
+            sequence: 1,
+            toolName: "send_message_to_room",
+            displayName: "Send Message To Room",
+            inputSummary: "send",
+            inputText: "{}",
+            resultPreview: "sent",
+            outputText: "sent",
+            status: "success",
+            durationMs: 10,
+            roomMessage: {
+              roomId: "room-1",
+              messageKey: "reply",
+              content: "Hello world",
+              kind: "answer",
+              status: "completed",
+              final: true,
+            },
+          });
+
+          return {
+            assistantText: "Done.",
+            toolEvents: [],
+            resolvedModel: "fake-provider/fake-model",
+            compatibility: {
+              providerKey: "generic",
+              providerLabel: "Generic",
+              baseUrl: "https://example.test/v1",
+              chatCompletionsToolStyle: "tools",
+              responsesContinuation: "replay",
+              responsesPayloadMode: "json",
+              notes: [],
+            },
+            actualApiFormat: "chat_completions",
+          };
+        },
+      },
+      {
+        onRoomMessagePreview: (message) => previewIds.push(message.id),
+        onRoomMessage: (message) => finalIds.push(message.id),
+      },
+    );
+
+    assert.equal(previewIds.length, 1);
+    assert.equal(finalIds.length, 1);
+    assert.equal(previewIds[0], finalIds[0]);
+    assert.equal(result.emittedMessages[0]?.id, finalIds[0]);
 
     await resetAgentRoomSession("concierge");
   });

@@ -51,6 +51,11 @@ function handleRoomStreamEvent(
     return;
   }
 
+  if (event.type === "room-message-preview") {
+    args.onRoomMessagePreview(event.message);
+    return;
+  }
+
   if (event.type === "room-message") {
     emittedMessages.push(event.message);
     args.onRoomMessage(event.message);
@@ -79,6 +84,7 @@ export async function readRoomStream(args: {
   shouldContinue: () => boolean;
   onTextDelta: (delta: string) => void;
   onTool: (tool: ToolExecution) => void;
+  onRoomMessagePreview: (message: RoomMessage) => void;
   onRoomMessage: (message: RoomMessage) => void;
   onReceiptUpdate: (update: RoomMessageReceiptUpdate) => void;
   onDone: (event: Extract<RoomChatStreamEvent, { type: "done" }>) => void;

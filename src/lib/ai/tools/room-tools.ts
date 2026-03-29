@@ -33,13 +33,17 @@ export const roomTools = {
     name: "send_message_to_room",
     displayName: "Send Message To Room",
     description:
-      "Send a structured user-visible message into a specific attached Chat Room. Use this for both direct replies in the current room and relays, notifications, handoffs, or cross-room messaging into another attached room. You must target an attached roomId and use kind, status, and final to describe the delivery.",
+      "Send a structured user-visible message into a specific attached Chat Room. Use this for both direct replies in the current room and relays, notifications, handoffs, or cross-room messaging into another attached room. To stream one visible room bubble over time, call this tool repeatedly with the same roomId and messageKey, using status=streaming for interim updates and status=completed for the final version.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      properties: {
-        roomId: { type: "string", description: "The target attached Chat Room id that should receive this visible message." },
-        content: { type: "string", description: "The exact message that should be delivered into the target Chat Room." },
+        properties: {
+          roomId: { type: "string", description: "The target attached Chat Room id that should receive this visible message." },
+          messageKey: {
+            type: "string",
+            description: "Optional stable key for streaming updates to the same visible room message within this turn. Reuse the same key for incremental updates.",
+          },
+          content: { type: "string", description: "The exact message that should be delivered into the target Chat Room." },
         kind: {
           type: "string",
           enum: ["answer", "progress", "warning", "error", "clarification"],
@@ -69,6 +73,7 @@ export const roomTools = {
           senderId: currentAgent.agentId,
           senderName: currentAgent.label,
           senderRole: "participant",
+          ...(args.messageKey ? { messageKey: args.messageKey } : {}),
           role: "assistant",
           source: "agent_emit",
           kind: args.kind,

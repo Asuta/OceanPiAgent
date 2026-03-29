@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildRoomThreadToolEntries } from "@/components/workspace/room-thread";
+import { buildRoomThreadDraftEntries, buildRoomThreadToolEntries } from "@/components/workspace/room-thread";
 import type { AgentRoomTurn, AgentSharedState, RoomMessage, ToolExecution, TurnTimelineEvent } from "@/lib/chat/types";
 
 function createTool(id: string, sequence = 1): ToolExecution {
@@ -273,4 +273,46 @@ test("falls back to scheduler packet latest message id for legacy turns", () => 
   });
 
   assert.equal(entries.get("user-1")?.[0]?.tool.id, "tool-1");
+});
+
+test("builds draft entries anchored under the triggering visible room message", () => {
+  const runningTurn = createTurn({
+    status: "running",
+    emittedMessages: [],
+    timeline: [{ id: "draft-segment:segment-1", sequence: 1, type: "draft-segment", segmentId: "segment-1" }],
+    assistantContent: "Investigating the request...",
+    draftSegments: [{ id: "segment-1", sequence: 1, content: "Investigating the request...", status: "streaming" }],
+  });
+
+  const entries = buildRoomThreadDraftEntries({
+    roomId: "room-1",
+    roomMessages: [runningTurn.userMessage],
+    agentStates: {
+      concierge: createAgentState([runningTurn]),
+    },
+  });
+
+  assert.equal(entries.get("user-1")?.length, 1);
+  assert.equal(entries.get("user-1")?.[0]?.turn.id, "turn-1");
+  assert.equal(entries.get("user-1")?.[0]?.segment.content, "Investigating the request...");
+});
+
+test("skips completed turns without draft text in room thread draft entries", () => {
+  const completedTurn = createTurn({
+    status: "completed",
+    emittedMessages: [],
+    timeline: [],
+    assistantContent: "",
+    draftSegments: [],
+  });
+
+  const entries = buildRoomThreadDraftEntries({
+    roomId: "room-1",
+    roomMessages: [completedTurn.userMessage],
+    agentStates: {
+      concierge: createAgentState([completedTurn]),
+    },
+  });
+
+  assert.equal(entries.size, 0);
 });

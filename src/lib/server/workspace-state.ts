@@ -1,11 +1,11 @@
 import type { AgentSharedState, ProviderCompatibility, RoomAgentId, RoomWorkspaceState } from "@/lib/chat/types";
 import {
   applyMessageReceiptUpdate,
-  appendMessageToRoom,
   createAgentSharedState,
   createTimestamp,
   reduceRoomManagementActions,
   sortRoomsByUpdatedAt,
+  upsertMessageToRoom,
   type ApplyCronTurnToWorkspaceArgs,
 } from "@/lib/chat/workspace-domain";
 
@@ -63,7 +63,7 @@ export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
 
     for (const emittedMessage of args.emittedMessages) {
       if (emittedMessage.roomId === nextRoom.id) {
-        nextRoom = appendMessageToRoom(nextRoom, emittedMessage);
+        nextRoom = upsertMessageToRoom(nextRoom, emittedMessage);
       }
     }
 
@@ -74,7 +74,7 @@ export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
     if (emittedMessage.roomId === args.targetRoomId) {
       continue;
     }
-    rooms = rooms.map((room) => (room.id === emittedMessage.roomId ? appendMessageToRoom(room, emittedMessage) : room));
+    rooms = rooms.map((room) => (room.id === emittedMessage.roomId ? upsertMessageToRoom(room, emittedMessage) : room));
   }
 
   const nextAgentStates: Record<RoomAgentId, AgentSharedState> = {
@@ -123,7 +123,7 @@ export function applyCronTurnToWorkspace(args: ApplyCronTurnToWorkspaceArgs) {
 
     for (const emittedMessage of args.emittedMessages) {
       if (emittedMessage.roomId === nextRoom.id) {
-        nextRoom = appendMessageToRoom(nextRoom, emittedMessage);
+        nextRoom = upsertMessageToRoom(nextRoom, emittedMessage);
       }
     }
 
@@ -134,7 +134,7 @@ export function applyCronTurnToWorkspace(args: ApplyCronTurnToWorkspaceArgs) {
     if (emittedMessage.roomId === args.targetRoomId) {
       continue;
     }
-    rooms = rooms.map((room) => (room.id === emittedMessage.roomId ? appendMessageToRoom(room, emittedMessage) : room));
+    rooms = rooms.map((room) => (room.id === emittedMessage.roomId ? upsertMessageToRoom(room, emittedMessage) : room));
   }
 
   const nextAgentStates: Record<RoomAgentId, AgentSharedState> = {
