@@ -15,22 +15,23 @@ export function ToolHistoryInline({
   entry: RoomThreadToolEntry;
   defaultOpen?: boolean;
 }) {
+  const statusLabel = entry.tool.status === "success" ? "成功" : "失败";
+
   return (
     <details className={`thread-tool-inline${entry.turn.status !== "completed" ? " is-active" : ""}${entry.tool.status === "error" || entry.turn.error ? " is-error" : ""}`} open={defaultOpen}>
       <summary className="thread-tool-summary">
         <div className="thread-tool-summary-main">
           <span className="thread-tool-kicker">工具调用</span>
           <strong>{entry.tool.displayName}</strong>
-          <span>
-            {entry.turn.agent.label} · {formatTimestamp(entry.turn.userMessage.createdAt)}
-          </span>
+          <span>{entry.turn.agent.label}</span>
         </div>
-        <div className="meta-chip-row compact align-end">
+        <div className="thread-tool-summary-meta">
           <span className="meta-chip subtle">{TURN_STATUS_LABELS[entry.turn.status]}</span>
-          <span className="meta-chip subtle">{entry.tool.status === "success" ? "成功" : "失败"}</span>
+          <span className="meta-chip subtle">{statusLabel}</span>
           <span className="meta-chip subtle">{entry.tool.durationMs} ms</span>
           {entry.tool.roomMessage ? <span className="meta-chip subtle">发回房间</span> : null}
           {entry.tool.roomAction ? <span className="meta-chip subtle">房间动作</span> : null}
+          <span className="thread-tool-summary-time">{formatTimestamp(entry.turn.userMessage.createdAt)}</span>
         </div>
       </summary>
 
