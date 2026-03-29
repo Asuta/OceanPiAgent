@@ -893,7 +893,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                           <ToolHistoryInline
                             key={entry.id}
                             entry={entry}
-                            defaultOpen={entry.turn.status !== "completed" || entry.tool.status === "error" || (isLatestMessage && entry.isLatestForAnchor)}
+                            defaultOpen={false}
                           />
                         ))}
                       </div>
