@@ -79,7 +79,7 @@ import {
   saveWorkspaceEnvelope,
   saveWorkspaceStateToLocalStorage,
 } from "@/components/workspace/persistence";
-import { buildWorkspaceStateSnapshot, workspaceStatesEqual } from "@/components/workspace/workspace-state";
+import { buildWorkspaceStateSnapshot, canApplyConflictWorkspaceSnapshot, workspaceStatesEqual } from "@/components/workspace/workspace-state";
 import {
   addAgentParticipantToRoom,
   addHumanParticipantToRoom,
@@ -2028,6 +2028,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           && !localPersistStillQueued
           && typeof conflictVersion === "number"
           && conflictState
+          && canApplyConflictWorkspaceSnapshot({
+            localState: latestSnapshot,
+            conflictState,
+          })
           && Object.keys(activeRunsRef.current).length === 0
         ) {
           applyWorkspaceSnapshot(conflictState, conflictVersion, {
