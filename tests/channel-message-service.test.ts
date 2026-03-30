@@ -270,6 +270,100 @@ test("receiveExternalMessage deduplicates repeated inbound message ids", async (
   assert.equal(runCount, 1);
 });
 
+test("receiveExternalMessage upserts an existing inbound room message instead of duplicating it", async () => {
+  await resetChannelDeliveryStateForTest();
+
+  let state = createDefaultWorkspaceState();
+  const roomId = state.rooms[0]?.id || "room-1";
+  const existingInboundMessage = {
+    ...createRoomMessage(roomId, "user", "Hello from Feishu", "user", {
+      sender: {
+        id: "feishu:default:direct:ou_123",
+        name: "Alice",
+        role: "participant",
+      },
+    }),
+    id: "feishu:default:msg-existing",
+  };
+  state.rooms[0] = {
+    ...state.rooms[0]!,
+    roomMessages: [existingInboundMessage],
+  };
+
+  let binding: ChannelBinding = {
+    bindingId: "binding-existing",
+    channel: "feishu",
+    accountId: "default",
+    peerKind: "direct",
+    peerId: "ou_123",
+    roomId,
+    humanParticipantId: "feishu:default:direct:ou_123",
+    agentId: "concierge",
+    createdAt: "2026-03-30T10:00:00.000Z",
+    updatedAt: "2026-03-30T10:00:00.000Z",
+    lastInboundAt: null,
+  };
+
+  await receiveExternalMessage(
+    {
+      channel: "feishu",
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "ou_123",
+      senderId: "ou_123",
+      senderName: "Alice",
+      messageId: "msg-existing",
+      messageType: "text",
+      text: "Hello from Feishu",
+      attachments: [],
+      agentId: "concierge",
+    },
+    {
+      loadWorkspaceEnvelope: async () => ({ version: 1, updatedAt: new Date().toISOString(), state }),
+      mutateWorkspace: async (mutator) => {
+        state = await mutator(state);
+        return { version: 1, updatedAt: new Date().toISOString(), state };
+      },
+      findChannelBinding: async () => binding,
+      upsertChannelBinding: async (nextBinding) => {
+        binding = nextBinding;
+        return nextBinding;
+      },
+      touchChannelBinding: async () => binding,
+      findChannelMessageLink: async () => null,
+      upsertChannelMessageLink: async (nextLink) => nextLink,
+      applyFeishuAckReaction: async (link) => link,
+      applyFeishuDoneReaction: async (link) => link,
+      listAgentDefinitions: async () => ROOM_AGENTS,
+      runRoomTurnNonStreaming: async ({ agentId }) => ({
+        turn: {
+          id: "turn-existing",
+          agent: {
+            id: agentId,
+            label: "Harbor Concierge",
+          },
+          userMessage: existingInboundMessage,
+          assistantContent: "Handled.",
+          draftSegments: [],
+          tools: [],
+          emittedMessages: [],
+          status: "completed",
+          resolvedModel: "generic/fake-model",
+        },
+        resolvedModel: "generic/fake-model",
+        compatibility: COMPATIBILITY,
+        emittedMessages: [],
+        receiptUpdates: [],
+        roomActions: [],
+      }),
+      deliverMessages: async () => undefined,
+    },
+  );
+
+  assert.equal(state.rooms[0]?.roomMessages.length, 1);
+  assert.equal(state.rooms[0]?.roomMessages[0]?.id, "feishu:default:msg-existing");
+});
+
 test("receiveExternalMessage only delivers final completed room replies to Feishu", async () => {
   await resetChannelDeliveryStateForTest();
 

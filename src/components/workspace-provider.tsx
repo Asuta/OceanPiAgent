@@ -54,6 +54,7 @@ import {
   createRoomSession,
   createSchedulerState,
   createTimestamp,
+  dedupeRoomMessages,
   getActiveRooms,
   getAgentParticipants,
   getArchivedRooms,
@@ -989,6 +990,11 @@ function normalizeAssistantHistoryToolCallPart(value: unknown) {
     id: value.id,
     name: value.name,
     arguments: isRecord(value.arguments) ? value.arguments : {},
+    ...(typeof value.partialJson === "string" && value.partialJson
+      ? {
+          partialJson: value.partialJson,
+        }
+      : {}),
     ...(typeof value.thoughtSignature === "string" && value.thoughtSignature
       ? {
           thoughtSignature: value.thoughtSignature,
@@ -1818,7 +1824,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (options?.skipServerPersist) {
         skipNextServerPersistRef.current = true;
       }
-      const nextRooms = snapshot.rooms.length > 0 ? snapshot.rooms : [createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current)];
+      const nextRooms = (snapshot.rooms.length > 0 ? snapshot.rooms : [createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current)]).map((room) => ({
+        ...room,
+        roomMessages: dedupeRoomMessages(room.roomMessages),
+      }));
       const nextAgentStates = ensureAgentStateMap(snapshot.agentStates, agentsRef.current, nextRooms);
       const nextActiveRoomId =
         snapshot.activeRoomId && nextRooms.some((room) => room.id === snapshot.activeRoomId)
@@ -2124,8 +2133,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [agentStates]);
 
   const replaceRooms = useCallback((nextRooms: RoomSession[]) => {
-    roomsRef.current = nextRooms;
-    setRooms(nextRooms);
+    const sanitizedRooms = nextRooms.map((room) => ({
+      ...room,
+      roomMessages: dedupeRoomMessages(room.roomMessages),
+    }));
+    roomsRef.current = sanitizedRooms;
+    setRooms(sanitizedRooms);
   }, []);
 
   useEffect(() => {
