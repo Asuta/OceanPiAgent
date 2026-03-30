@@ -53,7 +53,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
         return;
       }
 
-      archiveRoom(roomId);
+      void archiveRoom(roomId);
     },
     [archiveRoom],
   );
@@ -74,9 +74,14 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
             type="button"
             className="primary-button sidebar-create-button"
             onClick={() => {
-              const room = createRoom();
-              setSidebarOpen(false);
-              router.push(`/rooms/${room.id}`);
+              void (async () => {
+                const room = await createRoom();
+                if (!room) {
+                  return;
+                }
+                setSidebarOpen(false);
+                router.push(`/rooms/${room.id}`);
+              })();
             }}
           >
             新建房间

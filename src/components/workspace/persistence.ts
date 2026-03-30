@@ -9,6 +9,13 @@ export interface WorkspaceEnvelope {
   state?: RoomWorkspaceState;
 }
 
+export interface RoomCommandResponse {
+  ok?: boolean;
+  envelope?: WorkspaceEnvelope;
+  roomId?: string | null;
+  error?: string;
+}
+
 export function loadLocalWorkspaceState(args: {
   parseWorkspaceState: (raw: string) => RoomWorkspaceState | null;
   migrateLegacyWorkspaceState: (raw: string) => RoomWorkspaceState | null;
@@ -75,4 +82,15 @@ export async function saveWorkspaceEnvelope(args: {
       state: args.state,
     }),
   }).catch(() => null);
+}
+
+export async function postRoomCommand(payload: unknown): Promise<RoomCommandResponse | null> {
+  const response = await fetch("/api/rooms/command", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  }).catch(() => null);
+  return (await response?.json().catch(() => null)) as RoomCommandResponse | null;
 }

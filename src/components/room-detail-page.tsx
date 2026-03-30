@@ -804,7 +804,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               <Link href="/settings" className="secondary-button">
                 打开设置
               </Link>
-              <button type="button" className="ghost-button" onClick={() => clearRoom(room.id)} disabled={isRunning}>
+              <button type="button" className="ghost-button" onClick={() => void clearRoom(room.id)} disabled={isRunning}>
                 清空房间
               </button>
             </div>
@@ -1257,19 +1257,19 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                               <span className="meta-chip subtle">{participant.runtimeKind}</span>
                               {isAgent ? (
                                 <>
-                                  <button type="button" className="mini-button" onClick={() => moveAgentParticipant(room.id, participant.id, -1)} disabled={isRunning}>
+                                  <button type="button" className="mini-button" onClick={() => void moveAgentParticipant(room.id, participant.id, -1)} disabled={isRunning}>
                                     上移
                                   </button>
-                                  <button type="button" className="mini-button" onClick={() => moveAgentParticipant(room.id, participant.id, 1)} disabled={isRunning}>
+                                  <button type="button" className="mini-button" onClick={() => void moveAgentParticipant(room.id, participant.id, 1)} disabled={isRunning}>
                                     下移
                                   </button>
-                                  <button type="button" className="mini-button" onClick={() => toggleAgentParticipant(room.id, participant.id)} disabled={isRunning}>
+                                  <button type="button" className="mini-button" onClick={() => void toggleAgentParticipant(room.id, participant.id)} disabled={isRunning}>
                                     {participant.enabled ? "停用" : "启用"}
                                   </button>
                                 </>
                               ) : null}
                               {participant.id !== "local-operator" ? (
-                                <button type="button" className="mini-button danger-text" onClick={() => removeParticipant(room.id, participant.id)} disabled={isRunning}>
+                                <button type="button" className="mini-button danger-text" onClick={() => void removeParticipant(room.id, participant.id)} disabled={isRunning}>
                                   移除
                                 </button>
                               ) : null}
@@ -1290,7 +1290,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                         type="button"
                         className="secondary-button"
                         onClick={() => {
-                          addHumanParticipant(room.id, newParticipantName);
+                          void addHumanParticipant(room.id, newParticipantName);
                           setNewParticipantName("");
                         }}
                         disabled={!newParticipantName.trim() || isRunning}
@@ -1307,7 +1307,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                             key={agent.id}
                             type="button"
                             className={exists ? "preset-chip active" : "preset-chip"}
-                            onClick={() => addAgentParticipant(room.id, agent.id)}
+                            onClick={() => void addAgentParticipant(room.id, agent.id)}
                             disabled={exists || isRunning}
                           >
                             <strong>{agent.label}</strong>
@@ -1325,7 +1325,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                         type="button"
                         className="ghost-button"
                         onClick={() => {
-                          archiveRoom(room.id);
+                          void archiveRoom(room.id);
                           router.push("/rooms");
                         }}
                         disabled={isRunning}
@@ -1338,7 +1338,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                         onClick={() => {
                           if (window.confirm(`确认永久删除“${room.title}”吗？此操作不可恢复。`)) {
                             const fallback = activeRooms.find((entry) => entry.id !== room.id)?.id;
-                            deleteRoom(room.id);
+                            void deleteRoom(room.id);
                             router.push(fallback ? `/rooms/${fallback}` : "/rooms");
                           }
                         }}

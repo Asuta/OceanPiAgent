@@ -31,8 +31,13 @@ export function RoomsOverviewPage() {
             type="button"
             className="primary-button"
             onClick={() => {
-              const room = createRoom();
-              router.push(`/rooms/${room.id}`);
+              void (async () => {
+                const room = await createRoom();
+                if (!room) {
+                  return;
+                }
+                router.push(`/rooms/${room.id}`);
+              })();
             }}
           >
             立即开始
@@ -73,8 +78,13 @@ export function RoomsOverviewPage() {
               type="button"
               className="preset-chip"
               onClick={() => {
-                const room = createRoom(agent.id);
-                router.push(`/rooms/${room.id}`);
+                void (async () => {
+                  const room = await createRoom(agent.id);
+                  if (!room) {
+                    return;
+                  }
+                  router.push(`/rooms/${room.id}`);
+                })();
               }}
             >
               <span className="preset-chip-kicker">快速开场</span>
@@ -133,7 +143,7 @@ export function RoomsOverviewPage() {
                 <Link href={`/rooms/${spotlightRoom.id}`} className="primary-button">
                   回到这个房间
                 </Link>
-                <button type="button" className="ghost-button" onClick={() => archiveRoom(spotlightRoom.id)}>
+                <button type="button" className="ghost-button" onClick={() => void archiveRoom(spotlightRoom.id)}>
                   稍后归档
                 </button>
               </div>
@@ -160,7 +170,7 @@ export function RoomsOverviewPage() {
                       <Link href={`/rooms/${room.id}`} className="secondary-button">
                         打开房间
                       </Link>
-                      <button type="button" className="ghost-button" onClick={() => archiveRoom(room.id)}>
+                      <button type="button" className="ghost-button" onClick={() => void archiveRoom(room.id)}>
                         归档
                       </button>
                     </div>
@@ -202,7 +212,7 @@ export function RoomsOverviewPage() {
                 </div>
 
                 <div className="card-actions">
-                  <button type="button" className="secondary-button" onClick={() => restoreRoom(room.id)}>
+                  <button type="button" className="secondary-button" onClick={() => void restoreRoom(room.id)}>
                     恢复
                   </button>
                   <button
@@ -210,7 +220,7 @@ export function RoomsOverviewPage() {
                     className="ghost-button danger-text"
                     onClick={() => {
                       if (window.confirm(`确认永久删除“${room.title}”吗？此操作不可恢复。`)) {
-                        deleteRoom(room.id);
+                        void deleteRoom(room.id);
                       }
                     }}
                   >

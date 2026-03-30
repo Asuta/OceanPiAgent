@@ -515,7 +515,7 @@ class RoomTurnExecutionError extends Error {
   }
 }
 
-async function buildPreparedInputFromWorkspace(args: RunRoomTurnInput): Promise<RunPreparedRoomTurnInput> {
+export async function buildPreparedInputFromWorkspace(args: RunRoomTurnInput): Promise<RunPreparedRoomTurnInput> {
   const room = args.workspace.rooms.find((entry) => entry.id === args.roomId);
   if (!room) {
     throw new Error(`Room ${args.roomId} does not exist.`);
