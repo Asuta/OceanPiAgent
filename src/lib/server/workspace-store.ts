@@ -15,7 +15,11 @@ const WORKSPACE_FILE = path.join(WORKSPACE_ROOT, "state.json");
 
 declare global {
   var __oceankingWorkspaceWriteQueue: Promise<void> | undefined;
+  var __oceankingWorkspaceSubscribers: Map<string, (envelope: WorkspaceEnvelope) => void> | undefined;
 }
+
+const workspaceSubscribers = globalThis.__oceankingWorkspaceSubscribers ?? new Map<string, (envelope: WorkspaceEnvelope) => void>();
+globalThis.__oceankingWorkspaceSubscribers = workspaceSubscribers;
 
 function createTimestamp(): string {
   return new Date().toISOString();
@@ -73,6 +77,20 @@ async function writeWorkspaceEnvelope(envelope: WorkspaceEnvelope): Promise<void
   await writeFile(WORKSPACE_FILE, JSON.stringify(envelope, null, 2), "utf8");
 }
 
+function broadcastWorkspaceEnvelope(envelope: WorkspaceEnvelope): void {
+  for (const listener of workspaceSubscribers.values()) {
+    listener(envelope);
+  }
+}
+
+export function subscribeWorkspaceEnvelopes(listener: (envelope: WorkspaceEnvelope) => void): () => void {
+  const subscriptionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  workspaceSubscribers.set(subscriptionId, listener);
+  return () => {
+    workspaceSubscribers.delete(subscriptionId);
+  };
+}
+
 async function withWorkspaceWriteLock<T>(fn: () => Promise<T>): Promise<T> {
   const previous = globalThis.__oceankingWorkspaceWriteQueue ?? Promise.resolve();
   let release!: () => void;
@@ -108,6 +126,7 @@ export async function saveWorkspaceState(args: {
       state: parsedState,
     };
     await writeWorkspaceEnvelope(nextEnvelope);
+    broadcastWorkspaceEnvelope(nextEnvelope);
     return nextEnvelope;
   });
 }
@@ -124,6 +143,7 @@ export async function mutateWorkspace(
       state: nextState,
     };
     await writeWorkspaceEnvelope(nextEnvelope);
+    broadcastWorkspaceEnvelope(nextEnvelope);
     return nextEnvelope;
   });
 }

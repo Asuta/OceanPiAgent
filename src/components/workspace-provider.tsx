@@ -1853,6 +1853,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const workspacePersistInFlightRef = useRef(false);
   const workspacePersistNonceRef = useRef(0);
   const activeRoomStreamRequestIdsRef = useRef<Record<string, string>>({});
+  const activeRoomStreamControllersRef = useRef<Record<string, AbortController>>({});
 
   const applyWorkspaceSnapshot = useCallback(
     (
@@ -2192,23 +2193,30 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const interval = setInterval(() => {
-      void (async () => {
-        const payload = await fetchWorkspaceEnvelope();
+    const workspaceEvents = new EventSource("/api/workspace/stream");
+    workspaceEvents.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as { version?: number; state?: RoomWorkspaceState };
         if (
-          typeof payload?.version === "number"
+          typeof payload.version === "number"
           && payload.version > workspaceVersionRef.current
           && payload.state
         ) {
           applyWorkspaceSnapshot(payload.state, payload.version, { skipServerPersist: true });
         }
-      })();
-    }, 15_000);
+      } catch {
+        // Ignore malformed SSE payloads and wait for the next envelope.
+      }
+    };
+
+    workspaceEvents.onerror = () => {
+      void refreshWorkspaceFromServer();
+    };
 
     return () => {
-      clearInterval(interval);
+      workspaceEvents.close();
     };
-  }, [applyWorkspaceSnapshot, hydrated]);
+  }, [applyWorkspaceSnapshot, hydrated, refreshWorkspaceFromServer]);
 
   useEffect(() => {
     roomsRef.current = rooms;
@@ -2217,6 +2225,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     agentStatesRef.current = agentStates;
   }, [agentStates]);
+
+  useEffect(() => {
+    return () => {
+      for (const controller of Object.values(activeRoomStreamControllersRef.current)) {
+        controller.abort();
+      }
+      activeRoomStreamControllersRef.current = {};
+    };
+  }, []);
+
   const updateAgentState = useCallback((agentId: RoomAgentId, updater: (state: AgentSharedState) => AgentSharedState) => {
     setAgentStates((current) => {
       const nextState = {
@@ -2526,6 +2544,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setActiveRoomId(roomId);
       setSelectedSender(roomId, senderId ?? DEFAULT_LOCAL_PARTICIPANT_ID);
       const localRequestId = createUuid();
+      activeRoomStreamControllersRef.current[roomId]?.abort();
+      const requestController = new AbortController();
+      activeRoomStreamControllersRef.current[roomId] = requestController;
       activeRoomStreamRequestIdsRef.current[roomId] = localRequestId;
       setPendingRoomCommandIds((current) => ({
         ...current,
@@ -2543,6 +2564,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           headers: {
             "Content-Type": "application/json",
           },
+          signal: requestController.signal,
           body: JSON.stringify({
             roomId,
             content: normalizedContent,
@@ -2682,20 +2704,30 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
         await refreshWorkspaceFromServer();
         clearDraftForRoom(roomId);
-      } finally {
-        if (activeRoomStreamRequestIdsRef.current[roomId] === localRequestId) {
-          delete activeRoomStreamRequestIdsRef.current[roomId];
+      } catch (error) {
+        if (requestController.signal.aborted) {
+          return;
         }
-        setPendingRoomCommandIds((current) => {
-          const nextState = { ...current };
-          delete nextState[roomId];
-          return nextState;
-        });
-        setStreamingAgentIdsByRoomId((current) => {
-          const nextState = { ...current };
-          delete nextState[roomId];
-          return nextState;
-        });
+
+        throw error;
+      } finally {
+        if (activeRoomStreamControllersRef.current[roomId] === requestController) {
+          delete activeRoomStreamControllersRef.current[roomId];
+        }
+        const isCurrentRequest = activeRoomStreamRequestIdsRef.current[roomId] === localRequestId;
+        if (isCurrentRequest) {
+          delete activeRoomStreamRequestIdsRef.current[roomId];
+          setPendingRoomCommandIds((current) => {
+            const nextState = { ...current };
+            delete nextState[roomId];
+            return nextState;
+          });
+          setStreamingAgentIdsByRoomId((current) => {
+            const nextState = { ...current };
+            delete nextState[roomId];
+            return nextState;
+          });
+        }
       }
     },
     [
