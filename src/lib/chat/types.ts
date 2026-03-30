@@ -633,6 +633,10 @@ export type ChatStreamEvent =
 
 export type RoomChatStreamEvent =
   | {
+      type: "turn-start";
+      turn: AgentRoomTurn;
+    }
+  | {
       type: "agent-text-delta";
       delta: string;
     }

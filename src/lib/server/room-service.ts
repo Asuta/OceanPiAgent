@@ -29,6 +29,12 @@ type RoomCommandResult = {
   room?: RoomSession | null;
 };
 
+export type AppendedRoomMessageResult = {
+  envelope: WorkspaceEnvelope;
+  room: RoomSession;
+  userMessage: RoomSession["roomMessages"][number];
+};
+
 type RoomServiceDependencies = {
   loadWorkspaceEnvelope: typeof loadWorkspaceEnvelope;
   mutateWorkspace: typeof mutateWorkspace;
@@ -93,6 +99,71 @@ async function applyMutation(
   return deps.mutateWorkspace((workspace) => mutator(workspace, agentDefinitions));
 }
 
+export async function appendUserRoomMessage(
+  args: {
+    roomId: string;
+    content: string;
+    attachments?: MessageImageAttachment[];
+    senderId?: string;
+  },
+  overrides: Partial<RoomServiceDependencies> = {},
+): Promise<AppendedRoomMessageResult> {
+  const deps: RoomServiceDependencies = {
+    loadWorkspaceEnvelope: overrides.loadWorkspaceEnvelope ?? loadWorkspaceEnvelope,
+    mutateWorkspace: overrides.mutateWorkspace ?? mutateWorkspace,
+    listAgentDefinitions: overrides.listAgentDefinitions ?? listAgentDefinitions,
+    enqueueRoomScheduler: overrides.enqueueRoomScheduler ?? enqueueRoomScheduler,
+  };
+
+  const normalizedContent = args.content.trim();
+  if (!normalizedContent && (args.attachments?.length ?? 0) === 0) {
+    throw new Error("Message content or at least one attachment is required.");
+  }
+
+  const envelope = await applyMutation((workspace) => {
+    const room = requireRoom(workspace, args.roomId);
+    const sender = resolveRoomMessageSender({
+      room,
+      senderId: args.senderId,
+      defaultLocalParticipantId: DEFAULT_LOCAL_PARTICIPANT_KEY,
+      defaultLocalParticipantName: DEFAULT_LOCAL_PARTICIPANT_NAME,
+    });
+    if (!sender) {
+      throw new Error("Could not resolve a room participant to send this message.");
+    }
+
+    const nextTitle = shouldAutoTitleRoom(room) ? getSuggestedRoomTitle(normalizedContent) || room.title : room.title;
+    return {
+      ...workspace,
+      rooms: sortRoomsByUpdatedAt(
+        workspace.rooms.map((entry) =>
+          entry.id === args.roomId
+            ? applyOutgoingUserMessage({
+                room: entry,
+                content: normalizedContent,
+                attachments: args.attachments ?? [],
+                sender,
+                nextTitle,
+              })
+            : entry,
+        ),
+      ),
+    };
+  }, deps);
+
+  const room = envelope.state.rooms.find((entry) => entry.id === args.roomId);
+  const userMessage = room?.roomMessages[room.roomMessages.length - 1] ?? null;
+  if (!room || !userMessage) {
+    throw new Error(`Room ${args.roomId} did not return the appended user message.`);
+  }
+
+  return {
+    envelope,
+    room,
+    userMessage,
+  };
+}
+
 export async function runRoomCommand(
   input: RoomCommandInput,
   overrides: Partial<RoomServiceDependencies> = {},
@@ -121,40 +192,11 @@ export async function runRoomCommand(
   }
 
   if (input.type === "send_message") {
-    const normalizedContent = input.content.trim();
-    if (!normalizedContent && (input.attachments?.length ?? 0) === 0) {
-      throw new Error("Message content or at least one attachment is required.");
-    }
-
-    await applyMutation((workspace) => {
-      const room = requireRoom(workspace, input.roomId);
-      const sender = resolveRoomMessageSender({
-        room,
-        senderId: input.senderId,
-        defaultLocalParticipantId: DEFAULT_LOCAL_PARTICIPANT_KEY,
-        defaultLocalParticipantName: DEFAULT_LOCAL_PARTICIPANT_NAME,
-      });
-      if (!sender) {
-        throw new Error("Could not resolve a room participant to send this message.");
-      }
-
-      const nextTitle = shouldAutoTitleRoom(room) ? getSuggestedRoomTitle(normalizedContent) || room.title : room.title;
-      return {
-        ...workspace,
-        rooms: sortRoomsByUpdatedAt(
-          workspace.rooms.map((entry) =>
-            entry.id === input.roomId
-              ? applyOutgoingUserMessage({
-                  room: entry,
-                  content: normalizedContent,
-                  attachments: input.attachments ?? [],
-                  sender,
-                  nextTitle,
-                })
-              : entry,
-          ),
-        ),
-      };
+    await appendUserRoomMessage({
+      roomId: input.roomId,
+      content: input.content,
+      attachments: input.attachments,
+      senderId: input.senderId,
     }, deps);
 
     await deps.enqueueRoomScheduler(input.roomId);
