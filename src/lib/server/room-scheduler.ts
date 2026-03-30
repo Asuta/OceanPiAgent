@@ -1,17 +1,47 @@
-import type { ChatSettings, RoomMessage, RoomSession, RoomWorkspaceState } from "@/lib/chat/types";
-import { createAgentSharedState, createTimestamp, getEnabledAgentParticipants, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
+import type {
+  AgentRoomTurn,
+  AssistantMessageMeta,
+  ChatSettings,
+  RoomMessage,
+  RoomSession,
+  RoomWorkspaceState,
+  ToolExecution,
+} from "@/lib/chat/types";
 import { createSchedulerPacket, getNextAgentParticipant, getSchedulerVisibleTargetMessages } from "@/lib/chat/room-scheduler";
+import { createAgentSharedState, createTimestamp, getEnabledAgentParticipants, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
+import {
+  buildPreparedInputFromWorkspace,
+  extractAssistantMetaFromRoomTurnError,
+  runPreparedRoomTurn,
+  runRoomTurnNonStreaming,
+  type RunRoomTurnResult,
+} from "@/lib/server/room-runner";
 import { applyRoomTurnToWorkspace } from "@/lib/server/workspace-state";
+import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store";
 import { loadWorkspaceEnvelope, mutateWorkspace } from "@/lib/server/workspace-store";
-import { runRoomTurnNonStreaming } from "@/lib/server/room-runner";
 import { createUuid } from "@/lib/utils/uuid";
 
 export const DEFAULT_ROOM_SCHEDULER_MAX_ROUNDS = 20;
+
+export interface RoomSchedulerRunHooks {
+  signal?: AbortSignal;
+  onTurnStart?: (turn: AgentRoomTurn) => void | Promise<void>;
+  onTextDelta?: (delta: string) => void | Promise<void>;
+  onTool?: (tool: ToolExecution) => void | Promise<void>;
+  onRoomMessagePreview?: (message: RoomMessage) => void | Promise<void>;
+  onRoomMessage?: (message: RoomMessage) => void | Promise<void>;
+  onReceiptUpdate?: (update: RunRoomTurnResult["receiptUpdates"][number]) => void | Promise<void>;
+  onTurnDone?: (result: RunRoomTurnResult) => void | Promise<void>;
+  onError?: (error: unknown, meta?: AssistantMessageMeta) => void | Promise<void>;
+}
 
 interface RoomSchedulerDependencies {
   loadWorkspaceEnvelope: typeof loadWorkspaceEnvelope;
   mutateWorkspace: typeof mutateWorkspace;
   runRoomTurnNonStreaming: typeof runRoomTurnNonStreaming;
+  runPreparedRoomTurn: typeof runPreparedRoomTurn;
+  buildPreparedInputFromWorkspace: typeof buildPreparedInputFromWorkspace;
+  resolveSettingsWithModelConfig: typeof resolveSettingsWithModelConfig;
 }
 
 type QueueWaiter = {
@@ -19,10 +49,13 @@ type QueueWaiter = {
   reject: (error: unknown) => void;
 };
 
+type RoomSchedulerOverrides = Partial<RoomSchedulerDependencies & RoomSchedulerRunHooks>;
+
 type RoomQueueState = {
   running: boolean;
   rerun: boolean;
   waiters: QueueWaiter[];
+  queuedOverrides?: RoomSchedulerOverrides;
 };
 
 declare global {
@@ -42,6 +75,7 @@ function getQueueState(roomId: string): RoomQueueState {
     running: false,
     rerun: false,
     waiters: [],
+    queuedOverrides: undefined,
   };
   roomQueues.set(roomId, created);
   return created;
@@ -79,20 +113,155 @@ function collectAdditionalRoomIds(messages: RoomMessage[], targetRoomId: string)
   return [...new Set(messages.map((message) => message.roomId).filter((roomId) => roomId && roomId !== targetRoomId))];
 }
 
+function hasStreamingHooks(hooks: RoomSchedulerRunHooks): boolean {
+  return Boolean(
+    hooks.onTurnStart
+      || hooks.onTextDelta
+      || hooks.onTool
+      || hooks.onRoomMessagePreview
+      || hooks.onRoomMessage
+      || hooks.onReceiptUpdate
+      || hooks.onTurnDone
+      || hooks.onError,
+  );
+}
+
+function createPendingTurn(args: {
+  turnId: string;
+  agentId: string;
+  agentLabel: string;
+  schedulerPacket: AgentRoomTurn["userMessage"];
+  anchorMessageId?: string;
+}): AgentRoomTurn {
+  return {
+    id: args.turnId,
+    agent: {
+      id: args.agentId,
+      label: args.agentLabel,
+    },
+    userMessage: args.schedulerPacket,
+    ...(args.anchorMessageId ? { anchorMessageId: args.anchorMessageId } : {}),
+    assistantContent: "",
+    draftSegments: [],
+    timeline: [],
+    tools: [],
+    emittedMessages: [],
+    status: "running",
+  };
+}
+
+async function emit<T>(callback: ((value: T) => void | Promise<void>) | undefined, value: T): Promise<void> {
+  if (!callback) {
+    return;
+  }
+
+  await callback(value);
+}
+
+async function executeScheduledTurn(args: {
+  workspace: RoomWorkspaceState;
+  room: RoomSession;
+  targetAgentId: string;
+  participant: RoomSession["participants"][number];
+  unseenMessages: RoomMessage[];
+  anchorMessageId?: string;
+  hooks: RoomSchedulerRunHooks;
+  deps: RoomSchedulerDependencies;
+}): Promise<RunRoomTurnResult> {
+  if (!hasStreamingHooks(args.hooks)) {
+    const schedulerPacket = createSchedulerPacket({
+      room: args.room,
+      participant: args.participant,
+      messages: args.unseenMessages,
+      requestId: createUuid(),
+      hasNewDelta: args.unseenMessages.length > 0,
+    });
+
+    return args.deps.runRoomTurnNonStreaming({
+      workspace: args.workspace,
+      roomId: args.room.id,
+      agentId: args.targetAgentId,
+      message: schedulerPacket,
+      anchorMessageId: args.anchorMessageId,
+      settings: getSchedulerSettings(args.workspace, args.targetAgentId),
+      ...(args.hooks.signal ? { signal: args.hooks.signal } : {}),
+    });
+  }
+
+  const resolvedSelection = await args.deps.resolveSettingsWithModelConfig(getSchedulerSettings(args.workspace, args.targetAgentId));
+  const turnId = `stream:${createUuid()}`;
+  const schedulerPacket = createSchedulerPacket({
+    room: args.room,
+    participant: args.participant,
+    messages: args.unseenMessages,
+    requestId: createUuid(),
+    hasNewDelta: args.unseenMessages.length > 0,
+  });
+
+  await emit(
+    args.hooks.onTurnStart,
+    createPendingTurn({
+      turnId,
+      agentId: args.targetAgentId,
+      agentLabel: args.participant.name,
+      schedulerPacket,
+      anchorMessageId: args.anchorMessageId,
+    }),
+  );
+
+  const preparedInput = await args.deps.buildPreparedInputFromWorkspace({
+    workspace: args.workspace,
+    roomId: args.room.id,
+    agentId: args.targetAgentId,
+    turnId,
+    message: schedulerPacket,
+    anchorMessageId: args.anchorMessageId,
+    settings: resolvedSelection.settings,
+    ...(args.hooks.signal ? { signal: args.hooks.signal } : {}),
+  });
+  preparedInput.modelConfigOverrides = resolvedSelection.modelConfigOverrides;
+
+  return args.deps.runPreparedRoomTurn(preparedInput, {
+    onTextDelta: (delta) => emit(args.hooks.onTextDelta, delta),
+    onTool: (tool) => emit(args.hooks.onTool, tool),
+    onRoomMessagePreview: (message) => emit(args.hooks.onRoomMessagePreview, message),
+    onRoomMessage: (message) => emit(args.hooks.onRoomMessage, message),
+    onReceiptUpdate: (update) => emit(args.hooks.onReceiptUpdate, update),
+  });
+}
+
 export async function runRoomSchedulerNow(
   roomId: string,
-  overrides: Partial<RoomSchedulerDependencies> = {},
+  overrides: RoomSchedulerOverrides = {},
 ): Promise<void> {
   const deps: RoomSchedulerDependencies = {
     loadWorkspaceEnvelope: overrides.loadWorkspaceEnvelope ?? loadWorkspaceEnvelope,
     mutateWorkspace: overrides.mutateWorkspace ?? mutateWorkspace,
     runRoomTurnNonStreaming: overrides.runRoomTurnNonStreaming ?? runRoomTurnNonStreaming,
+    runPreparedRoomTurn: overrides.runPreparedRoomTurn ?? runPreparedRoomTurn,
+    buildPreparedInputFromWorkspace: overrides.buildPreparedInputFromWorkspace ?? buildPreparedInputFromWorkspace,
+    resolveSettingsWithModelConfig: overrides.resolveSettingsWithModelConfig ?? resolveSettingsWithModelConfig,
+  };
+  const hooks: RoomSchedulerRunHooks = {
+    ...(overrides.signal ? { signal: overrides.signal } : {}),
+    ...(overrides.onTurnStart ? { onTurnStart: overrides.onTurnStart } : {}),
+    ...(overrides.onTextDelta ? { onTextDelta: overrides.onTextDelta } : {}),
+    ...(overrides.onTool ? { onTool: overrides.onTool } : {}),
+    ...(overrides.onRoomMessagePreview ? { onRoomMessagePreview: overrides.onRoomMessagePreview } : {}),
+    ...(overrides.onRoomMessage ? { onRoomMessage: overrides.onRoomMessage } : {}),
+    ...(overrides.onReceiptUpdate ? { onReceiptUpdate: overrides.onReceiptUpdate } : {}),
+    ...(overrides.onTurnDone ? { onTurnDone: overrides.onTurnDone } : {}),
+    ...(overrides.onError ? { onError: overrides.onError } : {}),
   };
 
   let idlePassCount = 0;
   let dispatchedRounds = 0;
 
   while (true) {
+    if (hooks.signal?.aborted) {
+      return;
+    }
+
     const workspaceEnvelope = await deps.loadWorkspaceEnvelope();
     const room = workspaceEnvelope.state.rooms.find((entry) => entry.id === roomId);
     if (!room) {
@@ -170,23 +339,26 @@ export async function runRoomSchedulerNow(
       return;
     }
 
-    const requestId = createUuid();
-    const schedulerPacket = createSchedulerPacket({
-      room,
-      participant: nextParticipant,
-      messages: unseenMessages,
-      requestId,
-      hasNewDelta: unseenMessages.length > 0,
-    });
     const targetAgentId = nextParticipant.agentId ?? room.agentId;
-    const result = await deps.runRoomTurnNonStreaming({
-      workspace: workspaceEnvelope.state,
-      roomId,
-      agentId: targetAgentId,
-      message: schedulerPacket,
-      anchorMessageId: visibleTargetMessages[visibleTargetMessages.length - 1]?.id,
-      settings: getSchedulerSettings(workspaceEnvelope.state, targetAgentId),
-    });
+    let result: RunRoomTurnResult;
+    try {
+      result = await executeScheduledTurn({
+        workspace: workspaceEnvelope.state,
+        room,
+        targetAgentId,
+        participant: nextParticipant,
+        unseenMessages,
+        anchorMessageId: visibleTargetMessages[visibleTargetMessages.length - 1]?.id,
+        hooks,
+        deps,
+      });
+    } catch (error) {
+      const meta = extractAssistantMetaFromRoomTurnError(error);
+      if (hooks.onError) {
+        await hooks.onError(error, meta);
+      }
+      throw error;
+    }
 
     const latestWorkspace = await deps.loadWorkspaceEnvelope();
     const latestRoom = latestWorkspace.state.rooms.find((entry) => entry.id === roomId);
@@ -194,46 +366,47 @@ export async function runRoomSchedulerNow(
       return;
     }
 
-    if (hasNewerVisibleActivity(latestRoom, nextParticipant.id, cutoffSeq)) {
-      continue;
+    const wasSuperseded = hasNewerVisibleActivity(latestRoom, nextParticipant.id, cutoffSeq);
+    if (!wasSuperseded) {
+      await deps.mutateWorkspace((workspace) => {
+        const appliedWorkspace = applyRoomTurnToWorkspace({
+          workspace,
+          agentId: targetAgentId,
+          targetRoomId: roomId,
+          turn: result.turn,
+          resolvedModel: result.resolvedModel,
+          compatibility: result.compatibility,
+          emittedMessages: result.emittedMessages,
+          receiptUpdates: result.receiptUpdates,
+          roomActions: result.roomActions,
+        });
+
+        return updateRoom(appliedWorkspace, roomId, (currentRoom) => ({
+          ...currentRoom,
+          scheduler: {
+            ...currentRoom.scheduler,
+            status: result.turn.status === "completed" ? "running" : "idle",
+            activeParticipantId: null,
+            nextAgentParticipantId: nextAfterParticipant?.id ?? nextParticipant.id,
+            roundCount: result.turn.status === "completed" ? dispatchedRounds : 0,
+            agentCursorByParticipantId: {
+              ...currentRoom.scheduler.agentCursorByParticipantId,
+              [nextParticipant.id]: Math.max(currentRoom.scheduler.agentCursorByParticipantId[nextParticipant.id] ?? 0, cutoffSeq),
+            },
+            agentReceiptRevisionByParticipantId: {
+              ...currentRoom.scheduler.agentReceiptRevisionByParticipantId,
+              [nextParticipant.id]: currentRoom.receiptRevision,
+            },
+          },
+          updatedAt: createTimestamp(),
+        }));
+      });
     }
 
-    await deps.mutateWorkspace((workspace) => {
-      const appliedWorkspace = applyRoomTurnToWorkspace({
-        workspace,
-        agentId: targetAgentId,
-        targetRoomId: roomId,
-        turn: result.turn,
-        resolvedModel: result.resolvedModel,
-        compatibility: result.compatibility,
-        emittedMessages: result.emittedMessages,
-        receiptUpdates: result.receiptUpdates,
-        roomActions: result.roomActions,
-      });
-
-      return updateRoom(appliedWorkspace, roomId, (currentRoom) => ({
-        ...currentRoom,
-        scheduler: {
-          ...currentRoom.scheduler,
-          status: result.turn.status === "completed" ? "running" : "idle",
-          activeParticipantId: null,
-          nextAgentParticipantId: nextAfterParticipant?.id ?? nextParticipant.id,
-          roundCount: result.turn.status === "completed" ? dispatchedRounds : 0,
-          agentCursorByParticipantId: {
-            ...currentRoom.scheduler.agentCursorByParticipantId,
-            [nextParticipant.id]: Math.max(currentRoom.scheduler.agentCursorByParticipantId[nextParticipant.id] ?? 0, cutoffSeq),
-          },
-          agentReceiptRevisionByParticipantId: {
-            ...currentRoom.scheduler.agentReceiptRevisionByParticipantId,
-            [nextParticipant.id]: currentRoom.receiptRevision,
-          },
-        },
-        updatedAt: createTimestamp(),
-      }));
-    });
+    await emit(hooks.onTurnDone, result);
 
     for (const additionalRoomId of collectAdditionalRoomIds(result.emittedMessages, roomId)) {
-      void enqueueRoomScheduler(additionalRoomId, overrides);
+      void enqueueRoomScheduler(additionalRoomId);
     }
 
     if (result.turn.status !== "completed") {
@@ -245,10 +418,11 @@ export async function runRoomSchedulerNow(
 
 export function enqueueRoomScheduler(
   roomId: string,
-  overrides: Partial<RoomSchedulerDependencies> = {},
+  overrides: RoomSchedulerOverrides = {},
 ): Promise<void> {
   const queueState = getQueueState(roomId);
   queueState.rerun = true;
+  queueState.queuedOverrides = overrides;
 
   const completion = new Promise<void>((resolve, reject) => {
     queueState.waiters.push({ resolve, reject });
@@ -262,8 +436,10 @@ export function enqueueRoomScheduler(
   void (async () => {
     try {
       while (queueState.rerun) {
+        const nextOverrides = queueState.queuedOverrides ?? overrides;
         queueState.rerun = false;
-        await runRoomSchedulerNow(roomId, overrides);
+        queueState.queuedOverrides = undefined;
+        await runRoomSchedulerNow(roomId, nextOverrides);
       }
 
       const waiters = queueState.waiters.splice(0, queueState.waiters.length);

@@ -102,3 +102,149 @@ test("runRoomSchedulerNow advances multi-agent room work on the server and settl
   assert.equal(nextRoom.roomMessages.some((message) => message.content === "Concierge handed this to Researcher."), true);
   assert.equal(nextRoom.agentTurns.length, 2);
 });
+
+test("runRoomSchedulerNow emits streaming callbacks for each scheduled turn", async () => {
+  let state = createDefaultWorkspaceState();
+  let room = addAgentParticipantToRoom({ room: state.rooms[0]!, agentId: "researcher" });
+  room = appendMessageToRoom(
+    room,
+    createRoomMessage(room.id, "user", "Please keep coordinating until idle.", "user", {
+      sender: {
+        id: "local-operator",
+        name: "You",
+        role: "participant",
+      },
+    }),
+  );
+  state = {
+    ...state,
+    rooms: [room],
+    agentStates: {
+      ...state.agentStates,
+      researcher: createAgentSharedState(),
+    },
+  };
+
+  const streamedTurns: string[] = [];
+  const streamedDeltas: string[] = [];
+  const streamedDone: string[] = [];
+  const loadWorkspaceEnvelope = async () => ({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    state,
+  });
+  const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+    state = await mutator(state);
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+  };
+
+  await runRoomSchedulerNow(room.id, {
+    loadWorkspaceEnvelope,
+    mutateWorkspace,
+    resolveSettingsWithModelConfig: async (settings) => ({
+      settings,
+      modelConfig: null,
+      modelConfigOverrides: undefined,
+    }),
+    buildPreparedInputFromWorkspace: async ({ roomId, agentId, message, settings, anchorMessageId, turnId }) => ({
+      room: {
+        id: roomId,
+        title: "Room 1",
+      },
+      agent: {
+        id: agentId,
+        label: agentId,
+        instruction: "",
+      },
+      attachedRooms: [],
+      knownAgents: [],
+      roomHistoryById: {},
+      message,
+      settings,
+      anchorMessageId,
+      turnId,
+    }),
+    runPreparedRoomTurn: async (preparedInput, callbacks) => {
+      callbacks?.onTextDelta?.(`${preparedInput.agent.id}-draft`);
+      const emittedMessages = preparedInput.agent.id === "concierge"
+        ? [
+            createRoomMessage(preparedInput.room.id, "assistant", "Concierge handed this to Researcher.", "agent_emit", {
+              sender: {
+                id: "concierge",
+                name: "Harbor Concierge",
+                role: "participant",
+              },
+            }),
+          ]
+        : [];
+
+      return {
+        turn: {
+          id: preparedInput.turnId ?? `turn-${preparedInput.agent.id}`,
+          agent: {
+            id: preparedInput.agent.id,
+            label: preparedInput.agent.label,
+          },
+          userMessage: {
+            ...createRoomMessage(preparedInput.room.id, "system", preparedInput.message.content, "system", {
+              sender: preparedInput.message.sender,
+              kind: "system",
+            }),
+            id: preparedInput.message.id,
+          },
+          assistantContent: `${preparedInput.agent.id}-draft`,
+          draftSegments: [
+            {
+              id: `${preparedInput.agent.id}-segment`,
+              sequence: 1,
+              content: `${preparedInput.agent.id}-draft`,
+              status: "completed",
+            },
+          ],
+          timeline: [
+            {
+              id: `draft-segment:${preparedInput.agent.id}-segment`,
+              sequence: 1,
+              type: "draft-segment",
+              segmentId: `${preparedInput.agent.id}-segment`,
+            },
+          ],
+          tools: [],
+          emittedMessages,
+          status: "completed",
+          resolvedModel: "generic/fake-model",
+        },
+        resolvedModel: "generic/fake-model",
+        compatibility: {
+          providerKey: "generic",
+          providerLabel: "Generic",
+          baseUrl: "",
+          chatCompletionsToolStyle: "tools",
+          responsesContinuation: "replay",
+          responsesPayloadMode: "json",
+          notes: [],
+        },
+        emittedMessages,
+        receiptUpdates: [],
+        roomActions: [],
+      };
+    },
+    onTurnStart: (turn) => {
+      streamedTurns.push(turn.agent.id);
+    },
+    onTextDelta: (delta) => {
+      streamedDeltas.push(delta);
+    },
+    onTurnDone: (result) => {
+      streamedDone.push(result.turn.agent.id);
+    },
+  });
+
+  assert.deepEqual(streamedTurns, ["concierge", "researcher"]);
+  assert.deepEqual(streamedDeltas, ["concierge-draft", "researcher-draft"]);
+  assert.deepEqual(streamedDone, ["concierge", "researcher"]);
+});
