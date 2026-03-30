@@ -409,6 +409,22 @@ export function upsertMessageToRoom(room: RoomSession, message: RoomMessage): Ro
   };
 }
 
+export function dedupeRoomMessages(messages: RoomMessage[]): RoomMessage[] {
+  const dedupedMessages: RoomMessage[] = [];
+
+  for (const message of messages) {
+    const existingIndex = dedupedMessages.findIndex((entry) => entry.id === message.id);
+    if (existingIndex < 0) {
+      dedupedMessages.push(message);
+      continue;
+    }
+
+    dedupedMessages[existingIndex] = mergeRoomMessage(dedupedMessages[existingIndex], message);
+  }
+
+  return dedupedMessages;
+}
+
 export function syncRoomParticipants(room: RoomSession, participants: RoomParticipant[]): RoomSession {
   const nextParticipants = sortRoomParticipants(participants);
   const enabledAgents = nextParticipants.filter((participant) => participant.runtimeKind === "agent" && participant.enabled);

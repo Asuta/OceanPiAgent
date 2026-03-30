@@ -415,6 +415,7 @@ export interface AssistantHistoryToolCallPart {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  partialJson?: string;
   thoughtSignature?: string;
 }
 

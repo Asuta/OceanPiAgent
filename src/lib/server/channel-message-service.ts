@@ -1,5 +1,5 @@
 import type { RoomAgentDefinition, RoomMessage, RoomWorkspaceState } from "@/lib/chat/types";
-import { createAgentSharedState, createExternalRoomSession, createRoomMessage, createTimestamp, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
+import { createAgentSharedState, createExternalRoomSession, createRoomMessage, createTimestamp, sortRoomsByUpdatedAt, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
 import { findChannelBinding, touchChannelBinding, upsertChannelBinding } from "@/lib/server/channel-bindings-store";
 import { beginInboundMessage, finishInboundMessage, runSerializedDelivery } from "@/lib/server/channel-delivery-queue";
 import { createChannelMessageLink, findChannelMessageLink, upsertChannelMessageLink } from "@/lib/server/channel-message-links-store";
@@ -279,11 +279,7 @@ async function appendInboundMessageToWorkspace(
 
       const nextRoom = applyFeishuRoomMetadata(room, binding, senderName);
       return {
-        ...nextRoom,
-        roomMessages: [...nextRoom.roomMessages, {
-          ...message,
-          seq: (nextRoom.roomMessages[nextRoom.roomMessages.length - 1]?.seq ?? 0) + 1,
-        }],
+        ...upsertMessageToRoom(nextRoom, message),
         error: "",
       };
     }),

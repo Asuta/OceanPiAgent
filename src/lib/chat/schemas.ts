@@ -198,6 +198,7 @@ const assistantHistoryToolCallPartSchema = z.object({
   id: z.string(),
   name: z.string(),
   arguments: z.record(z.string(), z.unknown()),
+  partialJson: z.string().optional(),
   thoughtSignature: z.string().optional(),
 }).strict();
 
