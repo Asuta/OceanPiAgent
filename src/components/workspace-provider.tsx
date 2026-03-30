@@ -18,6 +18,7 @@ import type {
   AgentRoomTurn,
   AgentSharedState,
   ChatSettings,
+  MemoryBackendId,
   MessageImageAttachment,
   ProviderCompatibility,
   RoomAgentDefinition,
@@ -103,6 +104,7 @@ const DEFAULT_SETTINGS: ChatSettings = {
   model: "",
   systemPrompt: "",
   providerMode: "auto",
+  memoryBackend: "sqlite-fts",
   maxToolLoopSteps: DEFAULT_MAX_TOOL_LOOP_STEPS,
   thinkingLevel: "off",
   enabledSkillIds: [],
@@ -1445,6 +1447,7 @@ function normalizeSettings(value: unknown): ChatSettings {
       value.providerMode === "auto"
         ? value.providerMode
         : "auto",
+    memoryBackend: value.memoryBackend === "markdown" ? "markdown" : "sqlite-fts",
     maxToolLoopSteps: coerceMaxToolLoopSteps(value.maxToolLoopSteps),
     thinkingLevel: coerceThinkingLevel(value.thinkingLevel),
     enabledSkillIds: coerceSkillIds(value.enabledSkillIds),
@@ -2747,6 +2750,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         settings: {
           ...state.settings,
           ...patch,
+          memoryBackend: (patch.memoryBackend === "markdown" ? "markdown" : patch.memoryBackend === "sqlite-fts" ? "sqlite-fts" : state.settings.memoryBackend) as MemoryBackendId,
           maxToolLoopSteps: coerceMaxToolLoopSteps(patch.maxToolLoopSteps ?? state.settings.maxToolLoopSteps),
           thinkingLevel: coerceThinkingLevel(patch.thinkingLevel ?? state.settings.thinkingLevel),
           enabledSkillIds: coerceSkillIds(patch.enabledSkillIds ?? state.settings.enabledSkillIds),

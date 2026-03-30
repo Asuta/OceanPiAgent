@@ -72,6 +72,16 @@ export const TOOL_CATALOG = [
     description: "按文件和行号读取 memory_search 命中的上下文片段，避免把整份记忆全部塞回 prompt。",
   },
   {
+    name: "memory_status",
+    title: "Memory Status",
+    description: "查看当前 agent memory 的后端类型、索引状态，以及记忆文件是否需要重建索引。",
+  },
+  {
+    name: "memory_index",
+    title: "Memory Index",
+    description: "增量刷新或强制重建当前 agent 的 memory 索引，用来修复检索结果陈旧或缺失。",
+  },
+  {
     name: "workspace_list",
     title: "Workspace List",
     description: "列出当前 Agent 独立 workspace 里的文件和目录，默认只允许访问自己的目录。",

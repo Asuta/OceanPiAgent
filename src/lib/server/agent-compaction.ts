@@ -120,6 +120,7 @@ function createCompactionSettings(resolvedModel: string): ChatSettings {
     model: resolvedModel.trim(),
     systemPrompt: "",
     providerMode: "auto",
+    memoryBackend: "sqlite-fts",
     maxToolLoopSteps: DEFAULT_MAX_TOOL_LOOP_STEPS,
     thinkingLevel: "low",
     enabledSkillIds: [],

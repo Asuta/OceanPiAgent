@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import type { ChatSettings, RoomToolContext } from "@/lib/chat/types";
 import { executeTool, getChatCompletionsTools, getResponsesTools } from "@/lib/ai/tools";
 
 async function withTempCwd(run: (tempDir: string) => Promise<void>) {
@@ -26,6 +27,29 @@ function quoteExecutableForShell(filePath: string): string {
   return `'${filePath.replaceAll("'", "'\\''")}'`;
 }
 
+function createRoomToolContext(agentId = "concierge", memoryBackend: ChatSettings["memoryBackend"] = "sqlite-fts"): { room: RoomToolContext } {
+  return {
+    room: {
+      currentAgentId: agentId,
+      currentRoomId: "room-1",
+      currentSettings: {
+        modelConfigId: null,
+        apiFormat: "chat_completions",
+        model: "",
+        systemPrompt: "",
+        providerMode: "auto",
+        memoryBackend,
+        maxToolLoopSteps: 6,
+        thinkingLevel: "off",
+        enabledSkillIds: [],
+      },
+      attachedRooms: [],
+      knownAgents: [],
+      roomHistoryById: {},
+    },
+  };
+}
+
 test("tool registries expose the bash tool", () => {
   const chatTools = getChatCompletionsTools("default");
   const responseTools = getResponsesTools("default");
@@ -34,6 +58,12 @@ test("tool registries expose the bash tool", () => {
   assert(responseTools.some((tool) => tool.name === "bash"));
   assert(chatTools.some((tool) => tool.function.name === "skill_read"));
   assert(responseTools.some((tool) => tool.name === "project_context_read"));
+  const roomChatTools = getChatCompletionsTools("room");
+  const roomResponseTools = getResponsesTools("room");
+  assert(roomChatTools.some((tool) => tool.function.name === "memory_status"));
+  assert(roomChatTools.some((tool) => tool.function.name === "memory_index"));
+  assert(roomResponseTools.some((tool) => tool.name === "memory_status"));
+  assert(roomResponseTools.some((tool) => tool.name === "memory_index"));
 });
 
 test("executeTool runs bash commands in the requested cwd", async () => {
@@ -150,5 +180,21 @@ test("executeTool lists and reads project context files", async () => {
 
     assert.equal(readResult.event.status, "success");
     assert.match(readResult.output, /Use project notes first\./);
+  });
+});
+
+test("executeTool exposes memory status and memory index for room agents", async () => {
+  await withTempCwd(async () => {
+    const context = createRoomToolContext("concierge", "markdown");
+
+    const statusResult = await executeTool("memory_status", {}, "room", undefined, context);
+    const indexResult = await executeTool("memory_index", { force: true }, "room", undefined, context);
+
+    assert.equal(statusResult.event.status, "success");
+    assert.match(statusResult.output, /"backend": "markdown"/);
+
+    assert.equal(indexResult.event.status, "success");
+    assert.match(indexResult.output, /"mode": "full"/);
+    assert.match(indexResult.output, /"backend": "markdown"/);
   });
 });

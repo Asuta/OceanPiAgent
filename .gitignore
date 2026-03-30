@@ -15,6 +15,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 devserver.log
+opencode-dev.log
 
 .DS_Store
 Thumbs.db

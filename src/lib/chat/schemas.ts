@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  MEMORY_BACKENDS,
   MAX_MAX_TOOL_LOOP_STEPS,
   MIN_MAX_TOOL_LOOP_STEPS,
   THINKING_LEVELS,
@@ -347,6 +348,7 @@ const chatSettingsSchema = z.object({
   model: z.string(),
   systemPrompt: z.string(),
   providerMode: providerModeSchema,
+  memoryBackend: z.enum(MEMORY_BACKENDS).optional().default("sqlite-fts"),
   maxToolLoopSteps: z.number().int().min(MIN_MAX_TOOL_LOOP_STEPS).max(MAX_MAX_TOOL_LOOP_STEPS),
   thinkingLevel: z.enum(THINKING_LEVELS),
   enabledSkillIds: z.array(z.string()),

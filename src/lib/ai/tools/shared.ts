@@ -4,6 +4,7 @@ import { previewCronSchedule } from "@/lib/server/cron-service";
 import type {
   AgentInfoCard,
   AttachedRoomDefinition,
+  ChatSettings,
   RoomCronJob,
   RoomCronRunRecord,
   RoomCronSchedule,
@@ -46,6 +47,8 @@ export type ToolName =
   | "preview_cron_schedule"
   | "memory_search"
   | "memory_get"
+  | "memory_status"
+  | "memory_index"
   | "workspace_list"
   | "workspace_read"
   | "workspace_write"
@@ -215,6 +218,14 @@ export const memoryGetArgsSchema = z
     path: z.string().trim().min(1).max(200),
     from: z.number().int().min(1).optional(),
     lines: z.number().int().min(1).max(200).optional().default(40),
+  })
+  .strict();
+
+export const memoryStatusArgsSchema = z.object({}).strict();
+
+export const memoryIndexArgsSchema = z
+  .object({
+    force: z.boolean().optional().default(false),
   })
   .strict();
 
@@ -406,6 +417,10 @@ export function getCurrentAgentId(context?: ToolExecutionContext): RoomAgentId {
   }
 
   return roomContext.currentAgentId;
+}
+
+export function getCurrentChatSettings(context?: ToolExecutionContext): ChatSettings | undefined {
+  return getRoomToolContext(context).currentSettings;
 }
 
 export function uniqueAgentIds(agentIds: RoomAgentId[]): RoomAgentId[] {

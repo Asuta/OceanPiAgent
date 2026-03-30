@@ -216,6 +216,7 @@ function createTurn(
 function createToolContext(args: {
   roomId: string;
   agentId: RoomAgentId;
+  settings: ChatSettings;
   attachedRooms: AttachedRoomDefinition[];
   knownAgents: AgentInfoCard[];
   roomHistoryById: Record<string, RoomHistoryMessageSummary[]>;
@@ -223,6 +224,7 @@ function createToolContext(args: {
   return {
     currentAgentId: args.agentId,
     currentRoomId: args.roomId,
+    currentSettings: { ...args.settings, enabledSkillIds: [...args.settings.enabledSkillIds] },
     attachedRooms: args.attachedRooms.map((room) => ({
       ...room,
       participants: room.participants.map((participant) => ({ ...participant })),
@@ -430,6 +432,7 @@ export async function runPreparedRoomTurn(
   const toolContext = createToolContext({
     roomId: args.room.id,
     agentId: args.agent.id,
+    settings: args.settings,
     attachedRooms: args.attachedRooms,
     knownAgents: args.knownAgents,
     roomHistoryById: args.roomHistoryById,

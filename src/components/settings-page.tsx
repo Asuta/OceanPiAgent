@@ -26,6 +26,7 @@ import {
   MIN_MAX_TOOL_LOOP_STEPS,
   THINKING_LEVELS,
   type ApiFormat,
+  type MemoryBackendId,
   type ModelConfig,
   type ModelConfigKind,
   type ProviderMode,
@@ -60,6 +61,10 @@ const CUSTOM_MODEL_OPTION = "__custom_model__";
 const NEW_MODEL_CONFIG_ID = "__new_model_config__";
 const DEFAULT_PI_NATIVE_PROVIDER_ID: PiProviderId = "openai";
 const PI_NATIVE_PROVIDER_OPTIONS = getPiProviderOptions().filter((option) => !option.usesCustomEndpoint);
+const MEMORY_BACKEND_OPTIONS: Array<{ value: MemoryBackendId; label: string; description: string }> = [
+  { value: "sqlite-fts", label: "SQLite FTS", description: "默认方案。保留 Markdown 记忆文件，并维护一个 SQLite 全文索引。" },
+  { value: "markdown", label: "Markdown Scan", description: "兼容模式。直接扫描 Markdown 文件，不维护额外索引。" },
+];
 
 interface WorkspaceSkillSummary {
   id: string;
@@ -95,6 +100,29 @@ interface FeishuBackfillResult {
   scanned: number;
   updated: number;
   skipped: number;
+}
+
+interface AgentMemoryStatus {
+  backend: MemoryBackendId;
+  fileCount: number;
+  hasTimeline: boolean;
+  hasCompactions: boolean;
+  documentCount?: number;
+  chunkCount?: number;
+  lastIndexedAt?: string;
+  dirty: boolean;
+  missingIndex: boolean;
+  fallbackReason?: string;
+}
+
+interface AgentMemoryIndexResult {
+  backend: MemoryBackendId;
+  mode: "full" | "incremental";
+  indexedDocuments: number;
+  removedDocuments: number;
+  chunkCount?: number;
+  durationMs: number;
+  fallbackReason?: string;
 }
 
 interface ModelConfigDraft {
@@ -233,6 +261,30 @@ async function runFeishuNicknameBackfill(): Promise<FeishuBackfillResult> {
   return payload;
 }
 
+async function fetchAgentMemoryStatus(agentId: string): Promise<AgentMemoryStatus> {
+  const response = await fetch(`/api/agent-memory/status?agentId=${encodeURIComponent(agentId)}`, { cache: "no-store" });
+  const payload = await parseJsonResponse<AgentMemoryStatus & { error?: string }>(response);
+  if (!response.ok || !payload) {
+    throw new Error(payload?.error || "Failed to load agent memory status.");
+  }
+  return payload;
+}
+
+async function runAgentMemoryIndex(agentId: string, force: boolean): Promise<AgentMemoryIndexResult> {
+  const response = await fetch("/api/agent-memory/index", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ agentId, force }),
+  });
+  const payload = await parseJsonResponse<{ result?: AgentMemoryIndexResult; error?: string }>(response);
+  if (!response.ok || !payload?.result) {
+    throw new Error(payload?.error || "Failed to refresh agent memory index.");
+  }
+  return payload.result;
+}
+
 async function createModelConfigRequest(draft: ModelConfigDraft): Promise<ModelConfig> {
   const response = await fetch("/api/model-configs", {
     method: "POST",
@@ -338,6 +390,10 @@ export function SettingsPage() {
   const [loadingFeishuRuntime, setLoadingFeishuRuntime] = useState(false);
   const [runningFeishuBackfill, setRunningFeishuBackfill] = useState(false);
   const [feishuBackfillMessage, setFeishuBackfillMessage] = useState("");
+  const [agentMemoryStatusById, setAgentMemoryStatusById] = useState<Record<string, AgentMemoryStatus | null>>({});
+  const [loadingAgentMemoryById, setLoadingAgentMemoryById] = useState<Record<string, boolean>>({});
+  const [reindexingAgentMemoryById, setReindexingAgentMemoryById] = useState<Record<string, boolean>>({});
+  const [agentMemoryMessageById, setAgentMemoryMessageById] = useState<Record<string, string>>({});
   const legacyMigrationStartedRef = useRef(false);
 
   useEffect(() => {
@@ -459,6 +515,45 @@ export function SettingsPage() {
     })();
   }, [agentStates, agents, loadingModelConfigs, modelConfigs, updateAgentSettings]);
 
+  const refreshAgentMemoryStatus = async (agentId: string, showLoading = true) => {
+    if (showLoading) {
+      setLoadingAgentMemoryById((current) => ({ ...current, [agentId]: true }));
+    }
+    try {
+      const status = await fetchAgentMemoryStatus(agentId);
+      setAgentMemoryStatusById((current) => ({ ...current, [agentId]: status }));
+      setAgentMemoryMessageById((current) => ({ ...current, [agentId]: "" }));
+    } catch (error) {
+      setAgentMemoryMessageById((current) => ({
+        ...current,
+        [agentId]: error instanceof Error ? error.message : "Failed to load agent memory status.",
+      }));
+    } finally {
+      if (showLoading) {
+        setLoadingAgentMemoryById((current) => ({ ...current, [agentId]: false }));
+      }
+    }
+  };
+
+  const handleReindexAgentMemory = async (agentId: string, force = true) => {
+    setReindexingAgentMemoryById((current) => ({ ...current, [agentId]: true }));
+    try {
+      const result = await runAgentMemoryIndex(agentId, force);
+      setAgentMemoryMessageById((current) => ({
+        ...current,
+        [agentId]: `已${result.mode === "full" ? "完整重建" : "刷新"}索引，更新 ${result.indexedDocuments} 个文档，移除 ${result.removedDocuments} 个，用时 ${result.durationMs}ms。`,
+      }));
+      await refreshAgentMemoryStatus(agentId, false);
+    } catch (error) {
+      setAgentMemoryMessageById((current) => ({
+        ...current,
+        [agentId]: error instanceof Error ? error.message : "Failed to reindex agent memory.",
+      }));
+    } finally {
+      setReindexingAgentMemoryById((current) => ({ ...current, [agentId]: false }));
+    }
+  };
+
   useEffect(() => {
     if (settingsTab !== "runtime") {
       return;
@@ -472,13 +567,23 @@ export function SettingsPage() {
       }
 
       try {
-        const [status, logsPayload] = await Promise.all([fetchFeishuRuntimeStatus(), fetchFeishuRuntimeLogs(60)]);
+        const [status, logsPayload, memoryStatuses] = await Promise.all([
+          fetchFeishuRuntimeStatus(),
+          fetchFeishuRuntimeLogs(60),
+          Promise.all(
+            agents.map(async (agent) => ({
+              agentId: agent.id,
+              status: await fetchAgentMemoryStatus(agent.id),
+            })),
+          ),
+        ]);
         if (cancelled) {
           return;
         }
         setFeishuRuntimeStatus(status);
         setFeishuRuntimeLogs(logsPayload.logs);
         setFeishuRuntimeLogPath(logsPayload.logFilePath || status.logFilePath);
+        setAgentMemoryStatusById(Object.fromEntries(memoryStatuses.map((entry) => [entry.agentId, entry.status])));
         setFeishuRuntimeError("");
       } catch (error) {
         if (cancelled) {
@@ -501,7 +606,7 @@ export function SettingsPage() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [settingsTab]);
+  }, [agents, settingsTab]);
 
   const syncAgentsWithModelConfig = (modelConfig: ModelConfig) => {
     for (const agent of agents) {
@@ -709,10 +814,14 @@ export function SettingsPage() {
     const state = agentStates[agent.id];
     const agentDraft = agentDraftsById[agent.id] ?? createAgentEditorDraft(agent);
     const compactionFeedback = agentCompactionFeedback[agent.id];
+    const memoryStatus = agentMemoryStatusById[agent.id] ?? null;
+    const memoryMessage = agentMemoryMessageById[agent.id] ?? "";
     const agentError = agentErrorById[agent.id] ?? "";
     const isSavingAgent = Boolean(savingAgentIds[agent.id]);
     const isRunning = isAgentRunning(agent.id);
     const isCompacting = isAgentCompacting(agent.id);
+    const isLoadingMemory = Boolean(loadingAgentMemoryById[agent.id]);
+    const isReindexingMemory = Boolean(reindexingAgentMemoryById[agent.id]);
     const compatibilityPills = getCompatibilityDetailPills(state.compatibility);
     const selectedConfig = modelConfigs.find((modelConfig) => modelConfig.id === state.settings.modelConfigId) ?? null;
     const effectiveModelRef = selectedConfig?.model ?? state.settings.model;
@@ -882,6 +991,24 @@ export function SettingsPage() {
                 disabled={isRunning}
               />
             </label>
+
+            <label className="field-block" htmlFor={`${agent.id}-memory-backend`}>
+              <span>Memory Backend</span>
+              <select
+                id={`${agent.id}-memory-backend`}
+                className="text-input"
+                value={state.settings.memoryBackend}
+                onChange={(event) => updateAgentSettings(agent.id, { memoryBackend: event.target.value as MemoryBackendId })}
+                disabled={isRunning}
+              >
+                {MEMORY_BACKEND_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="muted-copy">{MEMORY_BACKEND_OPTIONS.find((option) => option.value === state.settings.memoryBackend)?.description}</p>
+            </label>
           </div>
 
           <label className="field-block" htmlFor={`${agent.id}-prompt`}>
@@ -949,6 +1076,7 @@ export function SettingsPage() {
           <div className="meta-chip-row compact align-end">
             <span className="meta-chip">{selectedConfig?.name || effectiveProviderOption.label}</span>
             <span className="meta-chip subtle">{state.resolvedModel || "尚未请求"}</span>
+            <span className="meta-chip subtle">{state.settings.memoryBackend}</span>
             <span className="meta-chip subtle">{isRunning ? "运行中" : "空闲"}</span>
           </div>
         </div>
@@ -987,6 +1115,57 @@ export function SettingsPage() {
             <span className="meta-chip subtle">{capability.reasoning ? `Thinking ${THINKING_LEVEL_LABELS[actualThinkingLevel]}` : "Thinking Off"}</span>
           </div>
           {selectedModelOption ? <p className="muted-copy top-gap">{selectedModelOption.summary}</p> : null}
+        </section>
+
+        <section className="subtle-panel top-gap">
+          <p className="section-label">Memory Index</p>
+          <strong className="panel-lead">{memoryStatus ? memoryStatus.backend : state.settings.memoryBackend}</strong>
+          <div className="info-list top-gap">
+            <div>
+              <span>Configured backend</span>
+              <strong>{state.settings.memoryBackend}</strong>
+            </div>
+            <div>
+              <span>Active backend</span>
+              <strong>{memoryStatus?.backend || (isLoadingMemory ? "读取中" : "未知")}</strong>
+            </div>
+            <div>
+              <span>Documents</span>
+              <strong>{memoryStatus?.documentCount ?? memoryStatus?.fileCount ?? 0}</strong>
+            </div>
+            <div>
+              <span>Chunks</span>
+              <strong>{memoryStatus?.chunkCount ?? 0}</strong>
+            </div>
+            <div>
+              <span>Dirty</span>
+              <strong>{memoryStatus ? (memoryStatus.dirty ? "Yes" : "No") : "Unknown"}</strong>
+            </div>
+            <div>
+              <span>Last indexed</span>
+              <strong>{memoryStatus?.lastIndexedAt ? formatTimestamp(memoryStatus.lastIndexedAt) : "Not yet"}</strong>
+            </div>
+          </div>
+          {memoryStatus?.fallbackReason ? <p className="muted-copy top-gap danger-text">Fallback: {memoryStatus.fallbackReason}</p> : null}
+          {memoryMessage ? <p className="muted-copy top-gap">{memoryMessage}</p> : null}
+          <div className="card-actions compact-right top-gap">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => void refreshAgentMemoryStatus(agent.id)}
+              disabled={isLoadingMemory || isReindexingMemory}
+            >
+              {isLoadingMemory ? "刷新中..." : "刷新记忆状态"}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => void handleReindexAgentMemory(agent.id, true)}
+              disabled={isLoadingMemory || isReindexingMemory}
+            >
+              {isReindexingMemory ? "重建中..." : "强制重建索引"}
+            </button>
+          </div>
         </section>
 
         <section className="subtle-panel top-gap">

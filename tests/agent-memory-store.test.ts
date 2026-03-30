@@ -100,3 +100,71 @@ test("agent memory uses monthly timeline shards and recent-first search fallback
     assert.equal(olderResults[0]?.path, "timeline/2025-12.md");
   });
 });
+
+test("agent memory status and reindex expose sqlite-backed index state", async () => {
+  await withMemoryModule(async (memoryStore) => {
+    const agentId = "concierge";
+
+    await memoryStore.appendAgentTurnMemory({
+      agentId,
+      roomId: "room-beta",
+      roomTitle: "Beta Room",
+      userMessageId: "msg-2",
+      senderName: "You",
+      userContent: "Track the phoenix launch handoff.",
+      assistantContent: "Captured the handoff checklist.",
+      tools: [],
+      emittedMessages: [],
+      resolvedModel: "gpt-test",
+    });
+
+    const status = await memoryStore.getAgentMemoryStatus(agentId);
+    const reindexResult = await memoryStore.reindexAgentMemory(agentId, { force: true });
+    const searchResults = await memoryStore.searchAgentMemory(agentId, "phoenix handoff", { maxResults: 2 });
+
+    assert.equal(status.backend, "sqlite-fts");
+    assert.equal(status.hasTimeline, true);
+    assert.equal(status.missingIndex, false);
+    assert.equal(status.dirty, false);
+    assert.ok((status.documentCount ?? 0) >= 1);
+    assert.ok((status.chunkCount ?? 0) >= 1);
+    assert.ok(status.lastIndexedAt);
+
+    assert.equal(reindexResult.backend, "sqlite-fts");
+    assert.equal(reindexResult.mode, "full");
+    assert.ok(reindexResult.indexedDocuments >= 1);
+    assert.ok((reindexResult.chunkCount ?? 0) >= 1);
+
+    assert.equal(searchResults.length > 0, true);
+    assert.match(searchResults[0]?.snippet ?? "", /phoenix/i);
+  });
+});
+
+test("agent memory can be queried through the markdown backend explicitly", async () => {
+  await withMemoryModule(async (memoryStore) => {
+    const agentId = "operator";
+
+    await memoryStore.appendAgentTurnMemory({
+      agentId,
+      roomId: "room-gamma",
+      roomTitle: "Gamma Room",
+      userMessageId: "msg-3",
+      senderName: "You",
+      userContent: "Remember the vendor retry window.",
+      assistantContent: "Captured the vendor retry note.",
+      tools: [],
+      emittedMessages: [],
+      resolvedModel: "gpt-test",
+    });
+
+    const status = await memoryStore.getAgentMemoryStatus(agentId, { backendId: "markdown" });
+    const reindexResult = await memoryStore.reindexAgentMemory(agentId, { backendId: "markdown", force: true });
+    const searchResults = await memoryStore.searchAgentMemory(agentId, "vendor retry", { backendId: "markdown", maxResults: 2 });
+
+    assert.equal(status.backend, "markdown");
+    assert.equal(status.missingIndex, false);
+    assert.equal(reindexResult.backend, "markdown");
+    assert.equal(searchResults.length > 0, true);
+    assert.match(searchResults[0]?.snippet ?? "", /vendor retry/i);
+  });
+});

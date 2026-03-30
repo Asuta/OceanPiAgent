@@ -15,6 +15,8 @@ export const MODEL_CONFIG_KINDS = ["openai_compatible", "pi_builtin"] as const;
 export type ModelConfigKind = (typeof MODEL_CONFIG_KINDS)[number];
 
 export type ToolScope = "default" | "room";
+export const MEMORY_BACKENDS = ["sqlite-fts", "markdown"] as const;
+export type MemoryBackendId = (typeof MEMORY_BACKENDS)[number];
 
 export const DEFAULT_MAX_TOOL_LOOP_STEPS = 50;
 
@@ -179,6 +181,7 @@ export interface RoomHistoryMessageSummary {
 export interface RoomToolContext {
   currentAgentId?: RoomAgentId;
   currentRoomId?: string;
+  currentSettings?: ChatSettings;
   attachedRooms: AttachedRoomDefinition[];
   knownAgents: AgentInfoCard[];
   roomHistoryById: Record<string, RoomHistoryMessageSummary[]>;
@@ -472,6 +475,7 @@ export interface ChatSettings {
   model: string;
   systemPrompt: string;
   providerMode: ProviderMode;
+  memoryBackend: MemoryBackendId;
   maxToolLoopSteps: number;
   thinkingLevel: ThinkingLevel;
   enabledSkillIds: string[];

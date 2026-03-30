@@ -397,6 +397,24 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
       roomToolContext,
     }),
     createPiTool({
+      name: "memory_status",
+      label: "Memory Status",
+      description: "Inspect the current agent memory backend, index health, and whether a rebuild is needed.",
+      parameters: Type.Object({}),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "memory_index",
+      label: "Memory Index",
+      description: "Refresh or force a rebuild of the current agent memory index when persisted memory changes.",
+      parameters: Type.Object({
+        force: Type.Optional(Type.Boolean({ description: "Whether to force a full rebuild instead of an incremental refresh." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
       name: "workspace_list",
       label: "Workspace List",
       description: "List files and directories in your dedicated workspace for this agent.",

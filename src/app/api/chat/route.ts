@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { MEMORY_BACKENDS } from "@/lib/chat/types";
 import { extractAssistantMetaFromConversationError, runConversation, streamConversation } from "@/lib/ai/openai-client";
 import { assistantMessageMetaSchema, messageImageAttachmentSchema } from "@/lib/chat/schemas";
 import {
@@ -40,6 +41,7 @@ const requestSchema = z.object({
     model: z.string().max(200).optional().default(""),
     systemPrompt: z.string().max(4_000).optional().default(""),
     providerMode: z.enum(["auto", "openai", "right_codes", "generic"]).optional().default("auto"),
+    memoryBackend: z.enum(MEMORY_BACKENDS).optional().default("sqlite-fts"),
     thinkingLevel: z.enum(THINKING_LEVELS).optional().default("off"),
     enabledSkillIds: z.array(z.string().trim().min(1).max(120)).max(24).optional().default([]),
     maxToolLoopSteps: z
