@@ -278,6 +278,7 @@ function finalizeLatestDraftSegment(draftSegments: DraftTextSegment[]): DraftTex
 }
 
 function createTurn(
+  turnId: string | undefined,
   agent: AgentRoomTurn["agent"],
   roomId: string,
   userMessageId: string,
@@ -300,7 +301,7 @@ function createTurn(
   error?: string,
 ): AgentRoomTurn {
   return {
-    id: createUuid(),
+    id: turnId ?? createUuid(),
     agent,
     userMessage: createUserMessage(
       roomId,
@@ -432,6 +433,7 @@ async function resolveConversationDependencies(conversationRunner?: RoomConversa
 }
 
 interface BaseRoomTurnInput {
+  turnId?: string;
   message: {
     id: string;
     content: string;
@@ -463,6 +465,7 @@ export interface RunRoomTurnInput {
   workspace: { rooms: RoomSession[] };
   roomId: string;
   agentId: RoomAgentId;
+  turnId?: string;
   message: BaseRoomTurnInput["message"];
   anchorMessageId?: string;
   settings: ChatSettings;
@@ -524,6 +527,7 @@ export async function buildPreparedInputFromWorkspace(args: RunRoomTurnInput): P
   const agentDefinitions = await listAgentDefinitions();
   const agentDef = getRoomAgent(args.agentId, agentDefinitions);
   return {
+    ...(args.turnId ? { turnId: args.turnId } : {}),
     message: args.message,
     settings: args.settings,
     room: {
@@ -715,6 +719,7 @@ export async function runPreparedRoomTurn(
     });
 
     const turn = createTurn(
+      args.turnId,
       agent,
       args.room.id,
       args.message.id,
@@ -793,6 +798,7 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
 
     return {
       turn: createTurn(
+        args.turnId,
         error.partial.agent,
         error.partial.roomId,
         error.partial.userMessageId,

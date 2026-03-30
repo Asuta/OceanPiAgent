@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendMissingMatchingRoomMessages } from "@/components/workspace/use-room-execution";
+import { appendMissingMatchingRoomMessages } from "@/components/workspace/room-message-state";
 import type { RoomMessage, RoomSession } from "@/lib/chat/types";
 
 function createRoomMessage(overrides?: Partial<RoomMessage>): RoomMessage {
