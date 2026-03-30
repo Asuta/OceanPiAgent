@@ -87,40 +87,25 @@ function createStreamedRoomMessageId(requestId: string, roomId: string, streamKe
 }
 
 function createRoomMessageIdResolver(requestId: string) {
-  const messageIdByMessageKey = new Map<string, string>();
   const messageIdByToolCallId = new Map<string, string>();
 
   return (args: { roomId: string; messageKey?: string; toolCallId?: string }): string => {
-    const compositeMessageKey = args.messageKey ? `${args.roomId}:${args.messageKey}` : null;
-    if (compositeMessageKey) {
-      const messageId = messageIdByMessageKey.get(compositeMessageKey);
-      if (messageId) {
-        if (args.toolCallId) {
-          messageIdByToolCallId.set(args.toolCallId, messageId);
-        }
-        return messageId;
-      }
-    }
-
     if (args.toolCallId) {
       const messageId = messageIdByToolCallId.get(args.toolCallId);
       if (messageId) {
-        if (compositeMessageKey) {
-          messageIdByMessageKey.set(compositeMessageKey, messageId);
-        }
         return messageId;
       }
+
+      const nextMessageId = createStreamedRoomMessageId(requestId, args.roomId, `tool-call:${args.toolCallId}`);
+      messageIdByToolCallId.set(args.toolCallId, nextMessageId);
+      return nextMessageId;
     }
 
-    const streamKey = compositeMessageKey ? `message-key:${compositeMessageKey}` : `tool-call:${args.toolCallId ?? createUuid()}`;
-    const messageId = createStreamedRoomMessageId(requestId, args.roomId, streamKey);
-    if (compositeMessageKey) {
-      messageIdByMessageKey.set(compositeMessageKey, messageId);
+    if (args.messageKey) {
+      return createStreamedRoomMessageId(requestId, args.roomId, `message-key:${args.roomId}:${args.messageKey}`);
     }
-    if (args.toolCallId) {
-      messageIdByToolCallId.set(args.toolCallId, messageId);
-    }
-    return messageId;
+
+    return createUuid();
   };
 }
 
