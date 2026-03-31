@@ -4,7 +4,7 @@ import type { RoomChatStreamEvent } from "@/lib/chat/types";
 import { messageImageAttachmentSchema } from "@/lib/chat/schemas";
 import { ensureChannelRuntimeStarted } from "@/lib/server/channel-runtime";
 import { ensureCronDispatcherStarted } from "@/lib/server/cron-dispatcher";
-import { claimRoomStream, combineAbortSignals } from "@/lib/server/room-stream-control";
+import { claimRoomStream } from "@/lib/server/room-stream-control";
 import { appendUserRoomMessage } from "@/lib/server/room-service";
 import { enqueueRoomScheduler } from "@/lib/server/room-scheduler";
 
@@ -32,7 +32,18 @@ export async function POST(request: Request) {
         void (async () => {
           let errorSent = false;
           const claimedStream = claimRoomStream(payload.roomId);
-          const signal = combineAbortSignals([request.signal, claimedStream.signal]);
+          let streamClosed = false;
+          const emitEvent = (event: RoomChatStreamEvent) => {
+            if (streamClosed) {
+              return;
+            }
+
+            controller.enqueue(encodeSseEvent(event));
+          };
+          request.signal.addEventListener("abort", () => {
+            streamClosed = true;
+          }, { once: true });
+
           try {
             const appended = await appendUserRoomMessage({
               roomId: payload.roomId,
@@ -41,58 +52,51 @@ export async function POST(request: Request) {
               senderId: payload.senderId,
             });
 
-            controller.enqueue(
-              encodeSseEvent({
-                type: "room-message",
-                message: appended.userMessage,
-              }),
-            );
+            emitEvent({
+              type: "room-message",
+              message: appended.userMessage,
+            });
 
             await enqueueRoomScheduler(payload.roomId, {
-              signal,
+              signal: claimedStream.signal,
               onTurnStart: (turn) => {
-                controller.enqueue(encodeSseEvent({ type: "turn-start", turn }));
+                emitEvent({ type: "turn-start", turn });
               },
               onTextDelta: (delta) => {
-                controller.enqueue(encodeSseEvent({ type: "agent-text-delta", delta }));
+                emitEvent({ type: "agent-text-delta", delta });
               },
               onTool: (tool) => {
-                controller.enqueue(encodeSseEvent({ type: "tool", tool }));
+                emitEvent({ type: "tool", tool });
               },
               onRoomMessagePreview: (message) => {
-                controller.enqueue(encodeSseEvent({ type: "room-message-preview", message }));
+                emitEvent({ type: "room-message-preview", message });
               },
               onRoomMessage: (message) => {
-                controller.enqueue(encodeSseEvent({ type: "room-message", message }));
+                emitEvent({ type: "room-message", message });
               },
               onReceiptUpdate: (update) => {
-                controller.enqueue(encodeSseEvent({ type: "message-receipt", update }));
+                emitEvent({ type: "message-receipt", update });
               },
               onTurnDone: (result) => {
-                controller.enqueue(
-                  encodeSseEvent({
-                    type: "done",
-                    turn: result.turn,
-                    resolvedModel: result.resolvedModel,
-                    compatibility: result.compatibility,
-                  }),
-                );
+                emitEvent({
+                  type: "done",
+                  turn: result.turn,
+                  resolvedModel: result.resolvedModel,
+                  compatibility: result.compatibility,
+                });
               },
               onError: (error, meta) => {
                 errorSent = true;
                 const message = error instanceof Error ? error.message : "Unknown server error.";
-                controller.enqueue(
-                  encodeSseEvent({
-                    type: "error",
-                    error: message,
-                    ...(meta ? { meta } : {}),
-                  }),
-                );
+                emitEvent({
+                  type: "error",
+                  error: message,
+                  ...(meta ? { meta } : {}),
+                });
               },
             });
           } catch (error) {
-            if (signal.aborted) {
-              controller.close();
+            if (claimedStream.signal.aborted || request.signal.aborted) {
               return;
             }
 
@@ -101,15 +105,15 @@ export async function POST(request: Request) {
             }
 
             const message = error instanceof Error ? error.message : "Unknown server error.";
-            controller.enqueue(
-              encodeSseEvent({
-                type: "error",
-                error: message,
-              }),
-            );
+            emitEvent({
+              type: "error",
+              error: message,
+            });
           } finally {
             claimedStream.release();
-            controller.close();
+            if (!streamClosed) {
+              controller.close();
+            }
           }
         })();
       },

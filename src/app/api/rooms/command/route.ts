@@ -23,6 +23,7 @@ const commandSchema = z.discriminatedUnion("type", [
   baseSchema.extend({ type: z.literal("restore_room"), roomId: z.string().trim().min(1).max(120) }),
   baseSchema.extend({ type: z.literal("delete_room"), roomId: z.string().trim().min(1).max(120) }),
   baseSchema.extend({ type: z.literal("clear_room"), roomId: z.string().trim().min(1).max(120) }),
+  baseSchema.extend({ type: z.literal("stop_room"), roomId: z.string().trim().min(1).max(120) }),
   baseSchema.extend({ type: z.literal("add_human_participant"), roomId: z.string().trim().min(1).max(120), name: z.string().trim().min(1).max(120) }),
   baseSchema.extend({ type: z.literal("add_agent_participant"), roomId: z.string().trim().min(1).max(120), agentId: z.string().trim().min(1).max(120) }),
   baseSchema.extend({ type: z.literal("remove_participant"), roomId: z.string().trim().min(1).max(120), participantId: z.string().trim().min(1).max(120) }),

@@ -18,7 +18,7 @@ import {
   toggleAgentParticipantInRoom,
 } from "@/lib/chat/room-actions";
 import { listAgentDefinitions } from "@/lib/server/agent-registry";
-import { enqueueRoomScheduler } from "@/lib/server/room-scheduler";
+import { enqueueRoomScheduler, stopRoomScheduler } from "@/lib/server/room-scheduler";
 import { loadWorkspaceEnvelope, mutateWorkspace, type WorkspaceEnvelope } from "@/lib/server/workspace-store";
 import { createUuid } from "@/lib/utils/uuid";
 
@@ -40,6 +40,7 @@ type RoomServiceDependencies = {
   mutateWorkspace: typeof mutateWorkspace;
   listAgentDefinitions: () => Promise<RoomAgentDefinition[]>;
   enqueueRoomScheduler: typeof enqueueRoomScheduler;
+  stopRoomScheduler: typeof stopRoomScheduler;
 };
 
 export type RoomCommandInput =
@@ -54,6 +55,7 @@ export type RoomCommandInput =
   | { type: "remove_participant"; roomId: string; participantId: string }
   | { type: "toggle_agent_participant"; roomId: string; participantId: string }
   | { type: "move_agent_participant"; roomId: string; participantId: string; direction: -1 | 1 }
+  | { type: "stop_room"; roomId: string }
   | { type: "send_message"; roomId: string; content: string; attachments?: MessageImageAttachment[]; senderId?: string };
 
 function getNextRoomIndex(rooms: RoomSession[]): number {
@@ -113,6 +115,7 @@ export async function appendUserRoomMessage(
     mutateWorkspace: overrides.mutateWorkspace ?? mutateWorkspace,
     listAgentDefinitions: overrides.listAgentDefinitions ?? listAgentDefinitions,
     enqueueRoomScheduler: overrides.enqueueRoomScheduler ?? enqueueRoomScheduler,
+    stopRoomScheduler: overrides.stopRoomScheduler ?? stopRoomScheduler,
   };
 
   const normalizedContent = args.content.trim();
@@ -173,6 +176,7 @@ export async function runRoomCommand(
     mutateWorkspace: overrides.mutateWorkspace ?? mutateWorkspace,
     listAgentDefinitions: overrides.listAgentDefinitions ?? listAgentDefinitions,
     enqueueRoomScheduler: overrides.enqueueRoomScheduler ?? enqueueRoomScheduler,
+    stopRoomScheduler: overrides.stopRoomScheduler ?? stopRoomScheduler,
   };
 
   if (input.type === "create_room") {
@@ -200,6 +204,15 @@ export async function runRoomCommand(
     }, deps);
 
     await deps.enqueueRoomScheduler(input.roomId);
+    const envelope = await deps.loadWorkspaceEnvelope();
+    return {
+      envelope,
+      room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null,
+    };
+  }
+
+  if (input.type === "stop_room") {
+    await deps.stopRoomScheduler(input.roomId);
     const envelope = await deps.loadWorkspaceEnvelope();
     return {
       envelope,

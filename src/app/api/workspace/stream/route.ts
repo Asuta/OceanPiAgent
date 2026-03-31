@@ -1,11 +1,12 @@
 import { ensureChannelRuntimeStarted } from "@/lib/server/channel-runtime";
 import { ensureCronDispatcherStarted } from "@/lib/server/cron-dispatcher";
-import { loadWorkspaceEnvelope, subscribeWorkspaceEnvelopes } from "@/lib/server/workspace-store";
+import type { WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
+import { loadWorkspaceEnvelope, subscribeWorkspaceEvents } from "@/lib/server/workspace-store";
 
 export const runtime = "nodejs";
 
-function encodeEnvelope(envelope: Awaited<ReturnType<typeof loadWorkspaceEnvelope>>): Uint8Array {
-  return new TextEncoder().encode(`data: ${JSON.stringify(envelope)}\n\n`);
+function encodeEvent(event: WorkspaceStreamEvent): Uint8Array {
+  return new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
 }
 
 export async function GET(request: Request) {
@@ -15,10 +16,15 @@ export async function GET(request: Request) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const initialEnvelope = await loadWorkspaceEnvelope();
-      controller.enqueue(encodeEnvelope(initialEnvelope));
+      controller.enqueue(encodeEvent({
+        type: "snapshot",
+        version: initialEnvelope.version,
+        updatedAt: initialEnvelope.updatedAt,
+        state: initialEnvelope.state,
+      }));
 
-      const unsubscribe = subscribeWorkspaceEnvelopes((envelope) => {
-        controller.enqueue(encodeEnvelope(envelope));
+      const unsubscribe = subscribeWorkspaceEvents((event) => {
+        controller.enqueue(encodeEvent(event));
       });
       const heartbeat = setInterval(() => {
         controller.enqueue(new TextEncoder().encode(": keep-alive\n\n"));

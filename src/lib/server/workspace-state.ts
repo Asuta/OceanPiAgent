@@ -23,6 +23,17 @@ export type ApplyRoomTurnToWorkspaceArgs = {
   roomActions: import("@/lib/chat/types").RoomToolActionUnion[];
 };
 
+function upsertAgentTurn(turns: ApplyRoomTurnToWorkspaceArgs["turn"][], turn: ApplyRoomTurnToWorkspaceArgs["turn"]) {
+  const existingIndex = turns.findIndex((entry) => entry.id === turn.id);
+  if (existingIndex < 0) {
+    return [...turns, turn];
+  }
+
+  const nextTurns = [...turns];
+  nextTurns[existingIndex] = turn;
+  return nextTurns;
+}
+
 function replaceUserMessageInRoom(room: import("@/lib/chat/types").RoomSession, turn: ApplyRoomTurnToWorkspaceArgs["turn"]) {
   return room.roomMessages.map((message) => (
     message.id === turn.userMessage.id
@@ -45,7 +56,7 @@ export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
     let nextRoom = {
       ...room,
       roomMessages: replaceUserMessageInRoom(room, args.turn),
-      agentTurns: [...room.agentTurns, args.turn],
+      agentTurns: upsertAgentTurn(room.agentTurns, args.turn),
       error: args.turn.status === "error" ? args.turn.error || "Unknown room error." : "",
       updatedAt: createTimestamp(),
     };
@@ -81,7 +92,7 @@ export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
     ...args.workspace.agentStates,
     [args.agentId]: {
       ...(args.workspace.agentStates[args.agentId] ?? createAgentSharedState()),
-      agentTurns: [...(args.workspace.agentStates[args.agentId]?.agentTurns ?? []), args.turn],
+      agentTurns: upsertAgentTurn(args.workspace.agentStates[args.agentId]?.agentTurns ?? [], args.turn),
       resolvedModel: args.resolvedModel,
       compatibility: args.compatibility,
       updatedAt: createTimestamp(),
@@ -105,7 +116,7 @@ export function applyCronTurnToWorkspace(args: ApplyCronTurnToWorkspaceArgs) {
 
     let nextRoom = {
       ...room,
-      agentTurns: [...room.agentTurns, args.turn],
+      agentTurns: upsertAgentTurn(room.agentTurns, args.turn),
       error: "",
       updatedAt: createTimestamp(),
     };
@@ -141,7 +152,7 @@ export function applyCronTurnToWorkspace(args: ApplyCronTurnToWorkspaceArgs) {
     ...args.workspace.agentStates,
     [args.agentId]: {
       ...(args.workspace.agentStates[args.agentId] ?? createAgentSharedState()),
-      agentTurns: [...(args.workspace.agentStates[args.agentId]?.agentTurns ?? []), args.turn],
+      agentTurns: upsertAgentTurn(args.workspace.agentStates[args.agentId]?.agentTurns ?? [], args.turn),
       resolvedModel: args.resolvedModel,
       compatibility: args.compatibility,
       updatedAt: createTimestamp(),

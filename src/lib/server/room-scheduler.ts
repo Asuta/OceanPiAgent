@@ -9,6 +9,7 @@ import type {
 } from "@/lib/chat/types";
 import { createSchedulerPacket, getNextAgentParticipant, getSchedulerVisibleTargetMessages } from "@/lib/chat/room-scheduler";
 import { createAgentSharedState, createTimestamp, getEnabledAgentParticipants, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
+import { abortRoomStream, combineAbortSignals } from "@/lib/server/room-stream-control";
 import {
   buildPreparedInputFromWorkspace,
   extractAssistantMetaFromRoomTurnError,
@@ -56,6 +57,7 @@ type RoomQueueState = {
   rerun: boolean;
   waiters: QueueWaiter[];
   queuedOverrides?: RoomSchedulerOverrides;
+  currentRunController?: AbortController;
 };
 
 declare global {
@@ -74,8 +76,9 @@ function getQueueState(roomId: string): RoomQueueState {
   const created: RoomQueueState = {
     running: false,
     rerun: false,
-    waiters: [],
-    queuedOverrides: undefined,
+      waiters: [],
+      queuedOverrides: undefined,
+      currentRunController: undefined,
   };
   roomQueues.set(roomId, created);
   return created;
@@ -99,6 +102,92 @@ function withIdleScheduler(room: RoomSession): RoomSession {
     },
     updatedAt: createTimestamp(),
   };
+}
+
+function markTurnStopped(turn: AgentRoomTurn, reason: string): AgentRoomTurn {
+  if (turn.status !== "running") {
+    return turn;
+  }
+
+  return {
+    ...turn,
+    status: "error",
+    error: reason,
+  };
+}
+
+function applyStoppedStateToWorkspace(workspace: RoomWorkspaceState, roomId: string, reason: string): RoomWorkspaceState {
+  const stoppedTurnIds = new Set<string>();
+  const rooms = sortRoomsByUpdatedAt(
+    workspace.rooms.map((room) => {
+      if (room.id !== roomId) {
+        return room;
+      }
+
+      const nextTurns = room.agentTurns.map((turn) => {
+        const nextTurn = markTurnStopped(turn, reason);
+        if (nextTurn !== turn) {
+          stoppedTurnIds.add(turn.id);
+        }
+        return nextTurn;
+      });
+
+      return {
+        ...withIdleScheduler(room),
+        agentTurns: nextTurns,
+        error: "",
+        updatedAt: createTimestamp(),
+      };
+    }),
+  );
+
+  if (stoppedTurnIds.size === 0) {
+    return {
+      ...workspace,
+      rooms,
+    };
+  }
+
+  const nextAgentStates = Object.fromEntries(
+    Object.entries(workspace.agentStates).map(([agentId, state]) => [
+      agentId,
+      {
+        ...state,
+        agentTurns: state.agentTurns.map((turn) => (stoppedTurnIds.has(turn.id) ? markTurnStopped(turn, reason) : turn)),
+        updatedAt: createTimestamp(),
+      },
+    ]),
+  ) as RoomWorkspaceState["agentStates"];
+
+  return {
+    ...workspace,
+    rooms,
+    agentStates: nextAgentStates,
+  };
+}
+
+function getAbortReason(signal: AbortSignal | undefined, fallback: string): string {
+  const reason = signal?.reason;
+  if (reason instanceof Error && reason.message) {
+    return reason.message;
+  }
+  if (typeof reason === "string" && reason.trim()) {
+    return reason;
+  }
+  return fallback;
+}
+
+function isAbortLike(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) {
+    return true;
+  }
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return true;
+  }
+  if (error instanceof Error && /abort|stopp|take over/i.test(error.message)) {
+    return true;
+  }
+  return false;
 }
 
 function hasNewerVisibleActivity(room: RoomSession, participantId: string, cutoffSeq: number): boolean {
@@ -234,6 +323,13 @@ export async function runRoomSchedulerNow(
   roomId: string,
   overrides: RoomSchedulerOverrides = {},
 ): Promise<void> {
+  const queueState = getQueueState(roomId);
+  const combinedSignal = queueState.currentRunController
+    ? combineAbortSignals([
+        queueState.currentRunController.signal,
+        ...(overrides.signal ? [overrides.signal] : []),
+      ])
+    : overrides.signal;
   const deps: RoomSchedulerDependencies = {
     loadWorkspaceEnvelope: overrides.loadWorkspaceEnvelope ?? loadWorkspaceEnvelope,
     mutateWorkspace: overrides.mutateWorkspace ?? mutateWorkspace,
@@ -243,7 +339,7 @@ export async function runRoomSchedulerNow(
     resolveSettingsWithModelConfig: overrides.resolveSettingsWithModelConfig ?? resolveSettingsWithModelConfig,
   };
   const hooks: RoomSchedulerRunHooks = {
-    ...(overrides.signal ? { signal: overrides.signal } : {}),
+    ...(combinedSignal ? { signal: combinedSignal } : {}),
     ...(overrides.onTurnStart ? { onTurnStart: overrides.onTurnStart } : {}),
     ...(overrides.onTextDelta ? { onTextDelta: overrides.onTextDelta } : {}),
     ...(overrides.onTool ? { onTool: overrides.onTool } : {}),
@@ -259,6 +355,7 @@ export async function runRoomSchedulerNow(
 
   while (true) {
     if (hooks.signal?.aborted) {
+      await deps.mutateWorkspace((workspace) => applyStoppedStateToWorkspace(workspace, roomId, getAbortReason(hooks.signal, "Room scheduler stopped.")));
       return;
     }
 
@@ -353,6 +450,11 @@ export async function runRoomSchedulerNow(
         deps,
       });
     } catch (error) {
+      if (isAbortLike(error, hooks.signal)) {
+        await deps.mutateWorkspace((workspace) => applyStoppedStateToWorkspace(workspace, roomId, getAbortReason(hooks.signal, "Room scheduler stopped.")));
+        return;
+      }
+
       const meta = extractAssistantMetaFromRoomTurnError(error);
       if (hooks.onError) {
         await hooks.onError(error, meta);
@@ -433,6 +535,7 @@ export function enqueueRoomScheduler(
   }
 
   queueState.running = true;
+  queueState.currentRunController = new AbortController();
   void (async () => {
     try {
       while (queueState.rerun) {
@@ -449,6 +552,7 @@ export function enqueueRoomScheduler(
       waiters.forEach((waiter) => waiter.reject(error));
     } finally {
       queueState.running = false;
+      queueState.currentRunController = undefined;
       if (queueState.rerun) {
         void enqueueRoomScheduler(roomId, overrides);
       }
@@ -456,4 +560,18 @@ export function enqueueRoomScheduler(
   })();
 
   return completion;
+}
+
+export async function stopRoomScheduler(
+  roomId: string,
+  reason = "Room scheduler stopped by operator.",
+  overrides: Partial<Pick<RoomSchedulerDependencies, "mutateWorkspace">> = {},
+): Promise<void> {
+  const queueState = getQueueState(roomId);
+  queueState.rerun = false;
+  queueState.queuedOverrides = undefined;
+  queueState.currentRunController?.abort(new Error(reason));
+  abortRoomStream(roomId, new Error(reason));
+  const applyMutation = overrides.mutateWorkspace ?? mutateWorkspace;
+  await applyMutation((workspace) => applyStoppedStateToWorkspace(workspace, roomId, reason));
 }

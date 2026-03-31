@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createDefaultWorkspaceState } from "@/lib/server/workspace-state";
-import { mutateWorkspace, subscribeWorkspaceEnvelopes } from "@/lib/server/workspace-store";
+import { mutateWorkspace, subscribeWorkspaceEvents } from "@/lib/server/workspace-store";
 
-test("workspace store broadcasts envelopes after mutation", async () => {
-  const seenVersions: number[] = [];
-  const unsubscribe = subscribeWorkspaceEnvelopes((envelope) => {
-    seenVersions.push(envelope.version);
+test("workspace store broadcasts patch events after mutation", async () => {
+  const seenEventTypes: string[] = [];
+  const unsubscribe = subscribeWorkspaceEvents((event) => {
+    seenEventTypes.push(event.type);
   });
 
   try {
@@ -19,5 +19,5 @@ test("workspace store broadcasts envelopes after mutation", async () => {
     unsubscribe();
   }
 
-  assert.equal(seenVersions.length > 0, true);
+  assert.deepEqual(seenEventTypes, ["patch"]);
 });
