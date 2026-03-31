@@ -223,6 +223,14 @@ function getMessageCardClass(message: RoomMessage) {
   return parts.join(" ");
 }
 
+function dedupeTurnsById<T extends { id: string }>(turns: T[]): T[] {
+  const turnsById = new Map<string, T>();
+  for (const turn of turns) {
+    turnsById.set(turn.id, turn);
+  }
+  return [...turnsById.values()];
+}
+
 export function RoomDetailPage({ roomId }: { roomId: string }) {
   const router = useRouter();
   const {
@@ -249,6 +257,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     removeParticipant,
     toggleAgentParticipant,
     moveAgentParticipant,
+    stopRoom,
     isAgentRunning,
     isRoomRunning,
     clearAgentConsole,
@@ -266,6 +275,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const [isUploadingImages, setIsUploadingImages] = useState(false);
   const [titleDraftByRoomId, setTitleDraftByRoomId] = useState<Record<string, string>>({});
   const [showStarterPrompts, setShowStarterPrompts] = useState(false);
+  const [isStoppingRoom, setIsStoppingRoom] = useState(false);
   const threadListRef = useRef<HTMLDivElement | null>(null);
   const workbenchBodyRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
@@ -479,7 +489,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   }, [roomTurns]);
   const visibleConsoleTurns = useMemo(() => {
     const turns = consoleScope === "room" ? roomTurns : (consoleAgentState?.agentTurns ?? []);
-    return [...turns].sort((left, right) => getSortableTime(left.userMessage.createdAt) - getSortableTime(right.userMessage.createdAt));
+    return [...dedupeTurnsById(turns)].sort((left, right) => getSortableTime(left.userMessage.createdAt) - getSortableTime(right.userMessage.createdAt));
   }, [consoleAgentState?.agentTurns, consoleScope, roomTurns]);
 
   useLayoutEffect(() => {
@@ -816,6 +826,23 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                 <strong>{activeParticipant?.name || getAgentDefinition(primaryAgentId).label} 正在继续处理这条会话</strong>
                 <p>如果你现在发送新消息，会中断当前轮询并接管为新的上下文。</p>
               </div>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  void (async () => {
+                    setIsStoppingRoom(true);
+                    try {
+                      await stopRoom(room.id);
+                    } finally {
+                      setIsStoppingRoom(false);
+                    }
+                  })();
+                }}
+                disabled={isStoppingRoom}
+              >
+                {isStoppingRoom ? "停止中..." : "强制停止当前回复"}
+              </button>
               <span className="thread-live-badge">live</span>
             </div>
           ) : null}

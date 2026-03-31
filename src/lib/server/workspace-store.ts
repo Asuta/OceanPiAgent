@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { roomWorkspaceStateSchema } from "@/lib/chat/schemas";
 import type { RoomWorkspaceState } from "@/lib/chat/types";
+import { createWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
 import { createDefaultWorkspaceState } from "@/lib/server/workspace-state";
 
 export interface WorkspaceEnvelope {
@@ -15,10 +16,10 @@ const WORKSPACE_FILE = path.join(WORKSPACE_ROOT, "state.json");
 
 declare global {
   var __oceankingWorkspaceWriteQueue: Promise<void> | undefined;
-  var __oceankingWorkspaceSubscribers: Map<string, (envelope: WorkspaceEnvelope) => void> | undefined;
+  var __oceankingWorkspaceSubscribers: Map<string, (event: WorkspaceStreamEvent) => void> | undefined;
 }
 
-const workspaceSubscribers = globalThis.__oceankingWorkspaceSubscribers ?? new Map<string, (envelope: WorkspaceEnvelope) => void>();
+const workspaceSubscribers = globalThis.__oceankingWorkspaceSubscribers ?? new Map<string, (event: WorkspaceStreamEvent) => void>();
 globalThis.__oceankingWorkspaceSubscribers = workspaceSubscribers;
 
 function createTimestamp(): string {
@@ -77,13 +78,13 @@ async function writeWorkspaceEnvelope(envelope: WorkspaceEnvelope): Promise<void
   await writeFile(WORKSPACE_FILE, JSON.stringify(envelope, null, 2), "utf8");
 }
 
-function broadcastWorkspaceEnvelope(envelope: WorkspaceEnvelope): void {
+function broadcastWorkspaceEvent(event: WorkspaceStreamEvent): void {
   for (const listener of workspaceSubscribers.values()) {
-    listener(envelope);
+    listener(event);
   }
 }
 
-export function subscribeWorkspaceEnvelopes(listener: (envelope: WorkspaceEnvelope) => void): () => void {
+export function subscribeWorkspaceEvents(listener: (event: WorkspaceStreamEvent) => void): () => void {
   const subscriptionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   workspaceSubscribers.set(subscriptionId, listener);
   return () => {
@@ -126,7 +127,12 @@ export async function saveWorkspaceState(args: {
       state: parsedState,
     };
     await writeWorkspaceEnvelope(nextEnvelope);
-    broadcastWorkspaceEnvelope(nextEnvelope);
+    broadcastWorkspaceEvent({
+      type: "patch",
+      version: nextEnvelope.version,
+      updatedAt: nextEnvelope.updatedAt,
+      patch: createWorkspaceStatePatch(current.state, nextEnvelope.state),
+    });
     return nextEnvelope;
   });
 }
@@ -143,7 +149,12 @@ export async function mutateWorkspace(
       state: nextState,
     };
     await writeWorkspaceEnvelope(nextEnvelope);
-    broadcastWorkspaceEnvelope(nextEnvelope);
+    broadcastWorkspaceEvent({
+      type: "patch",
+      version: nextEnvelope.version,
+      updatedAt: nextEnvelope.updatedAt,
+      patch: createWorkspaceStatePatch(current.state, nextEnvelope.state),
+    });
     return nextEnvelope;
   });
 }

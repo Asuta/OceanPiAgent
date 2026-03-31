@@ -1,9 +1,68 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createSchedulerPacket } from "@/lib/chat/room-scheduler";
 import { addAgentParticipantToRoom } from "@/lib/chat/room-actions";
 import { appendMessageToRoom, createAgentSharedState, createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
 import type { RunRoomTurnResult } from "@/lib/server/room-runner";
-import { runRoomSchedulerNow } from "@/lib/server/room-scheduler";
+import { runRoomSchedulerNow, stopRoomScheduler } from "@/lib/server/room-scheduler";
+
+test("createSchedulerPacket includes the full unseen visible delta for the target participant", () => {
+  const state = createDefaultWorkspaceState();
+  let room = addAgentParticipantToRoom({ room: state.rooms[0]!, agentId: "researcher" });
+  const targetParticipant = room.participants.find((participant) => participant.id === "researcher");
+  assert.ok(targetParticipant);
+
+  const firstMessage = createRoomMessage(room.id, "assistant", "Concierge already summarized the brief.", "agent_emit", {
+    sender: {
+      id: "concierge",
+      name: "Harbor Concierge",
+      role: "participant",
+    },
+    attachments: [{
+      id: "attachment-a",
+      kind: "image",
+      mimeType: "image/png",
+      filename: "brief.png",
+      sizeBytes: 1_024,
+      storagePath: "workspace/brief.png",
+      url: "/brief.png",
+    }],
+  });
+  const secondMessage = createRoomMessage(room.id, "user", "Please also check the numbers in this chart.", "user", {
+    sender: {
+      id: "local-operator",
+      name: "You",
+      role: "participant",
+    },
+    attachments: [{
+      id: "attachment-b",
+      kind: "image",
+      mimeType: "image/png",
+      filename: "chart.png",
+      sizeBytes: 2_048,
+      storagePath: "workspace/chart.png",
+      url: "/chart.png",
+    }],
+  });
+
+  room = appendMessageToRoom(room, firstMessage);
+  room = appendMessageToRoom(room, secondMessage);
+
+  const packet = createSchedulerPacket({
+    room,
+    participant: targetParticipant,
+    messages: room.roomMessages,
+    requestId: "scheduler-request",
+    hasNewDelta: true,
+  });
+
+  assert.match(packet.content, /Visible unseen message count: 2/);
+  assert.match(packet.content, /Concierge already summarized the brief\./);
+  assert.match(packet.content, /Please also check the numbers in this chart\./);
+  assert.equal(packet.attachments.length, 2);
+  assert.equal(packet.attachments[0]?.id, "attachment-a");
+  assert.equal(packet.attachments[1]?.id, "attachment-b");
+});
 
 test("runRoomSchedulerNow advances multi-agent room work on the server and settles idle", async () => {
   let state = createDefaultWorkspaceState();
@@ -247,4 +306,65 @@ test("runRoomSchedulerNow emits streaming callbacks for each scheduled turn", as
   assert.deepEqual(streamedTurns, ["concierge", "researcher"]);
   assert.deepEqual(streamedDeltas, ["concierge-draft", "researcher-draft"]);
   assert.deepEqual(streamedDone, ["concierge", "researcher"]);
+});
+
+test("stopRoomScheduler forces a running room back to idle and marks running turns stopped", async () => {
+  let state = createDefaultWorkspaceState();
+  const room = state.rooms[0]!;
+  const runningTurn = {
+    id: "stream:running-turn",
+    agent: {
+      id: "concierge",
+      label: "Harbor Concierge",
+    },
+    userMessage: createRoomMessage(room.id, "system", "Scheduler packet", "system", {
+      sender: {
+        id: "room-scheduler",
+        name: "Room Scheduler",
+        role: "system",
+      },
+      kind: "system",
+    }),
+    assistantContent: "",
+    tools: [],
+    emittedMessages: [],
+    status: "running" as const,
+  };
+  state = {
+    ...state,
+    rooms: [{
+      ...room,
+      scheduler: {
+        ...room.scheduler,
+        status: "running",
+        activeParticipantId: room.participants.find((participant) => participant.runtimeKind === "agent")?.id ?? null,
+      },
+      agentTurns: [runningTurn],
+    }],
+    agentStates: {
+      ...state.agentStates,
+      concierge: {
+        ...state.agentStates.concierge,
+        agentTurns: [runningTurn],
+      },
+    },
+  };
+  const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+    state = await mutator(state);
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+  };
+
+  await stopRoomScheduler(room.id, "Stopped for testing.", {
+    mutateWorkspace,
+  });
+
+  const nextRoom = state.rooms[0]!;
+  assert.equal(nextRoom.scheduler.status, "idle");
+  assert.equal(nextRoom.scheduler.activeParticipantId, null);
+  assert.equal(nextRoom.agentTurns[0]?.status, "error");
+  assert.equal(state.agentStates.concierge.agentTurns[0]?.error, "Stopped for testing.");
 });

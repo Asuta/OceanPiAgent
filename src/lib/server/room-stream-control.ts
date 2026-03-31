@@ -40,6 +40,15 @@ export function claimRoomStream(roomId: string): {
   };
 }
 
+export function abortRoomStream(roomId: string, reason?: unknown): void {
+  const current = activeRoomStreams.get(roomId);
+  if (!current) {
+    return;
+  }
+
+  current.controller.abort(reason ?? new Error("Room stream stopped by operator."));
+}
+
 export function combineAbortSignals(signals: AbortSignal[]): AbortSignal {
   const controller = new AbortController();
   const abortWithReason = (signal: AbortSignal) => {

@@ -67,6 +67,7 @@ import {
   sortRoomsByUpdatedAt,
   upsertMessageToRoom,
 } from "@/lib/chat/workspace-domain";
+import { applyWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
 import { hasMessagePayload } from "@/lib/chat/message-attachments";
 import {
   clearPersistedWorkspaceState,
@@ -198,6 +199,7 @@ interface WorkspaceContextValue {
   removeParticipant: (roomId: string, participantId: string) => Promise<void>;
   toggleAgentParticipant: (roomId: string, participantId: string) => Promise<void>;
   moveAgentParticipant: (roomId: string, participantId: string, direction: -1 | 1) => Promise<void>;
+  stopRoom: (roomId: string) => Promise<void>;
   sendMessage: (args: SendMessageArgs) => Promise<void>;
   clearAllWorkspace: () => Promise<void>;
   clearAgentConsole: (agentId: RoomAgentId) => void;
@@ -356,6 +358,10 @@ function mergeAgentTurns(...turnGroups: AgentRoomTurn[][]): AgentRoomTurn[] {
   }
 
   return sortAgentTurnsByUserMessageTime([...turnsById.values()]);
+}
+
+function dedupeAgentTurns(turns: AgentRoomTurn[]): AgentRoomTurn[] {
+  return mergeAgentTurns(turns);
 }
 
 function getRoomIndexTitle(index: number): string {
@@ -1616,7 +1622,7 @@ function normalizeRoomSession(value: unknown, index: number): RoomSession | null
     participants,
     scheduler,
     roomMessages: normalizedRoomMessages,
-    agentTurns,
+    agentTurns: dedupeAgentTurns(agentTurns),
     error: typeof value.error === "string" ? value.error : "",
     createdAt: typeof value.createdAt === "string" && value.createdAt ? value.createdAt : createTimestamp(),
     updatedAt: typeof value.updatedAt === "string" && value.updatedAt ? value.updatedAt : createTimestamp(),
@@ -1636,7 +1642,7 @@ function normalizeAgentSharedState(agentId: RoomAgentId, value: unknown): AgentS
 
   return createAgentSharedState({
     settings: normalizeSettings(value.settings),
-    agentTurns,
+    agentTurns: dedupeAgentTurns(agentTurns),
     resolvedModel: typeof value.resolvedModel === "string" ? value.resolvedModel : "",
     compatibility: normalizeCompatibility(value.compatibility),
     updatedAt: typeof value.updatedAt === "string" && value.updatedAt ? value.updatedAt : createTimestamp(),
@@ -1882,6 +1888,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
       roomsRef.current = nextRooms;
       agentStatesRef.current = nextAgentStates;
+      activeRoomIdRef.current = nextActiveRoomId;
+      selectedConsoleAgentIdRef.current = nextSelectedConsoleAgentId;
       workspaceVersionRef.current = version;
       setRooms(nextRooms);
       setAgentStates(nextAgentStates);
@@ -1902,6 +1910,29 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
       applyWorkspaceSnapshot(envelope.state, envelope.version, { skipServerPersist: true });
       return envelope.state;
+    },
+    [applyWorkspaceSnapshot],
+  );
+
+  const applyWorkspaceStreamEvent = useCallback(
+    (event: WorkspaceStreamEvent) => {
+      if (event.type === "snapshot") {
+        applyWorkspaceSnapshot(event.state, event.version, { skipServerPersist: true });
+        return;
+      }
+
+      const baseState: RoomWorkspaceState = {
+        rooms: roomsRef.current,
+        agentStates: agentStatesRef.current,
+        activeRoomId: activeRoomIdRef.current,
+        ...(selectedConsoleAgentIdRef.current
+          ? {
+              selectedConsoleAgentId: selectedConsoleAgentIdRef.current,
+            }
+          : {}),
+      };
+      const nextState = applyWorkspaceStatePatch(baseState, event.patch);
+      applyWorkspaceSnapshot(nextState, event.version, { skipServerPersist: true });
     },
     [applyWorkspaceSnapshot],
   );
@@ -2199,13 +2230,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     const workspaceEvents = new EventSource("/api/workspace/stream");
     workspaceEvents.onmessage = (event) => {
       try {
-        const payload = JSON.parse(event.data) as { version?: number; state?: RoomWorkspaceState };
-        if (
-          typeof payload.version === "number"
-          && payload.version > workspaceVersionRef.current
-          && payload.state
-        ) {
-          applyWorkspaceSnapshot(payload.state, payload.version, { skipServerPersist: true });
+        const payload = JSON.parse(event.data) as WorkspaceStreamEvent;
+        if (typeof payload.version === "number" && payload.version > workspaceVersionRef.current) {
+          applyWorkspaceStreamEvent(payload);
         }
       } catch {
         // Ignore malformed SSE payloads and wait for the next envelope.
@@ -2219,7 +2246,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return () => {
       workspaceEvents.close();
     };
-  }, [applyWorkspaceSnapshot, hydrated, refreshWorkspaceFromServer]);
+  }, [applyWorkspaceStreamEvent, hydrated, refreshWorkspaceFromServer]);
 
   useEffect(() => {
     roomsRef.current = rooms;
@@ -2228,6 +2255,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     agentStatesRef.current = agentStates;
   }, [agentStates]);
+
+  useEffect(() => {
+    activeRoomIdRef.current = activeRoomId;
+  }, [activeRoomId]);
+
+  useEffect(() => {
+    selectedConsoleAgentIdRef.current = selectedConsoleAgentId ?? null;
+  }, [selectedConsoleAgentId]);
 
   useEffect(() => {
     return () => {
@@ -2527,6 +2562,23 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         roomId,
         participantId,
         direction,
+      }, { pendingRoomId: roomId });
+    },
+    [runRoomCommandRequest],
+  );
+
+  const stopRoom = useCallback(
+    async (roomId: string) => {
+      activeRoomStreamControllersRef.current[roomId]?.abort();
+      delete activeRoomStreamRequestIdsRef.current[roomId];
+      setStreamingAgentIdsByRoomId((current) => {
+        const nextState = { ...current };
+        delete nextState[roomId];
+        return nextState;
+      });
+      await runRoomCommandRequest({
+        type: "stop_room",
+        roomId,
       }, { pendingRoomId: roomId });
     },
     [runRoomCommandRequest],
@@ -3050,6 +3102,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       removeParticipant,
       toggleAgentParticipant,
       moveAgentParticipant,
+      stopRoom,
       sendMessage,
       clearAllWorkspace,
       clearAgentConsole,
@@ -3082,6 +3135,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       isAgentCompacting,
       isRoomRunning,
       moveAgentParticipant,
+      stopRoom,
       removeParticipant,
       resetAgentContext,
       renameRoom,

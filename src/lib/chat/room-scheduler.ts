@@ -1,4 +1,5 @@
-import type { RoomAgentId, RoomMessage, RoomParticipant, RoomSender, RoomSession } from "@/lib/chat/types";
+import { formatMessageForTranscript } from "@/lib/chat/message-attachments";
+import type { MessageImageAttachment, RoomAgentId, RoomMessage, RoomParticipant, RoomSender, RoomSession } from "@/lib/chat/types";
 import { createRoomMessage, getEnabledAgentParticipants } from "@/lib/chat/workspace-domain";
 
 export interface ActiveSchedulerRun {
@@ -40,6 +41,33 @@ export function getSchedulerVisibleTargetMessages(messages: RoomMessage[], parti
   return messages.filter((message) => message.sender.role === "participant" && message.sender.id !== participant.id);
 }
 
+function collectSchedulerPacketAttachments(messages: RoomMessage[]): MessageImageAttachment[] {
+  const seenIds = new Set<string>();
+  const attachments: MessageImageAttachment[] = [];
+
+  for (const message of messages) {
+    for (const attachment of message.attachments) {
+      if (seenIds.has(attachment.id)) {
+        continue;
+      }
+      seenIds.add(attachment.id);
+      attachments.push(attachment);
+    }
+  }
+
+  return attachments;
+}
+
+function formatSchedulerPacketMessage(message: RoomMessage): string {
+  const header = `- seq ${message.seq} | messageId ${message.id} | from ${message.sender.name} (${message.sender.id}, ${message.sender.role}) | ${message.kind}/${message.status}`;
+  const body = formatMessageForTranscript(message.content, message.attachments)
+    .split("\n")
+    .map((line) => `  ${line}`)
+    .join("\n");
+
+  return `${header}\n${body}`;
+}
+
 export function buildSchedulerPacketContent(
   room: RoomSession,
   participant: RoomParticipant,
@@ -50,18 +78,21 @@ export function buildSchedulerPacketContent(
 ): string {
   const visibleTargetMessages = getSchedulerVisibleTargetMessages(messages, participant);
   const latestParticipantMessage = visibleTargetMessages[visibleTargetMessages.length - 1] ?? null;
+  const visibleMessageLines = visibleTargetMessages.length > 0
+    ? visibleTargetMessages.map((message) => formatSchedulerPacketMessage(message))
+    : ["- none"];
 
   return [
     "[Room scheduler sync packet]",
     `Target participant: ${participant.name} (${participant.id})`,
     `Room: ${room.title} (roomId: ${room.id})`,
     options?.hasNewDelta ? "Update type: new visible room activity" : "Update type: scheduler replay / no new seq",
+    `Visible unseen message count: ${visibleTargetMessages.length}`,
     latestParticipantMessage
       ? `Latest message: seq ${latestParticipantMessage.seq} | messageId ${latestParticipantMessage.id} | from ${latestParticipantMessage.sender.name} (${latestParticipantMessage.sender.id}, ${latestParticipantMessage.sender.role}) | ${latestParticipantMessage.kind}/${latestParticipantMessage.status}: ${latestParticipantMessage.content}`
       : "Latest message: none",
-    latestParticipantMessage && latestParticipantMessage.attachments.length > 0
-      ? `Latest message attachments: ${latestParticipantMessage.attachments.length} image file(s) included with the original visible room message.`
-      : "Latest message attachments: none",
+    "Visible unseen messages:",
+    ...visibleMessageLines,
   ].join("\n");
 }
 
@@ -97,7 +128,6 @@ export function createSchedulerPacket(args: {
   hasNewDelta: boolean;
 }): RoomMessage {
   const visibleTargetMessages = getSchedulerVisibleTargetMessages(args.messages, args.participant);
-  const latestParticipantMessage = visibleTargetMessages[visibleTargetMessages.length - 1] ?? null;
   const packet = createRoomMessage(
     args.room.id,
     "system",
@@ -106,7 +136,7 @@ export function createSchedulerPacket(args: {
     }),
     "system",
     {
-      attachments: latestParticipantMessage ? [...latestParticipantMessage.attachments] : [],
+      attachments: collectSchedulerPacketAttachments(visibleTargetMessages),
       sender: ROOM_SCHEDULER_SENDER,
       kind: "system",
       status: "completed",
