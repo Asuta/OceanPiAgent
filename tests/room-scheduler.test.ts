@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createSchedulerPacket } from "@/lib/chat/room-scheduler";
 import { addAgentParticipantToRoom } from "@/lib/chat/room-actions";
-import { appendMessageToRoom, createAgentSharedState, createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
+import { appendMessageToRoom, createAgentOwnedRoomSession, createAgentSharedState, createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
 import type { RunRoomTurnResult } from "@/lib/server/room-runner";
 import { runRoomSchedulerNow, stopRoomScheduler } from "@/lib/server/room-scheduler";
 
@@ -306,6 +306,203 @@ test("runRoomSchedulerNow emits streaming callbacks for each scheduled turn", as
   assert.deepEqual(streamedTurns, ["concierge", "researcher"]);
   assert.deepEqual(streamedDeltas, ["concierge-draft", "researcher-draft"]);
   assert.deepEqual(streamedDone, ["concierge", "researcher"]);
+});
+
+test("runRoomSchedulerNow forwards completed emitted room messages for bound-room delivery", async () => {
+  let state = createDefaultWorkspaceState();
+  let room = appendMessageToRoom(
+    state.rooms[0]!,
+    createRoomMessage(state.rooms[0]!.id, "user", "Please answer in the bound room.", "user", {
+      sender: {
+        id: "local-operator",
+        name: "You",
+        role: "participant",
+      },
+    }),
+  );
+  state = {
+    ...state,
+    rooms: [room],
+  };
+
+  const deliveredBatches: string[][] = [];
+  const loadWorkspaceEnvelope = async () => ({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    state,
+  });
+  const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+    state = await mutator(state);
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+  };
+
+  await runRoomSchedulerNow(room.id, {
+    loadWorkspaceEnvelope,
+    mutateWorkspace,
+    runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => {
+      const emittedMessages = [
+        createRoomMessage(roomId, "assistant", "Bound-room final reply", "agent_emit", {
+          sender: {
+            id: agentId,
+            name: "Harbor Concierge",
+            role: "participant",
+          },
+        }),
+      ];
+
+      const result: RunRoomTurnResult = {
+        turn: {
+          id: `turn-${agentId}`,
+          agent: {
+            id: agentId,
+            label: agentId,
+          },
+          userMessage: {
+            ...createRoomMessage(roomId, "system", message.content, "system", {
+              sender: message.sender,
+              kind: "system",
+            }),
+            id: message.id,
+          },
+          assistantContent: "done",
+          tools: [],
+          emittedMessages,
+          status: "completed",
+          resolvedModel: "generic/fake-model",
+        },
+        resolvedModel: "generic/fake-model",
+        compatibility: {
+          providerKey: "generic",
+          providerLabel: "Generic",
+          baseUrl: "",
+          chatCompletionsToolStyle: "tools",
+          responsesContinuation: "replay",
+          responsesPayloadMode: "json",
+          notes: [],
+        },
+        emittedMessages,
+        receiptUpdates: [],
+        roomActions: [],
+      };
+
+      return result;
+    },
+    deliverBoundRoomMessages: async (messages) => {
+      deliveredBatches.push(messages.map((message) => message.content));
+      return messages.length;
+    },
+  });
+
+  assert.deepEqual(deliveredBatches, [["Bound-room final reply"]]);
+});
+
+test("runRoomSchedulerNow advances past the owner when a new agent-owned room starts with the owner's first message", async () => {
+  let state = createDefaultWorkspaceState();
+  let room = createAgentOwnedRoomSession(
+    "room-owned-by-agent",
+    "Owner-led discussion",
+    "concierge",
+    ["concierge", "researcher", "bridge"],
+  );
+  room = appendMessageToRoom(
+    room,
+    createRoomMessage(room.id, "assistant", "Please discuss who has the stronger legacy.", "agent_emit", {
+      sender: {
+        id: "concierge",
+        name: "Harbor Concierge",
+        role: "participant",
+      },
+    }),
+  );
+  state = {
+    ...state,
+    rooms: [room],
+    agentStates: {
+      ...state.agentStates,
+      researcher: createAgentSharedState(),
+      bridge: createAgentSharedState(),
+    },
+  };
+
+  const callOrder: string[] = [];
+  const loadWorkspaceEnvelope = async () => ({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    state,
+  });
+  const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+    state = await mutator(state);
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+  };
+
+  await runRoomSchedulerNow(room.id, {
+    loadWorkspaceEnvelope,
+    mutateWorkspace,
+    runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => {
+      callOrder.push(agentId);
+      const emittedMessages = agentId === "researcher"
+        ? [
+            createRoomMessage(roomId, "assistant", "Researcher picks Chow for auteur impact.", "agent_emit", {
+              sender: {
+                id: "researcher",
+                name: "Signal Researcher",
+                role: "participant",
+              },
+            }),
+          ]
+        : [];
+
+      const result: RunRoomTurnResult = {
+        turn: {
+          id: `turn-${agentId}`,
+          agent: {
+            id: agentId,
+            label: agentId,
+          },
+          userMessage: {
+            ...createRoomMessage(roomId, "system", message.content, "system", {
+              sender: message.sender,
+              kind: "system",
+            }),
+            id: message.id,
+          },
+          assistantContent: `${agentId} complete`,
+          tools: [],
+          emittedMessages,
+          status: "completed",
+          resolvedModel: "generic/fake-model",
+        },
+        resolvedModel: "generic/fake-model",
+        compatibility: {
+          providerKey: "generic",
+          providerLabel: "Generic",
+          baseUrl: "",
+          chatCompletionsToolStyle: "tools",
+          responsesContinuation: "replay",
+          responsesPayloadMode: "json",
+          notes: [],
+        },
+        emittedMessages,
+        receiptUpdates: [],
+        roomActions: [],
+      };
+
+      return result;
+    },
+  });
+
+  const nextRoom = state.rooms[0]!;
+  assert.deepEqual(callOrder, ["researcher", "bridge", "concierge"]);
+  assert.equal(nextRoom.scheduler.status, "idle");
+  assert.equal(nextRoom.roomMessages.some((message) => message.content === "Researcher picks Chow for auteur impact."), true);
 });
 
 test("stopRoomScheduler forces a running room back to idle and marks running turns stopped", async () => {

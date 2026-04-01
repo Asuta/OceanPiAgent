@@ -9,6 +9,7 @@ import type {
 } from "@/lib/chat/types";
 import { createSchedulerPacket, getNextAgentParticipant, getSchedulerVisibleTargetMessages } from "@/lib/chat/room-scheduler";
 import { createAgentSharedState, createTimestamp, getEnabledAgentParticipants, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
+import { deliverBoundRoomMessages } from "@/lib/server/channel-outbound-service";
 import { abortRoomStream, combineAbortSignals } from "@/lib/server/room-stream-control";
 import {
   buildPreparedInputFromWorkspace,
@@ -43,6 +44,7 @@ interface RoomSchedulerDependencies {
   runPreparedRoomTurn: typeof runPreparedRoomTurn;
   buildPreparedInputFromWorkspace: typeof buildPreparedInputFromWorkspace;
   resolveSettingsWithModelConfig: typeof resolveSettingsWithModelConfig;
+  deliverBoundRoomMessages: typeof deliverBoundRoomMessages;
 }
 
 type QueueWaiter = {
@@ -337,6 +339,7 @@ export async function runRoomSchedulerNow(
     runPreparedRoomTurn: overrides.runPreparedRoomTurn ?? runPreparedRoomTurn,
     buildPreparedInputFromWorkspace: overrides.buildPreparedInputFromWorkspace ?? buildPreparedInputFromWorkspace,
     resolveSettingsWithModelConfig: overrides.resolveSettingsWithModelConfig ?? resolveSettingsWithModelConfig,
+    deliverBoundRoomMessages: overrides.deliverBoundRoomMessages ?? deliverBoundRoomMessages,
   };
   const hooks: RoomSchedulerRunHooks = {
     ...(combinedSignal ? { signal: combinedSignal } : {}),
@@ -402,6 +405,7 @@ export async function runRoomSchedulerNow(
           scheduler: {
             ...currentRoom.scheduler,
             activeParticipantId: null,
+            nextAgentParticipantId: nextAfterParticipant?.id ?? nextParticipant.id,
             agentCursorByParticipantId: {
               ...currentRoom.scheduler.agentCursorByParticipantId,
               [nextParticipant.id]: cutoffSeq,
@@ -503,6 +507,8 @@ export async function runRoomSchedulerNow(
           updatedAt: createTimestamp(),
         }));
       });
+
+      await deps.deliverBoundRoomMessages(result.emittedMessages);
     }
 
     await emit(hooks.onTurnDone, result);

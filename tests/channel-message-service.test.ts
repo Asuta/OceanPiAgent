@@ -190,6 +190,129 @@ test("receiveExternalMessage creates a bound room and delivers emitted replies",
   assert.equal(state.agentStates[createdBinding.agentId]?.resolvedModel, "generic/fake-model");
 });
 
+test("receiveExternalMessage schedules a newly created discussion room when a turn emits there", async () => {
+  await resetChannelDeliveryStateForTest();
+
+  let state = createDefaultWorkspaceState();
+  const sourceRoomId = state.rooms[0]!.id;
+  let binding: ChannelBinding = {
+    bindingId: "binding-source",
+    channel: "feishu",
+    accountId: "default",
+    peerKind: "direct",
+    peerId: "ou_discuss",
+    roomId: sourceRoomId,
+    humanParticipantId: "feishu:default:direct:ou_discuss",
+    agentId: "concierge",
+    createdAt: "2026-04-01T03:49:00.000Z",
+    updatedAt: "2026-04-01T03:49:00.000Z",
+    lastInboundAt: null,
+  };
+  const scheduledRoomIds: string[] = [];
+  const discussionRoomId = "discussion-room-1";
+
+  await receiveExternalMessage(
+    {
+      channel: "feishu",
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "ou_discuss",
+      senderId: "ou_discuss",
+      senderName: "Alice",
+      messageId: "msg-discuss-1",
+      messageType: "text",
+      text: "帮我新建讨论房。",
+      attachments: [],
+      agentId: "concierge",
+    },
+    {
+      loadWorkspaceEnvelope: async () => ({ version: 1, updatedAt: new Date().toISOString(), state }),
+      mutateWorkspace: async (mutator) => {
+        state = await mutator(state);
+        return { version: 1, updatedAt: new Date().toISOString(), state };
+      },
+      findChannelBinding: async () => binding,
+      upsertChannelBinding: async (nextBinding) => {
+        binding = nextBinding;
+        return nextBinding;
+      },
+      touchChannelBinding: async () => binding,
+      findChannelMessageLink: async () => null,
+      upsertChannelMessageLink: async (nextLink: ChannelMessageLink) => nextLink,
+      applyFeishuAckReaction: async (link: ChannelMessageLink) => link,
+      applyFeishuDoneReaction: async (link: ChannelMessageLink) => link,
+      listAgentDefinitions: async () => ROOM_AGENTS,
+      runRoomTurnNonStreaming: async ({ roomId, message, agentId }) => ({
+        turn: {
+          id: "turn-create-room",
+          agent: {
+            id: agentId,
+            label: "Harbor Concierge",
+          },
+          userMessage: {
+            ...createRoomMessage(roomId, "user", message.content, "user", { sender: message.sender }),
+            id: message.id,
+          },
+          assistantContent: "已创建讨论房。",
+          tools: [],
+          emittedMessages: [
+            createRoomMessage(roomId, "assistant", "我去新建一个讨论房。", "agent_emit", {
+              sender: {
+                id: agentId,
+                name: "Harbor Concierge",
+                role: "participant",
+              },
+            }),
+            createRoomMessage(discussionRoomId, "assistant", "请大家开始讨论。", "agent_emit", {
+              sender: {
+                id: agentId,
+                name: "Harbor Concierge",
+                role: "participant",
+              },
+            }),
+          ],
+          status: "completed",
+          resolvedModel: "generic/fake-model",
+        },
+        resolvedModel: "generic/fake-model",
+        compatibility: COMPATIBILITY,
+        emittedMessages: [
+          createRoomMessage(roomId, "assistant", "我去新建一个讨论房。", "agent_emit", {
+            sender: {
+              id: agentId,
+              name: "Harbor Concierge",
+              role: "participant",
+            },
+          }),
+          createRoomMessage(discussionRoomId, "assistant", "请大家开始讨论。", "agent_emit", {
+            sender: {
+              id: agentId,
+              name: "Harbor Concierge",
+              role: "participant",
+            },
+          }),
+        ],
+        receiptUpdates: [],
+        roomActions: [{
+          type: "create_room",
+          roomId: discussionRoomId,
+          title: "讨论房",
+          agentIds: ["concierge", "researcher", "operator"],
+        }],
+      }),
+      enqueueRoomScheduler: async (roomId) => {
+        scheduledRoomIds.push(roomId);
+      },
+      deliverMessages: async () => {},
+    },
+  );
+
+  assert.deepEqual(scheduledRoomIds, [discussionRoomId]);
+  const discussionRoom = state.rooms.find((room) => room.id === discussionRoomId);
+  assert.ok(discussionRoom);
+  assert.equal(discussionRoom?.roomMessages.some((message) => message.content === "请大家开始讨论。"), true);
+});
+
 test("receiveExternalMessage deduplicates repeated inbound message ids", async () => {
   await resetChannelDeliveryStateForTest();
 
