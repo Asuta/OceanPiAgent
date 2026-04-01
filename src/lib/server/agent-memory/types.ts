@@ -103,8 +103,34 @@ export interface MemoryDescribeResult {
     parentIds: string[];
     childIds: string[];
     messageIds: number[];
+    descendantCount?: number;
+    descendantTokenCount?: number;
+    sourceMessageTokenCount?: number;
+    fileIds?: string[];
+    subtree?: Array<{
+      summaryId: string;
+      parentSummaryId: string | null;
+      depthFromRoot: number;
+      kind: string;
+      depth: number;
+      tokenCount: number;
+      descendantCount: number;
+      descendantTokenCount: number;
+      sourceMessageTokenCount: number;
+      earliestAt?: string | null;
+      latestAt?: string | null;
+      childCount: number;
+      path: string;
+    }>;
   };
-  file?: MemoryFileSlice;
+  file?: MemoryFileSlice & {
+    fileId?: string;
+    mimeType?: string | null;
+    byteSize?: number | null;
+    storageUri?: string;
+    explorationSummary?: string | null;
+    createdAt?: string;
+  };
 }
 
 export interface MemoryExpandResult {

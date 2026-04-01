@@ -175,15 +175,48 @@ export async function describeAgentMemory(agentId: RoomAgentId, handle: string):
         parentIds: described.summary.parentIds,
         childIds: described.summary.childIds,
         messageIds: described.summary.messageIds,
+        descendantCount: described.summary.descendantCount,
+        descendantTokenCount: described.summary.descendantTokenCount,
+        sourceMessageTokenCount: described.summary.sourceMessageTokenCount,
+        fileIds: described.summary.fileIds,
+        subtree: described.summary.subtree.map((node) => ({
+          ...node,
+          earliestAt: node.earliestAt?.toISOString() ?? null,
+          latestAt: node.latestAt?.toISOString() ?? null,
+        })),
+      },
+    };
+  }
+  if (handle.startsWith("file:")) {
+    const { retrieval } = await getAgentLcmRetrieval(agentId);
+    const described = await retrieval.describe(handle.slice("file:".length));
+    if (!described?.file) {
+      return null;
+    }
+    return {
+      handle,
+      type: "file",
+      file: {
+        path: handle,
+        from: 1,
+        lines: 1,
+        text: described.file.explorationSummary ?? "",
+        fileId: described.id,
+        mimeType: described.file.mimeType,
+        byteSize: described.file.byteSize,
+        storageUri: described.file.storageUri,
+        explorationSummary: described.file.explorationSummary,
+        createdAt: described.file.createdAt.toISOString(),
       },
     };
   }
   if (handle.startsWith("message:")) {
-    const { conversation, retrieval } = await getAgentLcmRetrieval(agentId);
+    const { conversation } = await getAgentLcmRetrieval(agentId);
     if (!conversation) return null;
     const messageId = Number(handle.slice("message:".length));
-    const grep = await retrieval.grep({ query: String(messageId), mode: "full_text", scope: "messages", conversationId: conversation.conversationId, limit: 200 });
-    const match = grep.messages.find((message) => message.messageId === messageId);
+    const { getLcmStores } = await import("../lcm/facade");
+    const { conversationStore } = await getLcmStores();
+    const match = await conversationStore.getMessageById(messageId);
     if (!match) {
       return null;
     }
@@ -193,7 +226,7 @@ export async function describeAgentMemory(agentId: RoomAgentId, handle: string):
       message: {
         messageId,
         role: match.role,
-        content: match.snippet,
+        content: match.content,
         createdAt: match.createdAt.toISOString(),
       },
     };

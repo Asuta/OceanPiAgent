@@ -193,7 +193,7 @@ function contentToText(content: unknown): string {
 }
 
 function extractSummaryText(content: string): string {
-  const match = /<content>\n([\s\S]*?)\n<\/content>/u.exec(content);
+  const match = /<content>\s*\n?([\s\S]*?)\n?\s*<\/content>/u.exec(content);
   return match?.[1] ?? content;
 }
 

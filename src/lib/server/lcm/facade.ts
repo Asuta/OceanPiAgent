@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId, RoomMessageEmission, RoomSender, RoomToolActionUnion, ToolExecution } from "@/lib/chat/types";
 import { getLcmDatabase } from "./db";
+import { getLcmDbFeatures } from "./features";
+import { formatToolOutputReference, generateExplorationSummary } from "./large-files";
 import { ContextAssembler } from "./assembler";
 import { CompactionEngine } from "./compaction";
 import { ConversationStore, type CreateMessagePartInput } from "./conversation-store";
@@ -11,12 +13,16 @@ export function getAgentSessionId(agentId: RoomAgentId): string {
   return `agent:${agentId}`;
 }
 
+const LARGE_TEXT_THRESHOLD = 12_000;
+
 export async function getLcmStores() {
   const db = await getLcmDatabase();
-  const conversationStore = new ConversationStore(db);
-  const summaryStore = new SummaryStore(db);
+  const features = getLcmDbFeatures(db);
+  const conversationStore = new ConversationStore(db, features);
+  const summaryStore = new SummaryStore(db, features);
   return {
     db,
+    features,
     conversationStore,
     summaryStore,
     assembler: new ContextAssembler(conversationStore, summaryStore),
@@ -49,6 +55,44 @@ function json(value: unknown): string | null {
   return JSON.stringify(value);
 }
 
+async function maybeExternalizeLargeText(args: {
+  agentId: RoomAgentId;
+  conversationId: number;
+  summaryStore: SummaryStore;
+  text: string;
+  toolName?: string | null;
+}): Promise<string> {
+  if (args.text.trim().length < LARGE_TEXT_THRESHOLD) {
+    return args.text;
+  }
+
+  const fileId = `file_${createHash("sha256").update(`${args.agentId}:${args.toolName ?? "text"}:${args.text}`).digest("hex").slice(0, 16)}`;
+  const existing = await args.summaryStore.getLargeFile(fileId);
+  if (!existing) {
+    const summary = await generateExplorationSummary({
+      content: args.text,
+      fileName: args.toolName ? `${args.toolName}.txt` : undefined,
+      mimeType: "text/plain",
+    });
+    await args.summaryStore.insertLargeFile({
+      fileId,
+      conversationId: args.conversationId,
+      fileName: args.toolName ? `${args.toolName}.txt` : undefined,
+      mimeType: "text/plain",
+      byteSize: Buffer.byteLength(args.text, "utf8"),
+      storageUri: `memory://agent/${args.agentId}/${fileId}`,
+      explorationSummary: summary,
+    });
+  }
+
+  return formatToolOutputReference({
+    fileId,
+    toolName: args.toolName ?? undefined,
+    byteSize: Buffer.byteLength(args.text, "utf8"),
+    summary: (await args.summaryStore.getLargeFile(fileId))?.explorationSummary ?? "",
+  });
+}
+
 export async function appendAgentLcmMessage(args: {
   agentId: RoomAgentId;
   role: "user" | "assistant" | "system" | "tool";
@@ -63,17 +107,64 @@ export async function appendAgentLcmMessage(args: {
     title: args.title ?? `Agent ${args.agentId}`,
   });
   const seq = (await conversationStore.getMaxSeq(conversation.conversationId)) + 1;
+
+  const normalizedContent = await maybeExternalizeLargeText({
+    agentId: args.agentId,
+    conversationId: conversation.conversationId,
+    summaryStore,
+    text: args.content,
+  });
+  const normalizedParts = args.parts?.length
+    ? await Promise.all(args.parts.map(async (part) => {
+        if (part.partType !== "tool") {
+          return part;
+        }
+        const externalizedOutput = typeof part.toolOutput === "string"
+          ? await maybeExternalizeLargeText({
+              agentId: args.agentId,
+              conversationId: conversation.conversationId,
+              summaryStore,
+              text: part.toolOutput,
+              toolName: part.toolName,
+            })
+          : part.toolOutput;
+        const externalizedPreview = typeof part.textContent === "string"
+          ? await maybeExternalizeLargeText({
+              agentId: args.agentId,
+              conversationId: conversation.conversationId,
+              summaryStore,
+              text: part.textContent,
+              toolName: part.toolName,
+            })
+          : part.textContent;
+        return {
+          ...part,
+          textContent: externalizedPreview,
+          toolOutput: externalizedOutput,
+        };
+      }))
+    : undefined;
+
   const message = await conversationStore.createMessage({
     conversationId: conversation.conversationId,
     seq,
     role: args.role,
-    content: args.content,
+    content: normalizedContent,
     createdAt: args.createdAt,
   });
-  if (args.parts?.length) {
-    await conversationStore.createMessageParts(message.messageId, args.parts);
+  if (normalizedParts?.length) {
+    await conversationStore.createMessageParts(message.messageId, normalizedParts);
   }
   await summaryStore.appendContextMessage(conversation.conversationId, message.messageId, args.createdAt);
+  await conversationStore.markConversationBootstrapped(conversation.conversationId);
+  await summaryStore.upsertConversationBootstrapState({
+    conversationId: conversation.conversationId,
+    sessionFilePath: `live://agent/${args.agentId}`,
+    lastSeenSize: Buffer.byteLength(normalizedContent, "utf8"),
+    lastSeenMtimeMs: Date.now(),
+    lastProcessedOffset: seq,
+    lastProcessedEntryHash: createHash("sha256").update(`${seq}:${normalizedContent}`).digest("hex"),
+  });
   return message.messageId;
 }
 

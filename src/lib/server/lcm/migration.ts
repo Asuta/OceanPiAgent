@@ -1,9 +1,411 @@
 import type { DatabaseSync } from "node:sqlite";
+import { estimateTokens } from "./estimate-tokens";
+import { getLcmDbFeatures } from "./features";
 
-export function runLcmMigrations(db: DatabaseSync): void {
+type SummaryColumnInfo = {
+  name?: string;
+};
+
+type SummaryDepthRow = {
+  summary_id: string;
+  conversation_id: number;
+  kind: "leaf" | "condensed";
+  depth: number;
+  token_count: number;
+  created_at: string;
+};
+
+type SummaryMessageTimeRangeRow = {
+  summary_id: string;
+  earliest_at: string | null;
+  latest_at: string | null;
+  source_message_token_count: number | null;
+};
+
+type SummaryParentEdgeRow = {
+  summary_id: string;
+  parent_summary_id: string;
+};
+
+function ensureSummaryDepthColumn(db: DatabaseSync): void {
+  const summaryColumns = db.prepare(`PRAGMA table_info(summaries)`).all() as SummaryColumnInfo[];
+  if (!summaryColumns.some((col) => col.name === "depth")) {
+    db.exec(`ALTER TABLE summaries ADD COLUMN depth INTEGER NOT NULL DEFAULT 0`);
+  }
+}
+
+function ensureSummaryMetadataColumns(db: DatabaseSync): void {
+  const summaryColumns = db.prepare(`PRAGMA table_info(summaries)`).all() as SummaryColumnInfo[];
+  if (!summaryColumns.some((col) => col.name === "earliest_at")) {
+    db.exec(`ALTER TABLE summaries ADD COLUMN earliest_at TEXT`);
+  }
+  if (!summaryColumns.some((col) => col.name === "latest_at")) {
+    db.exec(`ALTER TABLE summaries ADD COLUMN latest_at TEXT`);
+  }
+  if (!summaryColumns.some((col) => col.name === "descendant_count")) {
+    db.exec(`ALTER TABLE summaries ADD COLUMN descendant_count INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!summaryColumns.some((col) => col.name === "descendant_token_count")) {
+    db.exec(`ALTER TABLE summaries ADD COLUMN descendant_token_count INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!summaryColumns.some((col) => col.name === "source_message_token_count")) {
+    db.exec(`ALTER TABLE summaries ADD COLUMN source_message_token_count INTEGER NOT NULL DEFAULT 0`);
+  }
+}
+
+function ensureSummaryModelColumn(db: DatabaseSync): void {
+  const summaryColumns = db.prepare(`PRAGMA table_info(summaries)`).all() as SummaryColumnInfo[];
+  if (!summaryColumns.some((col) => col.name === "model")) {
+    db.exec(`ALTER TABLE summaries ADD COLUMN model TEXT NOT NULL DEFAULT 'unknown'`);
+  }
+}
+
+function parseTimestamp(value: string | null | undefined): Date | null {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  const direct = new Date(value);
+  if (!Number.isNaN(direct.getTime())) {
+    return direct;
+  }
+
+  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function isoStringOrNull(value: Date | null): string | null {
+  return value ? value.toISOString() : null;
+}
+
+function backfillSummaryDepths(db: DatabaseSync): void {
+  db.exec(`UPDATE summaries SET depth = 0 WHERE kind = 'leaf'`);
+
+  const conversationRows = db.prepare(`SELECT DISTINCT conversation_id FROM summaries WHERE kind = 'condensed'`).all() as Array<{ conversation_id: number }>;
+  const updateDepthStmt = db.prepare(`UPDATE summaries SET depth = ? WHERE summary_id = ?`);
+
+  for (const row of conversationRows) {
+    const summaries = db.prepare(
+      `SELECT summary_id, conversation_id, kind, depth, token_count, created_at
+       FROM summaries
+       WHERE conversation_id = ?`,
+    ).all(row.conversation_id) as SummaryDepthRow[];
+
+    const depthBySummaryId = new Map<string, number>();
+    const unresolvedCondensedIds = new Set<string>();
+    for (const summary of summaries) {
+      if (summary.kind === "leaf") {
+        depthBySummaryId.set(summary.summary_id, 0);
+      } else {
+        unresolvedCondensedIds.add(summary.summary_id);
+      }
+    }
+
+    const edges = db.prepare(
+      `SELECT summary_id, parent_summary_id
+       FROM summary_parents
+       WHERE summary_id IN (
+         SELECT summary_id FROM summaries
+         WHERE conversation_id = ? AND kind = 'condensed'
+       )`,
+    ).all(row.conversation_id) as SummaryParentEdgeRow[];
+    const parentsBySummaryId = new Map<string, string[]>();
+    for (const edge of edges) {
+      const existing = parentsBySummaryId.get(edge.summary_id) ?? [];
+      existing.push(edge.parent_summary_id);
+      parentsBySummaryId.set(edge.summary_id, existing);
+    }
+
+    while (unresolvedCondensedIds.size > 0) {
+      let progressed = false;
+
+      for (const summaryId of [...unresolvedCondensedIds]) {
+        const parentIds = parentsBySummaryId.get(summaryId) ?? [];
+        if (parentIds.length === 0) {
+          depthBySummaryId.set(summaryId, 1);
+          unresolvedCondensedIds.delete(summaryId);
+          progressed = true;
+          continue;
+        }
+
+        let maxParentDepth = -1;
+        let allParentsResolved = true;
+        for (const parentId of parentIds) {
+          const parentDepth = depthBySummaryId.get(parentId);
+          if (parentDepth == null) {
+            allParentsResolved = false;
+            break;
+          }
+          if (parentDepth > maxParentDepth) {
+            maxParentDepth = parentDepth;
+          }
+        }
+
+        if (!allParentsResolved) {
+          continue;
+        }
+
+        depthBySummaryId.set(summaryId, maxParentDepth + 1);
+        unresolvedCondensedIds.delete(summaryId);
+        progressed = true;
+      }
+
+      if (!progressed) {
+        for (const summaryId of unresolvedCondensedIds) {
+          depthBySummaryId.set(summaryId, 1);
+        }
+        unresolvedCondensedIds.clear();
+      }
+    }
+
+    for (const summary of summaries) {
+      const depth = depthBySummaryId.get(summary.summary_id);
+      if (depth != null) {
+        updateDepthStmt.run(depth, summary.summary_id);
+      }
+    }
+  }
+}
+
+function backfillSummaryMetadata(db: DatabaseSync): void {
+  const conversationRows = db.prepare(`SELECT DISTINCT conversation_id FROM summaries`).all() as Array<{ conversation_id: number }>;
+  const updateMetadataStmt = db.prepare(
+    `UPDATE summaries
+     SET earliest_at = ?, latest_at = ?, descendant_count = ?,
+         descendant_token_count = ?, source_message_token_count = ?
+     WHERE summary_id = ?`,
+  );
+
+  for (const conversationRow of conversationRows) {
+    const conversationId = conversationRow.conversation_id;
+    const summaries = db.prepare(
+      `SELECT summary_id, conversation_id, kind, depth, token_count, created_at
+       FROM summaries
+       WHERE conversation_id = ?
+       ORDER BY depth ASC, created_at ASC`,
+    ).all(conversationId) as SummaryDepthRow[];
+    if (summaries.length === 0) {
+      continue;
+    }
+
+    const leafRanges = db.prepare(
+      `SELECT
+         sm.summary_id,
+         MIN(m.created_at) AS earliest_at,
+         MAX(m.created_at) AS latest_at,
+         COALESCE(SUM(m.token_count), 0) AS source_message_token_count
+       FROM summary_messages sm
+       JOIN messages m ON m.message_id = sm.message_id
+       JOIN summaries s ON s.summary_id = sm.summary_id
+       WHERE s.conversation_id = ? AND s.kind = 'leaf'
+       GROUP BY sm.summary_id`,
+    ).all(conversationId) as SummaryMessageTimeRangeRow[];
+    const leafRangeBySummaryId = new Map(leafRanges.map((row) => [
+      row.summary_id,
+      {
+        earliestAt: row.earliest_at,
+        latestAt: row.latest_at,
+        sourceMessageTokenCount: row.source_message_token_count,
+      },
+    ]));
+
+    const edges = db.prepare(
+      `SELECT summary_id, parent_summary_id
+       FROM summary_parents
+       WHERE summary_id IN (
+         SELECT summary_id FROM summaries WHERE conversation_id = ?
+       )`,
+    ).all(conversationId) as SummaryParentEdgeRow[];
+    const parentsBySummaryId = new Map<string, string[]>();
+    for (const edge of edges) {
+      const existing = parentsBySummaryId.get(edge.summary_id) ?? [];
+      existing.push(edge.parent_summary_id);
+      parentsBySummaryId.set(edge.summary_id, existing);
+    }
+
+    const metadataBySummaryId = new Map<string, {
+      earliestAt: Date | null;
+      latestAt: Date | null;
+      descendantCount: number;
+      descendantTokenCount: number;
+      sourceMessageTokenCount: number;
+    }>();
+    const tokenCountBySummaryId = new Map(summaries.map((summary) => [summary.summary_id, Math.max(0, Math.floor(summary.token_count ?? 0))]));
+
+    for (const summary of summaries) {
+      const fallbackDate = parseTimestamp(summary.created_at);
+      if (summary.kind === "leaf") {
+        const range = leafRangeBySummaryId.get(summary.summary_id);
+        const earliestAt = parseTimestamp(range?.earliestAt ?? summary.created_at) ?? fallbackDate;
+        const latestAt = parseTimestamp(range?.latestAt ?? summary.created_at) ?? fallbackDate;
+
+        metadataBySummaryId.set(summary.summary_id, {
+          earliestAt,
+          latestAt,
+          descendantCount: 0,
+          descendantTokenCount: 0,
+          sourceMessageTokenCount: Math.max(0, Math.floor(range?.sourceMessageTokenCount ?? 0)),
+        });
+        continue;
+      }
+
+      const parentIds = parentsBySummaryId.get(summary.summary_id) ?? [];
+      if (parentIds.length === 0) {
+        metadataBySummaryId.set(summary.summary_id, {
+          earliestAt: fallbackDate,
+          latestAt: fallbackDate,
+          descendantCount: 0,
+          descendantTokenCount: 0,
+          sourceMessageTokenCount: 0,
+        });
+        continue;
+      }
+
+      let earliestAt: Date | null = null;
+      let latestAt: Date | null = null;
+      let descendantCount = 0;
+      let descendantTokenCount = 0;
+      let sourceMessageTokenCount = 0;
+
+      for (const parentId of parentIds) {
+        const parentMetadata = metadataBySummaryId.get(parentId);
+        if (!parentMetadata) {
+          continue;
+        }
+
+        if (parentMetadata.earliestAt && (!earliestAt || parentMetadata.earliestAt < earliestAt)) {
+          earliestAt = parentMetadata.earliestAt;
+        }
+        if (parentMetadata.latestAt && (!latestAt || parentMetadata.latestAt > latestAt)) {
+          latestAt = parentMetadata.latestAt;
+        }
+
+        descendantCount += Math.max(0, parentMetadata.descendantCount) + 1;
+        descendantTokenCount += (tokenCountBySummaryId.get(parentId) ?? 0) + Math.max(0, parentMetadata.descendantTokenCount);
+        sourceMessageTokenCount += Math.max(0, parentMetadata.sourceMessageTokenCount);
+      }
+
+      metadataBySummaryId.set(summary.summary_id, {
+        earliestAt: earliestAt ?? fallbackDate,
+        latestAt: latestAt ?? fallbackDate,
+        descendantCount: Math.max(0, descendantCount),
+        descendantTokenCount: Math.max(0, descendantTokenCount),
+        sourceMessageTokenCount: Math.max(0, sourceMessageTokenCount),
+      });
+    }
+
+    for (const summary of summaries) {
+      const metadata = metadataBySummaryId.get(summary.summary_id);
+      if (!metadata) {
+        continue;
+      }
+      updateMetadataStmt.run(
+        isoStringOrNull(metadata.earliestAt),
+        isoStringOrNull(metadata.latestAt),
+        metadata.descendantCount,
+        metadata.descendantTokenCount,
+        metadata.sourceMessageTokenCount,
+        summary.summary_id,
+      );
+    }
+  }
+}
+
+function backfillToolCallColumns(db: DatabaseSync): void {
+  db.exec(
+    `UPDATE message_parts
+     SET tool_call_id = COALESCE(
+       json_extract(metadata, '$.toolCallId'),
+       json_extract(metadata, '$.raw.id'),
+       json_extract(metadata, '$.raw.call_id'),
+       json_extract(metadata, '$.raw.toolCallId'),
+       json_extract(metadata, '$.raw.tool_call_id')
+     )
+     WHERE tool_call_id IS NULL
+       AND metadata IS NOT NULL
+       AND COALESCE(
+         json_extract(metadata, '$.toolCallId'),
+         json_extract(metadata, '$.raw.id'),
+         json_extract(metadata, '$.raw.call_id'),
+         json_extract(metadata, '$.raw.toolCallId'),
+         json_extract(metadata, '$.raw.tool_call_id')
+       ) IS NOT NULL`,
+  );
+
+  db.exec(
+    `UPDATE message_parts
+     SET tool_name = COALESCE(
+       json_extract(metadata, '$.toolName'),
+       json_extract(metadata, '$.raw.name'),
+       json_extract(metadata, '$.raw.toolName'),
+       json_extract(metadata, '$.raw.tool_name')
+     )
+     WHERE tool_name IS NULL
+       AND metadata IS NOT NULL
+       AND COALESCE(
+         json_extract(metadata, '$.toolName'),
+         json_extract(metadata, '$.raw.name'),
+         json_extract(metadata, '$.raw.toolName'),
+         json_extract(metadata, '$.raw.tool_name')
+       ) IS NOT NULL`,
+  );
+
+  db.exec(
+    `UPDATE message_parts
+     SET tool_input = COALESCE(
+       json_extract(metadata, '$.raw.input'),
+       json_extract(metadata, '$.raw.arguments'),
+       json_extract(metadata, '$.raw.toolInput')
+     )
+     WHERE tool_input IS NULL
+       AND metadata IS NOT NULL
+       AND COALESCE(
+         json_extract(metadata, '$.raw.input'),
+         json_extract(metadata, '$.raw.arguments'),
+         json_extract(metadata, '$.raw.toolInput')
+       ) IS NOT NULL`,
+  );
+}
+
+function recalculateCjkTokenCounts(db: DatabaseSync): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS lcm_migration_flags (flag TEXT PRIMARY KEY)`);
+  const flag = "cjk_token_recount_v1";
+  const existing = db.prepare(`SELECT flag FROM lcm_migration_flags WHERE flag = ?`).get(flag) as { flag: string } | undefined;
+  if (existing) {
+    return;
+  }
+
+  const cjkRe = /[\u2E80-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\uAC00-\uD7AF\u3040-\u309F\u30A0-\u30FF\uFF00-\uFFEF\u3000-\u303F]/;
+
+  db.exec("BEGIN");
+  try {
+    const messages = db.prepare(`SELECT message_id, content FROM messages`).all() as Array<{ message_id: number; content: string }>;
+    const updateMessage = db.prepare(`UPDATE messages SET token_count = ? WHERE message_id = ?`);
+    for (const message of messages) {
+      if (cjkRe.test(message.content)) {
+        updateMessage.run(estimateTokens(message.content), message.message_id);
+      }
+    }
+
+    const summaries = db.prepare(`SELECT summary_id, content FROM summaries`).all() as Array<{ summary_id: string; content: string }>;
+    const updateSummary = db.prepare(`UPDATE summaries SET token_count = ? WHERE summary_id = ?`);
+    for (const summary of summaries) {
+      if (cjkRe.test(summary.content)) {
+        updateSummary.run(estimateTokens(summary.content), summary.summary_id);
+      }
+    }
+
+    db.prepare(`INSERT INTO lcm_migration_flags (flag) VALUES (?)`).run(flag);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function runLcmMigrations(db: DatabaseSync, options?: { fts5Available?: boolean }): void {
   db.exec(`
-    PRAGMA foreign_keys = ON;
-
     CREATE TABLE IF NOT EXISTS conversations (
       conversation_id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
@@ -37,7 +439,6 @@ export function runLcmMigrations(db: DatabaseSync): void {
       descendant_count INTEGER NOT NULL DEFAULT 0,
       descendant_token_count INTEGER NOT NULL DEFAULT 0,
       source_message_token_count INTEGER NOT NULL DEFAULT 0,
-      model TEXT NOT NULL DEFAULT 'unknown',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       file_ids TEXT NOT NULL DEFAULT '[]'
     );
@@ -53,10 +454,29 @@ export function runLcmMigrations(db: DatabaseSync): void {
       )),
       ordinal INTEGER NOT NULL,
       text_content TEXT,
+      is_ignored INTEGER,
+      is_synthetic INTEGER,
       tool_call_id TEXT,
       tool_name TEXT,
+      tool_status TEXT,
       tool_input TEXT,
       tool_output TEXT,
+      tool_error TEXT,
+      tool_title TEXT,
+      patch_hash TEXT,
+      patch_files TEXT,
+      file_mime TEXT,
+      file_name TEXT,
+      file_url TEXT,
+      subtask_prompt TEXT,
+      subtask_desc TEXT,
+      subtask_agent TEXT,
+      step_reason TEXT,
+      step_cost REAL,
+      step_tokens_in INTEGER,
+      step_tokens_out INTEGER,
+      snapshot_hash TEXT,
+      compaction_auto INTEGER,
       metadata TEXT,
       UNIQUE (message_id, ordinal)
     );
@@ -112,26 +532,72 @@ export function runLcmMigrations(db: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS messages_conv_seq_idx ON messages (conversation_id, seq);
     CREATE INDEX IF NOT EXISTS summaries_conv_created_idx ON summaries (conversation_id, created_at);
-    CREATE INDEX IF NOT EXISTS message_parts_message_idx ON message_parts (message_id, ordinal);
+    CREATE INDEX IF NOT EXISTS message_parts_message_idx ON message_parts (message_id);
+    CREATE INDEX IF NOT EXISTS message_parts_type_idx ON message_parts (part_type);
     CREATE INDEX IF NOT EXISTS context_items_conv_idx ON context_items (conversation_id, ordinal);
-    CREATE INDEX IF NOT EXISTS summary_messages_summary_idx ON summary_messages (summary_id, ordinal);
-    CREATE INDEX IF NOT EXISTS summary_parents_summary_idx ON summary_parents (summary_id, ordinal);
     CREATE INDEX IF NOT EXISTS large_files_conv_idx ON large_files (conversation_id, created_at);
-    CREATE UNIQUE INDEX IF NOT EXISTS conversations_session_key_idx ON conversations (session_key);
+    CREATE INDEX IF NOT EXISTS bootstrap_state_path_idx ON conversation_bootstrap_state (session_file_path, updated_at);
   `);
 
-  const ftsTables = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('messages_fts', 'summaries_fts')")
-    .all() as Array<{ name: string }>;
-  const existing = new Set(ftsTables.map((row) => row.name));
-
-  if (!existing.has("messages_fts")) {
-    db.exec(`CREATE VIRTUAL TABLE messages_fts USING fts5(content, tokenize='porter unicode61')`);
-    db.exec(`INSERT INTO messages_fts(rowid, content) SELECT message_id, content FROM messages`);
+  const conversationColumns = db.prepare(`PRAGMA table_info(conversations)`).all() as Array<{ name?: string }>;
+  if (!conversationColumns.some((col) => col.name === "bootstrapped_at")) {
+    db.exec(`ALTER TABLE conversations ADD COLUMN bootstrapped_at TEXT`);
+  }
+  if (!conversationColumns.some((col) => col.name === "session_key")) {
+    db.exec(`ALTER TABLE conversations ADD COLUMN session_key TEXT`);
   }
 
-  if (!existing.has("summaries_fts")) {
-    db.exec(`CREATE VIRTUAL TABLE summaries_fts USING fts5(summary_id UNINDEXED, content, tokenize='porter unicode61')`);
-    db.exec(`INSERT INTO summaries_fts(summary_id, content) SELECT summary_id, content FROM summaries`);
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS conversations_session_key_idx ON conversations (session_key)`);
+  ensureSummaryDepthColumn(db);
+  ensureSummaryMetadataColumns(db);
+  ensureSummaryModelColumn(db);
+  recalculateCjkTokenCounts(db);
+  backfillSummaryDepths(db);
+  backfillSummaryMetadata(db);
+  backfillToolCallColumns(db);
+
+  const fts5Available = options?.fts5Available ?? getLcmDbFeatures(db).fts5Available;
+  if (!fts5Available) {
+    return;
+  }
+
+  const hasMessagesFts = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='messages_fts'").get() as { name?: string } | undefined;
+  if (hasMessagesFts) {
+    const ftsSchema = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'").get() as { sql?: string } | undefined)?.sql;
+    if (ftsSchema && ftsSchema.includes("content_rowid")) {
+      db.exec("DROP TABLE messages_fts");
+      db.exec(`
+        CREATE VIRTUAL TABLE messages_fts USING fts5(
+          content,
+          tokenize='porter unicode61'
+        );
+        INSERT INTO messages_fts(rowid, content) SELECT message_id, content FROM messages;
+      `);
+    }
+  } else {
+    db.exec(`
+      CREATE VIRTUAL TABLE messages_fts USING fts5(
+        content,
+        tokenize='porter unicode61'
+      );
+    `);
+  }
+
+  const summariesFtsInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='summaries_fts'").get() as { sql?: string } | undefined;
+  const summariesFtsColumns = db.prepare(`PRAGMA table_info(summaries_fts)`).all() as Array<{ name?: string }>;
+  const hasSummaryIdColumn = summariesFtsColumns.some((col) => col.name === "summary_id");
+  const summariesFtsSql = summariesFtsInfo?.sql ?? "";
+  const shouldRecreateSummariesFts = !summariesFtsInfo || !hasSummaryIdColumn || summariesFtsSql.includes("content_rowid='summary_id'") || summariesFtsSql.includes('content_rowid="summary_id"');
+  if (shouldRecreateSummariesFts) {
+    db.exec(`
+      DROP TABLE IF EXISTS summaries_fts;
+      CREATE VIRTUAL TABLE summaries_fts USING fts5(
+        summary_id UNINDEXED,
+        content,
+        tokenize='porter unicode61'
+      );
+      INSERT INTO summaries_fts(summary_id, content)
+      SELECT summary_id, content FROM summaries;
+    `);
   }
 }
