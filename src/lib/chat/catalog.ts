@@ -14,7 +14,7 @@ export const TOOL_CATALOG = [
   {
     name: "memory_search",
     title: "Memory Search",
-    description: "检索持久化 agent memory，用来回忆跨房间的旧结论、工具结果和压缩摘要。",
+    description: "检索持久化 agent memory，优先返回结构化 message / summary handle，用来回忆跨房间的旧结论、工具结果和压缩摘要。",
   },
   {
     name: "list_cron_jobs",
@@ -69,7 +69,17 @@ export const TOOL_CATALOG = [
   {
     name: "memory_get",
     title: "Memory Get",
-    description: "按文件和行号读取 memory_search 命中的上下文片段，避免把整份记忆全部塞回 prompt。",
+    description: "读取 memory_search 返回的 handle，或兼容读取旧 markdown 路径片段，避免把整份记忆全部塞回 prompt。",
+  },
+  {
+    name: "memory_describe",
+    title: "Memory Describe",
+    description: "查看 summary handle 的覆盖范围、层级和源 message id，再决定是否需要进一步展开。",
+  },
+  {
+    name: "memory_expand",
+    title: "Memory Expand",
+    description: "沿着 summary lineage 展开父 summary 和源 messages，把被压缩的细节取回来。",
   },
   {
     name: "memory_status",

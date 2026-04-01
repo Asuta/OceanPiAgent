@@ -62,8 +62,12 @@ test("tool registries expose the bash tool", () => {
   const roomResponseTools = getResponsesTools("room");
   assert(roomChatTools.some((tool) => tool.function.name === "memory_status"));
   assert(roomChatTools.some((tool) => tool.function.name === "memory_index"));
+  assert(roomChatTools.some((tool) => tool.function.name === "memory_describe"));
+  assert(roomChatTools.some((tool) => tool.function.name === "memory_expand"));
   assert(roomResponseTools.some((tool) => tool.name === "memory_status"));
   assert(roomResponseTools.some((tool) => tool.name === "memory_index"));
+  assert(roomResponseTools.some((tool) => tool.name === "memory_describe"));
+  assert(roomResponseTools.some((tool) => tool.name === "memory_expand"));
 });
 
 test("executeTool runs bash commands in the requested cwd", async () => {

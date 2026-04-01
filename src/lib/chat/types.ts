@@ -18,7 +18,7 @@ export type ToolScope = "default" | "room";
 export const MEMORY_BACKENDS = ["sqlite-fts", "markdown"] as const;
 export type MemoryBackendId = (typeof MEMORY_BACKENDS)[number];
 
-export const DEFAULT_MAX_TOOL_LOOP_STEPS = 50;
+export const DEFAULT_MAX_TOOL_LOOP_STEPS = 200;
 
 export const MIN_MAX_TOOL_LOOP_STEPS = 1;
 

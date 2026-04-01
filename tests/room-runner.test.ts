@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { createKnownAgentCards } from "@/lib/chat/workspace-domain";
 import type { AssistantMessageMeta, MessageImageAttachment } from "@/lib/chat/types";
+import { closeLcmDatabase } from "@/lib/server/lcm/db";
 import { resetAgentRoomSession } from "@/lib/server/agent-room-sessions";
 import { runPreparedRoomTurn } from "@/lib/server/room-runner";
 
@@ -33,6 +34,7 @@ async function withTempCwd(run: () => Promise<void>) {
   try {
     await run();
   } finally {
+    await closeLcmDatabase();
     process.chdir(previousCwd);
     await rm(tempDir, { recursive: true, force: true });
   }

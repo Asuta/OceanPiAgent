@@ -2,6 +2,8 @@ export {
   appendAgentCompactionMemory,
   appendAgentTurnMemory,
   clearAgentMemory,
+  describeAgentMemory,
+  expandAgentMemory,
   getAgentMemoryStatus,
   getAgentMemorySummary,
   readAgentMemoryFile,
@@ -11,6 +13,8 @@ export {
 export type {
   AgentMemoryIndexResult,
   AgentMemoryStatus,
+  MemoryDescribeResult,
+  MemoryExpandResult,
   MemoryFileSlice,
   MemorySearchResult,
 } from "./agent-memory/types";

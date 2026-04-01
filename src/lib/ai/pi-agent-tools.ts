@@ -375,7 +375,7 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "memory_search",
       label: "Memory Search",
-      description: "Search persisted agent memory for prior room decisions, summaries, and tool outcomes before answering cross-room or long-running questions.",
+      description: "Search persisted agent memory for prior room decisions, summaries, and tool outcomes before answering cross-room or long-running questions. Prefer memory_describe for summary handles and memory_expand when compressed details still matter.",
       parameters: Type.Object({
         query: Type.String({ description: "What prior context or fact you need to retrieve." }),
         maxResults: Type.Optional(Type.Integer({ description: "Optional maximum number of memory hits." })),
@@ -387,11 +387,35 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "memory_get",
       label: "Memory Get",
-      description: "Read a specific persisted memory file slice after memory_search identifies the relevant path and lines.",
+      description: "Read a specific memory handle directly, or fall back to a legacy persisted markdown file slice when memory_search returns a file path.",
       parameters: Type.Object({
-        path: Type.String({ description: "The memory file path returned by memory_search." }),
+        path: Type.Optional(Type.String({ description: "Legacy markdown path returned by memory_search." })),
+        handle: Type.Optional(Type.String({ description: "Structured memory handle such as message:<id>, summary:<id>, or file:<path>." })),
         from: Type.Optional(Type.Integer({ description: "Optional starting line number." })),
         lines: Type.Optional(Type.Integer({ description: "Optional number of lines to read." })),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "memory_describe",
+      label: "Memory Describe",
+      description: "Describe a structured memory handle so you can inspect summary lineage, covered source ids, and message metadata before expanding.",
+      parameters: Type.Object({
+        handle: Type.String({ description: "Structured memory handle such as message:<id>, summary:<id>, or file:<path>." }),
+      }),
+      scope,
+      roomToolContext,
+    }),
+    createPiTool({
+      name: "memory_expand",
+      label: "Memory Expand",
+      description: "Expand a structured memory handle into parent summaries and source messages when compressed history still hides decisive details.",
+      parameters: Type.Object({
+        handle: Type.String({ description: "Structured memory handle such as message:<id>, summary:<id>, or file:<path>." }),
+        depth: Type.Optional(Type.Integer({ description: "How many parent-summary levels to expand." })),
+        includeMessages: Type.Optional(Type.Boolean({ description: "Whether to include source messages when available." })),
+        maxItems: Type.Optional(Type.Integer({ description: "Maximum total returned summaries plus messages." })),
       }),
       scope,
       roomToolContext,

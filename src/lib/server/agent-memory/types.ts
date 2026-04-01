@@ -1,11 +1,18 @@
 import type { MemoryBackendId, RoomAgentId, ToolExecution } from "@/lib/chat/types";
 
 export interface MemorySearchResult {
+  handle?: string;
+  type?: "message" | "summary" | "file";
+  id?: string;
   path: string;
   startLine: number;
   endLine: number;
   snippet: string;
   score: number;
+  roomId?: string | null;
+  roomTitle?: string | null;
+  source?: string;
+  createdAt?: string;
 }
 
 export interface MemoryFileSlice {
@@ -75,4 +82,36 @@ export interface ReadAgentMemoryFileArgs {
   relPath: string;
   from?: number;
   lines?: number;
+}
+
+export interface MemoryDescribeResult {
+  handle: string;
+  type: "message" | "summary" | "file";
+  message?: {
+    messageId: number;
+    role: string;
+    content: string;
+    createdAt: string;
+  };
+  summary?: {
+    summaryId: string;
+    kind: string;
+    depth: number;
+    content: string;
+    createdAt: string;
+    tokenCount: number;
+    parentIds: string[];
+    childIds: string[];
+    messageIds: number[];
+  };
+  file?: MemoryFileSlice;
+}
+
+export interface MemoryExpandResult {
+  handle: string;
+  type: "message" | "summary" | "file";
+  summaries: Array<{ summaryId: string; kind: string; content: string; tokenCount: number }>;
+  messages: Array<{ messageId: number | string; role: string; content: string; tokenCount?: number; createdAt?: string }>;
+  estimatedTokens: number;
+  truncated: boolean;
 }

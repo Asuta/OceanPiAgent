@@ -31,6 +31,7 @@ import {
   recordAgentToolEvent,
   startAgentRoomRun,
 } from "@/lib/server/agent-room-sessions";
+import { assembleAgentLcmContext } from "@/lib/server/lcm/facade";
 import {
   createAttachedRoomDefinition,
   createKnownAgentCards,
@@ -439,7 +440,10 @@ export async function runPreparedRoomTurn(
   });
 
   const promptOverride = buildRoomBridgePrompt({
-    operatorPrompt: args.settings.systemPrompt,
+    operatorPrompt: [
+      args.settings.systemPrompt,
+      (await assembleAgentLcmContext(args.agent.id, 20_000))?.systemPromptAddition,
+    ].filter(Boolean).join("\n\n"),
     roomId: args.room.id,
     roomTitle: args.room.title,
     agentLabel: args.agent.label,

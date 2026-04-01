@@ -1,4 +1,5 @@
 import { appendAgentTurnMemory } from "./agent-memory-store";
+import { assembleAgentLcmContext, ingestCompletedRun, ingestContinuationSnapshot, ingestIncomingRoomEnvelope } from "./lcm/facade";
 import {
   compactPersistedAgentRuntime,
   finalizePersistedAgentRuntime,
@@ -119,6 +120,54 @@ async function persistSession(agentId: RoomAgentId): Promise<void> {
     compatibility: session.compatibility,
     updatedAt: session.updatedAt,
   });
+}
+
+function lcmMessageToVisibleMessage(content: unknown): PersistedVisibleMessage {
+  const text = typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content
+          .map((block) => {
+            if (!block || typeof block !== "object") {
+              return "";
+            }
+            if (typeof (block as { text?: unknown }).text === "string") {
+              return (block as { text: string }).text;
+            }
+            if (typeof (block as { output?: unknown }).output === "string") {
+              return (block as { output: string }).output;
+            }
+            return JSON.stringify(block);
+          })
+          .filter(Boolean)
+          .join("\n")
+      : JSON.stringify(content);
+  return {
+    id: createUuid(),
+    role: "assistant",
+    content: text,
+    attachments: [],
+    createdAt: createTimestamp(),
+  };
+}
+
+async function syncSessionHistoryFromLcm(agentId: RoomAgentId, session: AgentRuntimeSession): Promise<void> {
+  const assembled = await assembleAgentLcmContext(agentId, 20_000);
+  if (!assembled) {
+    return;
+  }
+  session.history = assembled.messages.map((message) => ({
+    id: createUuid(),
+    role: message.role === "user" ? "user" : "assistant",
+    content: lcmMessageToVisibleMessage(message.content).content,
+    attachments: Array.isArray((message as { attachments?: unknown }).attachments)
+      ? ((message as { attachments: MessageImageAttachment[] }).attachments ?? [])
+      : [],
+    ...((message as { meta?: AssistantMessageMeta }).meta ? { meta: (message as { meta: AssistantMessageMeta }).meta } : {}),
+    createdAt: createTimestamp(),
+  }));
+  session.updatedAt = createTimestamp();
+  await persistSession(agentId);
 }
 
 function truncateText(value: string, maxLength: number): string {
@@ -320,6 +369,21 @@ export async function startAgentRoomRun(args: {
     });
     session.updatedAt = createTimestamp();
     await persistSession(args.agentId);
+    await ingestContinuationSnapshot({
+      agentId: args.agentId,
+      requestId: previousRun.requestId,
+      snapshotText: continuationSnapshot,
+      roomId: previousRun.roomId,
+      roomTitle: previousRun.roomTitle,
+      userMessageId: previousRun.userMessageId,
+      userSender: previousRun.userSender,
+      userAttachments: previousRun.userAttachments,
+      assistantContent: previousRun.assistantContent,
+      tools: previousRun.toolEvents,
+      emittedMessages: previousRun.emittedMessages,
+      roomActions: previousRun.roomActions,
+      createdAt: createTimestamp(),
+    }).catch(() => undefined);
   }
 
   const compactResult = await compactPersistedAgentRuntime({
@@ -368,6 +432,20 @@ export async function startAgentRoomRun(args: {
   };
   session.updatedAt = createTimestamp();
   await persistSession(args.agentId);
+  await ingestIncomingRoomEnvelope({
+    agentId: args.agentId,
+    requestId,
+    roomId: args.roomId,
+    roomTitle: args.roomTitle,
+    userMessageId: args.userMessageId,
+    userSender: args.userSender,
+    userContent: args.userContent,
+    userAttachments: args.userAttachments,
+    attachedRooms: args.attachedRooms,
+    envelope: incomingMessage.content,
+    createdAt: incomingMessage.createdAt,
+  }).catch(() => undefined);
+  await syncSessionHistoryFromLcm(args.agentId, session).catch(() => undefined);
 
   previousRun?.abortController.abort(new Error("Superseded by a newer room message."));
 
@@ -447,6 +525,25 @@ export async function completeAgentRoomRun(args: {
     resolvedModel: args.resolvedModel,
     compatibility: args.compatibility,
   });
+  await ingestCompletedRun({
+    agentId: args.agentId,
+    requestId: args.requestId,
+    assistantText: args.assistantText,
+    assistantHistoryEntry: assistantMessage.content,
+    roomId: run.roomId,
+    roomTitle: run.roomTitle,
+    userMessageId: run.userMessageId,
+    userSender: run.userSender,
+    userAttachments: run.userAttachments,
+    emittedMessages: run.emittedMessages,
+    roomActions: run.roomActions,
+    tools: run.toolEvents,
+    resolvedModel: args.resolvedModel,
+    compatibility: args.compatibility,
+    meta: args.meta,
+    createdAt: assistantMessage.createdAt,
+  }).catch(() => undefined);
+  await syncSessionHistoryFromLcm(args.agentId, session).catch(() => undefined);
   await appendAgentTurnMemory({
     agentId: args.agentId,
     roomId: run.roomId,

@@ -47,6 +47,8 @@ export type ToolName =
   | "preview_cron_schedule"
   | "memory_search"
   | "memory_get"
+  | "memory_describe"
+  | "memory_expand"
   | "memory_status"
   | "memory_index"
   | "workspace_list"
@@ -215,9 +217,30 @@ export const memorySearchArgsSchema = z
 
 export const memoryGetArgsSchema = z
   .object({
-    path: z.string().trim().min(1).max(200),
+    path: z.string().trim().min(1).max(200).optional(),
+    handle: z.string().trim().min(1).max(200).optional(),
     from: z.number().int().min(1).optional(),
     lines: z.number().int().min(1).max(200).optional().default(40),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (!value.path && !value.handle) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["path"], message: "path or handle is required." });
+    }
+  });
+
+export const memoryDescribeArgsSchema = z
+  .object({
+    handle: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
+export const memoryExpandArgsSchema = z
+  .object({
+    handle: z.string().trim().min(1).max(200),
+    depth: z.number().int().min(0).max(5).optional().default(1),
+    includeMessages: z.boolean().optional().default(true),
+    maxItems: z.number().int().min(1).max(100).optional().default(20),
   })
   .strict();
 

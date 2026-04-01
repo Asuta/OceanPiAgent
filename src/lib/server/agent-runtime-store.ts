@@ -2,6 +2,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateCompactionSummary } from "./agent-compaction";
 import { appendAgentCompactionMemory, clearAgentMemory } from "./agent-memory-store";
+import { appendAgentLcmMessage, assembleAgentLcmContext, clearAgentLcmConversation, compactAgentLcmContext, getAgentLcmRetrieval, getOrCreateAgentConversation } from "./lcm/facade";
 import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runtime-hooks";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
@@ -167,6 +168,50 @@ function estimateHistoryChars(messages: PersistedVisibleMessage[]): number {
   return messages.reduce((total, message) => total + message.content.length + message.attachments.length * 64, 0);
 }
 
+function contentToText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => {
+        if (!block || typeof block !== "object") {
+          return "";
+        }
+        if (typeof (block as { text?: unknown }).text === "string") {
+          return (block as { text: string }).text;
+        }
+        if (typeof (block as { output?: unknown }).output === "string") {
+          return (block as { output: string }).output;
+        }
+        return JSON.stringify(block);
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return JSON.stringify(content);
+}
+
+function extractSummaryText(content: string): string {
+  const match = /<content>\n([\s\S]*?)\n<\/content>/u.exec(content);
+  return match?.[1] ?? content;
+}
+
+async function assembleLcmPersistedHistory(agentId: RoomAgentId): Promise<PersistedVisibleMessage[] | null> {
+  const assembled = await assembleAgentLcmContext(agentId, 20_000);
+  if (!assembled) {
+    return null;
+  }
+
+  return assembled.messages.map((message, index) => ({
+    id: `lcm-${index}-${createUuid()}`,
+    role: message.role === "user" && typeof message.content === "string" && message.content.includes("<summary ") ? "assistant" : (message.role === "user" ? "user" : "assistant"),
+    content: typeof message.content === "string" && message.content.includes("<summary ") ? extractSummaryText(message.content) : contentToText(message.content),
+    attachments: [],
+    createdAt: createTimestamp(),
+  }));
+}
+
 export async function loadPersistedAgentRuntime(agentId: RoomAgentId): Promise<PersistedAgentRuntime> {
   await ensureRuntimeDir();
   const filePath = getRuntimeFilePath(agentId);
@@ -191,6 +236,7 @@ export async function appendPersistedHistoryMessage(args: {
   agentId: RoomAgentId;
   message: Omit<PersistedVisibleMessage, "id" | "createdAt" | "attachments" | "meta"> & Partial<Pick<PersistedVisibleMessage, "id" | "createdAt" | "attachments" | "meta">>;
 }): Promise<PersistedAgentRuntime> {
+  await getOrCreateAgentConversation(args.agentId);
   const runtime = await loadPersistedAgentRuntime(args.agentId);
   runtime.history.push({
     id: args.message.id || createUuid(),
@@ -202,6 +248,21 @@ export async function appendPersistedHistoryMessage(args: {
   });
   runtime.updatedAt = createTimestamp();
   await savePersistedAgentRuntime(runtime);
+  await appendAgentLcmMessage({
+    agentId: args.agentId,
+    role: args.message.role,
+    content: args.message.content,
+    createdAt: args.message.createdAt || createTimestamp(),
+    parts: [
+      {
+        sessionId: `agent:${args.agentId}`,
+        partType: "text",
+        ordinal: 0,
+        textContent: args.message.content,
+        metadata: JSON.stringify({ originalRole: args.message.role, rawType: "runtime_history_seed", attachments: args.message.attachments ?? [], meta: args.message.meta }),
+      },
+    ],
+  }).catch(() => undefined);
   return runtime;
 }
 
@@ -224,6 +285,69 @@ export async function compactPersistedAgentRuntime(args: {
   reason: "automatic" | "manual";
   force?: boolean;
 }): Promise<CompactRuntimeResult> {
+  const lcmCompaction = await compactAgentLcmContext(args.agentId, 20_000, args.force).catch(() => null);
+  if (lcmCompaction) {
+    const runtime = await loadPersistedAgentRuntime(args.agentId);
+    const lcmHistory = (await assembleLcmPersistedHistory(args.agentId)) ?? runtime.history;
+    const charsBefore = estimateHistoryChars(runtime.history);
+    const charsAfter = estimateHistoryChars(lcmHistory);
+    if (!lcmCompaction.actionTaken) {
+      runtime.history = lcmHistory;
+      runtime.updatedAt = createTimestamp();
+      await savePersistedAgentRuntime(runtime);
+      return { compacted: false, history: lcmHistory };
+    }
+
+    await runBeforeCompactionHooks({
+      agentId: args.agentId,
+      reason: args.reason,
+      historyCount: runtime.history.length,
+      charsBefore,
+    });
+    const describedSummary = lcmCompaction.createdSummaryId
+      ? await getAgentLcmRetrieval(args.agentId)
+          .then(({ retrieval }) => retrieval.describe(lcmCompaction.createdSummaryId!))
+          .catch(() => null)
+      : null;
+    const summary = describedSummary?.summary?.content || (lcmCompaction.createdSummaryId ? `LCM summary ${lcmCompaction.createdSummaryId}` : "LCM compaction");
+    const record: CompactionRecord = {
+      id: createUuid(),
+      createdAt: createTimestamp(),
+      reason: args.reason,
+      summary,
+      prunedMessages: Math.max(0, runtime.history.length - lcmHistory.length),
+      keptMessages: lcmHistory.length,
+      charsBefore,
+      charsAfter,
+    };
+    runtime.history = lcmHistory;
+    runtime.compactions = [...runtime.compactions, record].slice(-MAX_COMPACTION_RECORDS);
+    runtime.updatedAt = createTimestamp();
+    await savePersistedAgentRuntime(runtime);
+    await appendAgentCompactionMemory({
+      agentId: args.agentId,
+      summary,
+      reason: args.reason,
+      prunedMessages: record.prunedMessages,
+      charsBefore,
+      charsAfter,
+    });
+    await runAfterCompactionHooks({
+      agentId: args.agentId,
+      reason: args.reason,
+      historyCount: runtime.history.length,
+      charsBefore,
+      charsAfter,
+      summary,
+      prunedMessages: record.prunedMessages,
+    });
+    return {
+      compacted: true,
+      record,
+      history: lcmHistory,
+    };
+  }
+
   const runtime = await loadPersistedAgentRuntime(args.agentId);
   const charsBefore = estimateHistoryChars(runtime.history);
   const shouldCompact =
@@ -314,5 +438,6 @@ export async function compactPersistedAgentRuntime(args: {
 
 export async function resetPersistedAgentRuntime(agentId: RoomAgentId): Promise<void> {
   await rm(getRuntimeFilePath(agentId), { force: true });
+  await clearAgentLcmConversation(agentId).catch(() => undefined);
   await clearAgentMemory(agentId);
 }

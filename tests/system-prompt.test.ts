@@ -27,6 +27,7 @@ function createSettings(overrides?: Partial<ChatSettings>): ChatSettings {
     model: "",
     systemPrompt: "",
     providerMode: "auto",
+    memoryBackend: "sqlite-fts",
     maxToolLoopSteps: 8,
     thinkingLevel: "off",
     enabledSkillIds: [],
@@ -39,6 +40,8 @@ test("buildSystemPrompt advertises bash as a base tool", () => {
 
   assert.match(prompt, /bash, web_fetch, custom_command, skill_read, project_context_list, and project_context_read/);
   assert.match(prompt, /bash runs an unrestricted shell command on the server/);
+  assert.match(prompt, /inspect it with memory_describe before relying on it/);
+  assert.match(prompt, /use memory_expand before concluding/);
 });
 
 test("buildRoomBridgePrompt mentions bash for room agents", () => {
@@ -50,6 +53,8 @@ test("buildRoomBridgePrompt mentions bash for room agents", () => {
 
   assert.match(prompt, /base tools such as bash, web_fetch, custom_command, skill_read, project_context_list, and project_context_read/);
   assert.match(prompt, /bash runs on the server, not in the human-visible chat UI/);
+  assert.match(prompt, /memory_describe/);
+  assert.match(prompt, /memory_expand/);
 });
 
 test("prompt hooks append a skill catalog and injected project context", async () => {
