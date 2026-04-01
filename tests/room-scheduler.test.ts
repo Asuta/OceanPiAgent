@@ -310,7 +310,7 @@ test("runRoomSchedulerNow emits streaming callbacks for each scheduled turn", as
 
 test("runRoomSchedulerNow forwards completed emitted room messages for bound-room delivery", async () => {
   let state = createDefaultWorkspaceState();
-  let room = appendMessageToRoom(
+  const room = appendMessageToRoom(
     state.rooms[0]!,
     createRoomMessage(state.rooms[0]!.id, "user", "Please answer in the bound room.", "user", {
       sender: {

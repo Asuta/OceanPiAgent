@@ -76,6 +76,10 @@ test("room tool registries hide internal room streaming helpers from the model",
 
   assert(chatTools.some((tool) => tool.function.name === "send_message_to_room"));
   assert(responseTools.some((tool) => tool.name === "send_message_to_room"));
+  assert(chatTools.some((tool) => tool.function.name === "memory_describe"));
+  assert(chatTools.some((tool) => tool.function.name === "memory_expand"));
+  assert(responseTools.some((tool) => tool.name === "memory_describe"));
+  assert(responseTools.some((tool) => tool.name === "memory_expand"));
   assert(!chatTools.some((tool) => tool.function.name === "begin_room_message_stream"));
   assert(!chatTools.some((tool) => tool.function.name === "finalize_room_message_stream"));
   assert(!responseTools.some((tool) => tool.name === "begin_room_message_stream"));
