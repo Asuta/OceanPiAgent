@@ -102,7 +102,7 @@ function getLegacySchedulerAnchorMessageId(turn: AgentRoomTurn): string | undefi
     return undefined;
   }
 
-  const match = turn.userMessage.content.match(/messageId\s+([^\s|]+)/);
+  const match = turn.userMessage.content.match(/messageId:?\s+([^\s|]+)/);
   return match?.[1];
 }
 

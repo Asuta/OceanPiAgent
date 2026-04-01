@@ -59,22 +59,13 @@ function collectSchedulerPacketAttachments(messages: RoomMessage[]): MessageImag
 }
 
 function formatSchedulerPacketMessage(message: RoomMessage): string {
-  const header = `- seq ${message.seq} | messageId ${message.id} | from ${message.sender.name} (${message.sender.id}, ${message.sender.role}) | ${message.kind}/${message.status}`;
-  const body = formatMessageForTranscript(message.content, message.attachments)
-    .split("\n")
-    .map((line) => `  ${line}`)
-    .join("\n");
-
-  return `${header}\n${body}`;
+  const body = formatMessageForTranscript(message.content, message.attachments).replace(/\s+/g, " ").trim();
+  return `- ${message.sender.name}: ${body || "(empty)"}`;
 }
 
 export function buildSchedulerPacketContent(
-  room: RoomSession,
   participant: RoomParticipant,
   messages: RoomMessage[],
-  options?: {
-    hasNewDelta?: boolean;
-  },
 ): string {
   const visibleTargetMessages = getSchedulerVisibleTargetMessages(messages, participant);
   const latestParticipantMessage = visibleTargetMessages[visibleTargetMessages.length - 1] ?? null;
@@ -84,14 +75,10 @@ export function buildSchedulerPacketContent(
 
   return [
     "[Room scheduler sync packet]",
-    `Target participant: ${participant.name} (${participant.id})`,
-    `Room: ${room.title} (roomId: ${room.id})`,
-    options?.hasNewDelta ? "Update type: new visible room activity" : "Update type: scheduler replay / no new seq",
-    `Visible unseen message count: ${visibleTargetMessages.length}`,
     latestParticipantMessage
-      ? `Latest message: seq ${latestParticipantMessage.seq} | messageId ${latestParticipantMessage.id} | from ${latestParticipantMessage.sender.name} (${latestParticipantMessage.sender.id}, ${latestParticipantMessage.sender.role}) | ${latestParticipantMessage.kind}/${latestParticipantMessage.status}: ${latestParticipantMessage.content}`
-      : "Latest message: none",
-    "Visible unseen messages:",
+      ? `Latest messageId: ${latestParticipantMessage.id}`
+      : "Latest messageId: none",
+    "Unseen messages:",
     ...visibleMessageLines,
   ].join("\n");
 }
@@ -131,9 +118,7 @@ export function createSchedulerPacket(args: {
   const packet = createRoomMessage(
     args.room.id,
     "system",
-    buildSchedulerPacketContent(args.room, args.participant, args.messages, {
-      hasNewDelta: args.hasNewDelta,
-    }),
+    buildSchedulerPacketContent(args.participant, args.messages),
     "system",
     {
       attachments: collectSchedulerPacketAttachments(visibleTargetMessages),
