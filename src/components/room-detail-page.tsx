@@ -641,6 +641,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
 
     const contentToSend = roomDraft;
     const attachmentsToSend = [...pendingAttachments];
+    setDraft(room.id, "");
     resetPendingAttachments();
 
     try {
