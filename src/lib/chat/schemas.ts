@@ -10,6 +10,7 @@ export const roomAgentIdSchema = z.string().trim().min(1).max(120);
 const providerKeySchema = z.enum(["openai", "right_codes", "generic"]);
 const providerModeSchema = z.enum(["auto", "openai", "right_codes", "generic"]);
 const apiFormatSchema = z.enum(["chat_completions", "responses"]);
+const thinkingLevelSchema = z.preprocess((value) => (value === "minimal" ? "none" : value), z.enum(THINKING_LEVELS));
 export const modelConfigKindSchema = z.enum(["openai_compatible", "pi_builtin"]);
 const chatCompletionsToolStyleSchema = z.enum(["tools", "functions"]);
 const responsesContinuationSchema = z.enum(["previous_response_id", "replay"]);
@@ -383,7 +384,7 @@ const chatSettingsSchema = z.object({
   systemPrompt: z.string(),
   providerMode: providerModeSchema,
   maxToolLoopSteps: z.number().int().min(MIN_MAX_TOOL_LOOP_STEPS).max(MAX_MAX_TOOL_LOOP_STEPS),
-  thinkingLevel: z.enum(THINKING_LEVELS),
+  thinkingLevel: thinkingLevelSchema,
   enabledSkillIds: z.array(z.string()),
 }).strict();
 

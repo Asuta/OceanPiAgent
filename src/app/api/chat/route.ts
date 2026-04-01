@@ -40,7 +40,7 @@ const requestSchema = z.object({
     model: z.string().max(200).optional().default(""),
     systemPrompt: z.string().max(4_000).optional().default(""),
     providerMode: z.enum(["auto", "openai", "right_codes", "generic"]).optional().default("auto"),
-    thinkingLevel: z.enum(THINKING_LEVELS).optional().default("off"),
+    thinkingLevel: z.preprocess((value) => (value === "minimal" ? "none" : value), z.enum(THINKING_LEVELS)).optional().default("off"),
     enabledSkillIds: z.array(z.string().trim().min(1).max(120)).max(24).optional().default([]),
     maxToolLoopSteps: z
       .number()

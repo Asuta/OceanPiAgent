@@ -2,7 +2,7 @@ export type ChatRole = "user" | "assistant";
 
 export type ApiFormat = "chat_completions" | "responses";
 
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVELS = ["off", "none", "low", "medium", "high", "xhigh"] as const;
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
@@ -698,6 +698,10 @@ export function coerceMaxToolLoopSteps(value: unknown): number {
 }
 
 export function coerceThinkingLevel(value: unknown): ThinkingLevel {
+  if (value === "minimal") {
+    return "none";
+  }
+
   return typeof value === "string" && THINKING_LEVELS.includes(value as ThinkingLevel)
     ? (value as ThinkingLevel)
     : "off";
