@@ -217,7 +217,7 @@ function getMessageCardClass(message: RoomMessage) {
   if (message.kind !== "answer" && message.kind !== "user_input") {
     parts.push(`kind-${message.kind}`);
   }
-  if (message.role === "assistant" && message.status !== "completed") {
+  if (message.role === "assistant" && message.status === "streaming") {
     parts.push("is-streaming");
   }
   return parts.join(" ");

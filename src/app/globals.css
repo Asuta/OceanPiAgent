@@ -1658,6 +1658,7 @@ html[data-theme="dark"] .thread-list::before {
 
 .thread-message-card.is-streaming {
   position: relative;
+  contain: paint;
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   border-color: rgba(15, 135, 115, 0.22);
@@ -1751,6 +1752,13 @@ html[data-theme="dark"] .thread-list::before {
   gap: 2px;
 }
 
+.thread-message-topline {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
 .thread-message-kicker {
   color: var(--accent-strong);
   font-size: 0.74rem;
@@ -1812,6 +1820,10 @@ html[data-theme="dark"] .thread-list::before {
   min-height: 6rem;
 }
 
+.thread-message-card.kind-progress.is-streaming .thread-message-body {
+  min-height: 0;
+}
+
 .composer-card {
   flex-shrink: 0;
 }
@@ -1826,7 +1838,9 @@ html[data-theme="dark"] .thread-list::before {
 .thread-turn-inline-stack {
   display: grid;
   gap: 8px;
-  margin: -2px 0 4px 64px;
+  width: 100%;
+  margin: -2px 0 4px;
+  padding-left: 64px;
 }
 
 .thread-turn-inline-stack.draft-stack {
@@ -2734,7 +2748,7 @@ html[data-theme="dark"] .thread-list::before {
   }
 
   .thread-turn-inline-stack {
-    margin-left: 0;
+    padding-left: 0;
   }
 
   .message-avatar {
