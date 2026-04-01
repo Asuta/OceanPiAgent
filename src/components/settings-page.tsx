@@ -24,7 +24,6 @@ import {
 import {
   MAX_MAX_TOOL_LOOP_STEPS,
   MIN_MAX_TOOL_LOOP_STEPS,
-  THINKING_LEVELS,
   type ApiFormat,
   type MemoryBackendId,
   type ModelConfig,
@@ -49,13 +48,23 @@ const PROVIDER_MODE_OPTIONS: Array<{ value: ProviderMode; label: string }> = [
 ];
 
 const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
-  off: "Off",
-  minimal: "Minimal",
+  off: "默认",
+  minimal: "none",
   low: "Low",
   medium: "Medium",
   high: "High",
   xhigh: "XHigh",
 };
+
+const THINKING_LEVEL_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
+  { value: "off", label: "默认" },
+  { value: "off", label: "默认" },
+  { value: "minimal", label: "none" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "XHigh" },
+];
 
 const CUSTOM_MODEL_OPTION = "__custom_model__";
 const NEW_MODEL_CONFIG_ID = "__new_model_config__";
@@ -962,9 +971,9 @@ export function SettingsPage() {
                 onChange={(event) => updateAgentSettings(agent.id, { thinkingLevel: event.target.value as ThinkingLevel })}
                 disabled={isRunning}
               >
-                {THINKING_LEVELS.map((level) => (
-                  <option key={level} value={level}>
-                    {THINKING_LEVEL_LABELS[level]}
+                {THINKING_LEVEL_OPTIONS.map((option, index) => (
+                  <option key={`${option.value}-${index}`} value={option.value}>
+                    {option.label}
                   </option>
                 ))}
               </select>
