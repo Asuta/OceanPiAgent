@@ -303,6 +303,17 @@ p {
   gap: 10px;
 }
 
+.topbar-model-switcher {
+  display: grid;
+  gap: 6px;
+  min-width: min(320px, 100%);
+}
+
+.topbar-model-select {
+  min-width: 220px;
+  padding-right: 40px;
+}
+
 .theme-status-chip {
   min-height: 38px;
 }
@@ -2529,6 +2540,15 @@ html[data-theme="dark"] .thread-list::before {
   .topbar-actions {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .topbar-model-switcher {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .topbar-model-select {
+    min-width: 0;
   }
 
   .launch-grid {
