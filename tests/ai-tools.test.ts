@@ -70,6 +70,18 @@ test("tool registries expose the bash tool", () => {
   assert(roomResponseTools.some((tool) => tool.name === "memory_expand"));
 });
 
+test("room tool registries hide internal room streaming helpers from the model", () => {
+  const chatTools = getChatCompletionsTools("room");
+  const responseTools = getResponsesTools("room");
+
+  assert(chatTools.some((tool) => tool.function.name === "send_message_to_room"));
+  assert(responseTools.some((tool) => tool.name === "send_message_to_room"));
+  assert(!chatTools.some((tool) => tool.function.name === "begin_room_message_stream"));
+  assert(!chatTools.some((tool) => tool.function.name === "finalize_room_message_stream"));
+  assert(!responseTools.some((tool) => tool.name === "begin_room_message_stream"));
+  assert(!responseTools.some((tool) => tool.name === "finalize_room_message_stream"));
+});
+
 test("executeTool runs bash commands in the requested cwd", async () => {
   await withTempCwd(async (tempDir) => {
     await mkdir(path.join(tempDir, "nested"));

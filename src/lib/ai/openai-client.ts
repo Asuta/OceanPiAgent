@@ -5,7 +5,7 @@ import {
   getResponsesContinuationOrder,
   shouldFallbackToResponsesReplay,
 } from "@/lib/ai/provider-compat";
-import { extractRoomMessagePreviewFromToolArgs } from "@/lib/ai/room-message-preview";
+import { extractRoomMessagePreviewFromToolCallBlock } from "@/lib/ai/room-message-preview";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { resolvePiModel } from "@/lib/ai/pi-model-resolver";
 import { getPiAgentTools, type PiToolResultDetails } from "@/lib/ai/pi-agent-tools";
@@ -693,7 +693,15 @@ async function runConversationAttempt(args: {
         return;
       }
 
-      const preview = extractRoomMessagePreviewFromToolArgs(contentBlock.id, contentBlock.name, contentBlock.arguments);
+      const previewSource = contentBlock as typeof contentBlock & { partialJson?: unknown };
+      const preview = extractRoomMessagePreviewFromToolCallBlock({
+        id: contentBlock.id,
+        name: contentBlock.name,
+        arguments: contentBlock.arguments,
+        ...(typeof previewSource.partialJson === "string"
+          ? { partialJson: previewSource.partialJson }
+          : {}),
+      });
       if (!preview) {
         return;
       }
