@@ -234,6 +234,25 @@ export type RoomManagementToolAction =
 
 export type RoomToolActionUnion = RoomToolAction | RoomManagementToolAction;
 
+export interface BeginRoomMessageStreamAction {
+  type: "begin_room_message_stream";
+  roomId: string;
+  messageKey: string;
+  kind: AgentVisibleRoomMessageKind;
+  initialContent: string;
+}
+
+export interface FinalizeRoomMessageStreamAction {
+  type: "finalize_room_message_stream";
+  roomId: string;
+  messageKey: string;
+  kind: AgentVisibleRoomMessageKind;
+  status: Extract<RoomMessageStatus, "completed" | "failed">;
+  final: boolean;
+}
+
+export type RoomMessageStreamAction = BeginRoomMessageStreamAction | FinalizeRoomMessageStreamAction;
+
 export interface RoomMessageEmission {
   roomId: string;
   messageKey?: string;
@@ -306,6 +325,7 @@ export interface ToolExecution {
   durationMs: number;
   details?: ToolExecutionDetails;
   roomMessage?: RoomMessageEmission;
+  roomMessageStream?: RoomMessageStreamAction;
   roomAction?: RoomToolActionUnion;
 }
 

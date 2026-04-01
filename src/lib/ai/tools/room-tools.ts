@@ -5,11 +5,15 @@ import {
   applyReadNoReplyToHistory,
   assertRoomOwner,
   assertWritableRoom,
+  beginRoomMessageStreamArgsSchema,
   buildAutoRoomTitle,
+  createBeginRoomMessageStreamResult,
+  createFinalizeRoomMessageStreamResult,
   createRoomArgsSchema,
   createRoomMessageResult,
   createStructuredOutput,
   emptyArgsSchema,
+  finalizeRoomMessageStreamArgsSchema,
   getAttachedRoom,
   getKnownAgent,
   getRoomOwnerName,
@@ -33,7 +37,7 @@ export const roomTools = {
     name: "send_message_to_room",
     displayName: "Send Message To Room",
     description:
-      "Send a structured user-visible message into a specific attached Chat Room. Use this for both direct replies in the current room and relays, notifications, handoffs, or cross-room messaging into another attached room. To stream one visible room bubble over time, call this tool repeatedly with the same roomId and messageKey, using status=streaming for interim updates and status=completed for the final version.",
+      "Send one structured user-visible message into a specific attached Chat Room. Use this for both direct replies in the current room and relays, notifications, handoffs, or cross-room messaging into another attached room. Each call becomes its own room bubble. Put the exact human-visible text directly in content; while the tool call arguments are being generated, that same bubble can preview-stream automatically.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -41,7 +45,7 @@ export const roomTools = {
           roomId: { type: "string", description: "The target attached Chat Room id that should receive this visible message." },
           messageKey: {
             type: "string",
-            description: "Optional stable key for streaming updates to the same visible room message within this turn. Reuse the same key for incremental updates.",
+            description: "Optional message tag for your own bookkeeping. Each send_message_to_room call still creates its own visible room bubble.",
           },
           content: { type: "string", description: "The exact message that should be delivered into the target Chat Room." },
         kind: {
@@ -84,6 +88,75 @@ export const roomTools = {
         });
       }
       return createRoomMessageResult(args);
+    },
+  } satisfies ToolDefinition<unknown>,
+  begin_room_message_stream: {
+    name: "begin_room_message_stream",
+    displayName: "Begin Room Message Stream",
+    description:
+      "Internal fallback helper for the room streaming bridge. Normally prefer send_message_to_room, which can auto-open the same kind of streamed room bubble without calling this tool directly.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        roomId: { type: "string", description: "The target attached Chat Room id that should receive the streamed visible message." },
+        messageKey: { type: "string", description: "Stable key for this streamed room bubble. Reuse the same key when you finalize it." },
+        kind: {
+          type: "string",
+          enum: ["answer", "progress", "warning", "error", "clarification"],
+          description: "Semantic message type for the streamed room bubble.",
+        },
+        initialContent: {
+          type: "string",
+          description: "Optional initial visible text to seed the streamed room bubble before normal assistant text continues it.",
+        },
+      },
+      required: ["roomId", "messageKey"],
+    },
+    validate: (value: unknown) => beginRoomMessageStreamArgsSchema.parse(value),
+    execute: async (value: unknown, _signal?: AbortSignal, context?: Parameters<ToolDefinition<unknown>["execute"]>[2]) => {
+      const args = value as z.infer<typeof beginRoomMessageStreamArgsSchema>;
+      const roomContext = getRoomToolContext(context);
+      const room = getAttachedRoom(roomContext, args.roomId);
+      assertWritableRoom(room);
+      return createBeginRoomMessageStreamResult(args);
+    },
+  } satisfies ToolDefinition<unknown>,
+  finalize_room_message_stream: {
+    name: "finalize_room_message_stream",
+    displayName: "Finalize Room Message Stream",
+    description:
+      "Internal fallback helper for the room streaming bridge. Normally prefer send_message_to_room, which can auto-close the streamed room bubble with the same messageKey or when the turn ends.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        roomId: { type: "string", description: "The target attached Chat Room id that owns the streamed visible message." },
+        messageKey: { type: "string", description: "The same stable key that was used when the streamed room bubble was opened." },
+        kind: {
+          type: "string",
+          enum: ["answer", "progress", "warning", "error", "clarification"],
+          description: "Final semantic message type for the streamed room bubble.",
+        },
+        status: {
+          type: "string",
+          enum: ["completed", "failed"],
+          description: "Whether the streamed room bubble finished successfully or failed.",
+        },
+        final: {
+          type: "boolean",
+          description: "Whether this streamed room bubble is the final visible message for the current turn.",
+        },
+      },
+      required: ["roomId", "messageKey"],
+    },
+    validate: (value: unknown) => finalizeRoomMessageStreamArgsSchema.parse(value),
+    execute: async (value: unknown, _signal?: AbortSignal, context?: Parameters<ToolDefinition<unknown>["execute"]>[2]) => {
+      const args = value as z.infer<typeof finalizeRoomMessageStreamArgsSchema>;
+      const roomContext = getRoomToolContext(context);
+      const room = getAttachedRoom(roomContext, args.roomId);
+      assertWritableRoom(room);
+      return createFinalizeRoomMessageStreamResult(args);
     },
   } satisfies ToolDefinition<unknown>,
   read_no_reply: {

@@ -78,6 +78,7 @@ import {
 } from "@/components/workspace/persistence";
 import { buildWorkspaceStateSnapshot, canApplyConflictWorkspaceSnapshot, workspaceStatesEqual } from "@/components/workspace/workspace-state";
 import { readRoomStream } from "@/components/workspace/room-stream";
+import { upsertRoomMessageInTurn } from "@/components/workspace/room-turn-state";
 
 const DEFAULT_AGENT_ID: RoomAgentId = "concierge";
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
@@ -2676,11 +2677,25 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             previewMessageIds.add(message.id);
             previewMessageRoomIdById.set(message.id, message.roomId);
             updateRoomStateEphemeral(message.roomId, (room) => upsertMessageToRoom(room, message));
+            if (!activeTurnId || !activeTurnAgentId) {
+              return;
+            }
+
+            updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
+              turns.map((turn) => (turn.id === activeTurnId ? upsertRoomMessageInTurn(turn, message) : turn)),
+            );
           },
           onRoomMessage: (message) => {
             previewMessageIds.delete(message.id);
             previewMessageRoomIdById.delete(message.id);
             updateRoomStateEphemeral(message.roomId, (room) => upsertMessageToRoom(room, message));
+            if (!activeTurnId || !activeTurnAgentId) {
+              return;
+            }
+
+            updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
+              turns.map((turn) => (turn.id === activeTurnId ? upsertRoomMessageInTurn(turn, message) : turn)),
+            );
           },
           onReceiptUpdate: (update) => {
             updateRoomStateEphemeral(update.roomId, (room) => {

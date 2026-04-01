@@ -63,15 +63,27 @@ test("buildRoomBridgePrompt requires early progress acknowledgments for multi-st
   assert.match(prompt, /If the task can be answered immediately with one concise final room reply, you do not need a separate acknowledgment message first/);
 });
 
-test("buildRoomBridgePrompt explains how to stream one formal room bubble with messageKey", () => {
+test("buildRoomBridgePrompt explains that each send_message_to_room call creates its own bubble", () => {
   const prompt = buildRoomBridgePrompt({
     roomTitle: "Test Room",
     roomId: "room-1",
     agentLabel: "Harbor Concierge",
   });
 
-  assert.match(prompt, /reuse the same send_message_to_room\.messageKey across repeated calls for that one bubble/);
-  assert.match(prompt, /send partial user-facing text with the same messageKey and status=streaming, then end that same bubble with status=completed/);
+  assert.match(prompt, /Each send_message_to_room call creates one separate visible room bubble/);
+  assert.match(prompt, /send_message_to_room\.messageKey is optional bookkeeping and usually unnecessary/);
+});
+
+test("buildRoomBridgePrompt explains that send_message_to_room content can preview-stream on its own", () => {
+  const prompt = buildRoomBridgePrompt({
+    roomTitle: "Test Room",
+    roomId: "room-1",
+    agentLabel: "Harbor Concierge",
+  });
+
+  assert.match(prompt, /Put the full human-visible message directly in send_message_to_room\.content instead of relying on ordinary assistant text to continue it/);
+  assert.match(prompt, /That content may preview-stream while the tool call arguments are being generated/);
+  assert.doesNotMatch(prompt, /ordinary assistant text that continues a streamed room bubble/);
 });
 
 test("prompt hooks append a skill catalog and injected project context", async () => {

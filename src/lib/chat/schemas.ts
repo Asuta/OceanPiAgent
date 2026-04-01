@@ -120,6 +120,24 @@ const roomToolActionSchema = z.object({
   messageId: z.string(),
 }).strict();
 
+const roomMessageStreamActionSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("begin_room_message_stream"),
+    roomId: z.string(),
+    messageKey: z.string(),
+    kind: z.enum(["answer", "progress", "warning", "error", "clarification"]),
+    initialContent: z.string(),
+  }).strict(),
+  z.object({
+    type: z.literal("finalize_room_message_stream"),
+    roomId: z.string(),
+    messageKey: z.string(),
+    kind: z.enum(["answer", "progress", "warning", "error", "clarification"]),
+    status: z.enum(["completed", "failed"]),
+    final: z.boolean(),
+  }).strict(),
+]);
+
 const roomToolActionUnionSchema = z.union([roomToolActionSchema, roomManagementActionSchema]);
 
 const emptyCompletionDiagnosticSchema = z.object({
@@ -287,6 +305,7 @@ const toolExecutionSchema = z.object({
   durationMs: z.number(),
   details: toolExecutionDetailsSchema.optional(),
   roomMessage: roomMessageEmissionSchema.optional(),
+  roomMessageStream: roomMessageStreamActionSchema.optional(),
   roomAction: roomToolActionUnionSchema.optional(),
 }).strict();
 
