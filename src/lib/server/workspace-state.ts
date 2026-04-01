@@ -1,11 +1,11 @@
 import type { AgentSharedState, ProviderCompatibility, RoomAgentId, RoomWorkspaceState } from "@/lib/chat/types";
 import {
   applyMessageReceiptUpdate,
-  appendMessageToRoom,
   createAgentSharedState,
   createTimestamp,
   reduceRoomManagementActions,
   sortRoomsByUpdatedAt,
+  upsertMessageToRoom,
   type ApplyCronTurnToWorkspaceArgs,
 } from "@/lib/chat/workspace-domain";
 
@@ -22,6 +22,17 @@ export type ApplyRoomTurnToWorkspaceArgs = {
   receiptUpdates: import("@/lib/chat/types").RoomMessageReceiptUpdate[];
   roomActions: import("@/lib/chat/types").RoomToolActionUnion[];
 };
+
+function upsertAgentTurn(turns: ApplyRoomTurnToWorkspaceArgs["turn"][], turn: ApplyRoomTurnToWorkspaceArgs["turn"]) {
+  const existingIndex = turns.findIndex((entry) => entry.id === turn.id);
+  if (existingIndex < 0) {
+    return [...turns, turn];
+  }
+
+  const nextTurns = [...turns];
+  nextTurns[existingIndex] = turn;
+  return nextTurns;
+}
 
 function replaceUserMessageInRoom(room: import("@/lib/chat/types").RoomSession, turn: ApplyRoomTurnToWorkspaceArgs["turn"]) {
   return room.roomMessages.map((message) => (
@@ -45,7 +56,7 @@ export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
     let nextRoom = {
       ...room,
       roomMessages: replaceUserMessageInRoom(room, args.turn),
-      agentTurns: [...room.agentTurns, args.turn],
+      agentTurns: upsertAgentTurn(room.agentTurns, args.turn),
       error: args.turn.status === "error" ? args.turn.error || "Unknown room error." : "",
       updatedAt: createTimestamp(),
     };
@@ -63,7 +74,7 @@ export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
 
     for (const emittedMessage of args.emittedMessages) {
       if (emittedMessage.roomId === nextRoom.id) {
-        nextRoom = appendMessageToRoom(nextRoom, emittedMessage);
+        nextRoom = upsertMessageToRoom(nextRoom, emittedMessage);
       }
     }
 
@@ -74,14 +85,14 @@ export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
     if (emittedMessage.roomId === args.targetRoomId) {
       continue;
     }
-    rooms = rooms.map((room) => (room.id === emittedMessage.roomId ? appendMessageToRoom(room, emittedMessage) : room));
+    rooms = rooms.map((room) => (room.id === emittedMessage.roomId ? upsertMessageToRoom(room, emittedMessage) : room));
   }
 
   const nextAgentStates: Record<RoomAgentId, AgentSharedState> = {
     ...args.workspace.agentStates,
     [args.agentId]: {
       ...(args.workspace.agentStates[args.agentId] ?? createAgentSharedState()),
-      agentTurns: [...(args.workspace.agentStates[args.agentId]?.agentTurns ?? []), args.turn],
+      agentTurns: upsertAgentTurn(args.workspace.agentStates[args.agentId]?.agentTurns ?? [], args.turn),
       resolvedModel: args.resolvedModel,
       compatibility: args.compatibility,
       updatedAt: createTimestamp(),
@@ -105,7 +116,7 @@ export function applyCronTurnToWorkspace(args: ApplyCronTurnToWorkspaceArgs) {
 
     let nextRoom = {
       ...room,
-      agentTurns: [...room.agentTurns, args.turn],
+      agentTurns: upsertAgentTurn(room.agentTurns, args.turn),
       error: "",
       updatedAt: createTimestamp(),
     };
@@ -123,7 +134,7 @@ export function applyCronTurnToWorkspace(args: ApplyCronTurnToWorkspaceArgs) {
 
     for (const emittedMessage of args.emittedMessages) {
       if (emittedMessage.roomId === nextRoom.id) {
-        nextRoom = appendMessageToRoom(nextRoom, emittedMessage);
+        nextRoom = upsertMessageToRoom(nextRoom, emittedMessage);
       }
     }
 
@@ -134,14 +145,14 @@ export function applyCronTurnToWorkspace(args: ApplyCronTurnToWorkspaceArgs) {
     if (emittedMessage.roomId === args.targetRoomId) {
       continue;
     }
-    rooms = rooms.map((room) => (room.id === emittedMessage.roomId ? appendMessageToRoom(room, emittedMessage) : room));
+    rooms = rooms.map((room) => (room.id === emittedMessage.roomId ? upsertMessageToRoom(room, emittedMessage) : room));
   }
 
   const nextAgentStates: Record<RoomAgentId, AgentSharedState> = {
     ...args.workspace.agentStates,
     [args.agentId]: {
       ...(args.workspace.agentStates[args.agentId] ?? createAgentSharedState()),
-      agentTurns: [...(args.workspace.agentStates[args.agentId]?.agentTurns ?? []), args.turn],
+      agentTurns: upsertAgentTurn(args.workspace.agentStates[args.agentId]?.agentTurns ?? [], args.turn),
       resolvedModel: args.resolvedModel,
       compatibility: args.compatibility,
       updatedAt: createTimestamp(),

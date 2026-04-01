@@ -242,9 +242,8 @@ export async function compactPersistedAgentRuntime(args: {
   if (splitIndex % 2 !== 0 && splitIndex < runtime.history.length - 1) {
     splitIndex += 1;
   }
-  const candidatePrunedMessages = runtime.history.slice(0, splitIndex);
-  const prunedMessages = candidatePrunedMessages.filter((message) => message.attachments.length === 0);
-  const keptMessages = runtime.history.filter((message, index) => index >= splitIndex || message.attachments.length > 0);
+  const prunedMessages = runtime.history.slice(0, splitIndex);
+  const keptMessages = runtime.history.slice(splitIndex);
   if (prunedMessages.length === 0) {
     return {
       compacted: false,

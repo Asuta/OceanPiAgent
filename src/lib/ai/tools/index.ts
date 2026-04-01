@@ -8,7 +8,29 @@ import type { ToolExecution, ToolScope } from "@/lib/chat/types";
 import { truncateText } from "@/lib/shared/text";
 import { createUuid } from "@/lib/utils/uuid";
 
-function getToolDefinitions(scope: ToolScope = "default"): Partial<Record<ToolName, ToolDefinition<unknown>>> {
+function getVisibleToolDefinitions(scope: ToolScope = "default"): Partial<Record<ToolName, ToolDefinition<unknown>>> {
+  if (scope === "room") {
+    const visibleRoomTools = Object.fromEntries(
+      Object.entries(roomTools).filter(
+        ([toolName]) => toolName !== "begin_room_message_stream" && toolName !== "finalize_room_message_stream",
+      ),
+    ) as Partial<Record<ToolName, ToolDefinition<unknown>>>;
+
+    return {
+      ...baseTools,
+      ...visibleRoomTools,
+      ...cronTools,
+      ...memoryTools,
+      ...workspaceTools,
+    };
+  }
+
+  return {
+    ...baseTools,
+  };
+}
+
+function getExecutableToolDefinitions(scope: ToolScope = "default"): Partial<Record<ToolName, ToolDefinition<unknown>>> {
   if (scope === "room") {
     return {
       ...baseTools,
@@ -35,7 +57,7 @@ function normalizeToolRuntimeResult(result: string | ToolRuntimeResult): ToolRun
 }
 
 export function getChatCompletionsTools(scope: ToolScope = "default") {
-  return Object.values(getToolDefinitions(scope)).map((tool) => ({
+  return Object.values(getVisibleToolDefinitions(scope)).map((tool) => ({
     type: "function" as const,
     function: {
       name: tool.name,
@@ -46,7 +68,7 @@ export function getChatCompletionsTools(scope: ToolScope = "default") {
 }
 
 export function getLegacyChatCompletionsFunctions(scope: ToolScope = "default") {
-  return Object.values(getToolDefinitions(scope)).map((tool) => ({
+  return Object.values(getVisibleToolDefinitions(scope)).map((tool) => ({
     name: tool.name,
     description: tool.description,
     parameters: tool.inputSchema,
@@ -54,7 +76,7 @@ export function getLegacyChatCompletionsFunctions(scope: ToolScope = "default") 
 }
 
 export function getResponsesTools(scope: ToolScope = "default") {
-  return Object.values(getToolDefinitions(scope)).map((tool) => ({
+  return Object.values(getVisibleToolDefinitions(scope)).map((tool) => ({
     type: "function" as const,
     name: tool.name,
     description: tool.description,
@@ -69,7 +91,7 @@ export async function executeTool(
   signal?: AbortSignal,
   context?: ToolExecutionContext,
 ): Promise<{ output: string; event: ToolExecution; details?: ToolExecution["details"] }> {
-  const toolMap = getToolDefinitions(scope);
+  const toolMap = getExecutableToolDefinitions(scope);
   const tool = toolMap[toolName as ToolName];
   if (!tool) {
     const output = `Tool not found: ${toolName}`;
@@ -118,6 +140,7 @@ export async function executeTool(
         durationMs: Math.max(1, Math.round(performance.now() - startedAt)),
         ...(executionResult.details ? { details: executionResult.details } : {}),
         ...(executionResult.roomMessage ? { roomMessage: executionResult.roomMessage } : {}),
+        ...(executionResult.roomMessageStream ? { roomMessageStream: executionResult.roomMessageStream } : {}),
         ...(executionResult.roomAction ? { roomAction: executionResult.roomAction } : {}),
       },
     };

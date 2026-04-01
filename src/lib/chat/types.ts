@@ -16,7 +16,7 @@ export type ModelConfigKind = (typeof MODEL_CONFIG_KINDS)[number];
 
 export type ToolScope = "default" | "room";
 
-export const DEFAULT_MAX_TOOL_LOOP_STEPS = 50;
+export const DEFAULT_MAX_TOOL_LOOP_STEPS = 200;
 
 export const MIN_MAX_TOOL_LOOP_STEPS = 1;
 
@@ -161,6 +161,7 @@ export interface AttachedRoomDefinition {
 
 export interface RoomHistoryMessageSummary {
   messageId: string;
+  messageKey?: string;
   seq: number;
   senderId: string;
   senderName: string;
@@ -233,12 +234,36 @@ export type RoomManagementToolAction =
 
 export type RoomToolActionUnion = RoomToolAction | RoomManagementToolAction;
 
+export interface BeginRoomMessageStreamAction {
+  type: "begin_room_message_stream";
+  roomId: string;
+  messageKey: string;
+  kind: AgentVisibleRoomMessageKind;
+  initialContent: string;
+}
+
+export interface FinalizeRoomMessageStreamAction {
+  type: "finalize_room_message_stream";
+  roomId: string;
+  messageKey: string;
+  kind: AgentVisibleRoomMessageKind;
+  status: Extract<RoomMessageStatus, "completed" | "failed">;
+  final: boolean;
+}
+
+export type RoomMessageStreamAction = BeginRoomMessageStreamAction | FinalizeRoomMessageStreamAction;
+
 export interface RoomMessageEmission {
   roomId: string;
+  messageKey?: string;
   content: string;
   kind: AgentVisibleRoomMessageKind;
   status: RoomMessageStatus;
   final: boolean;
+}
+
+export interface RoomMessagePreviewEmission extends RoomMessageEmission {
+  toolCallId: string;
 }
 
 export interface RoomMessage {
@@ -300,7 +325,15 @@ export interface ToolExecution {
   durationMs: number;
   details?: ToolExecutionDetails;
   roomMessage?: RoomMessageEmission;
+  roomMessageStream?: RoomMessageStreamAction;
   roomAction?: RoomToolActionUnion;
+}
+
+export interface DraftTextSegment {
+  id: string;
+  sequence: number;
+  content: string;
+  status: "streaming" | "completed";
 }
 
 export type TurnTimelineEvent =
@@ -316,6 +349,12 @@ export type TurnTimelineEvent =
       type: "room-message";
       messageId: string;
       roomId: string;
+    }
+  | {
+      id: string;
+      sequence: number;
+      type: "draft-segment";
+      segmentId: string;
     };
 
 export interface EmptyCompletionDiagnostic {
@@ -393,6 +432,7 @@ export interface AssistantHistoryToolCallPart {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  partialJson?: string;
   thoughtSignature?: string;
 }
 
@@ -492,6 +532,7 @@ export interface AgentRoomTurn {
   anchorMessageId?: string;
   continuationSnapshot?: string;
   assistantContent: string;
+  draftSegments?: DraftTextSegment[];
   timeline?: TurnTimelineEvent[];
   tools: ToolExecution[];
   emittedMessages: RoomMessage[];
@@ -612,12 +653,20 @@ export type ChatStreamEvent =
 
 export type RoomChatStreamEvent =
   | {
+      type: "turn-start";
+      turn: AgentRoomTurn;
+    }
+  | {
       type: "agent-text-delta";
       delta: string;
     }
   | {
       type: "tool";
       tool: ToolExecution;
+    }
+  | {
+      type: "room-message-preview";
+      message: RoomMessage;
     }
   | {
       type: "room-message";

@@ -57,6 +57,30 @@ interface AgentRuntimeSession {
   loaded: boolean;
 }
 
+function upsertEmittedRoomMessage(
+  messages: RoomMessageEmission[],
+  message: RoomMessageEmission,
+): RoomMessageEmission[] {
+  const targetKey = message.messageKey ?? null;
+  const existingIndex = messages.findIndex((entry) => {
+    if (targetKey && entry.messageKey === targetKey && entry.roomId === message.roomId) {
+      return true;
+    }
+    return !targetKey && !entry.messageKey && entry.roomId === message.roomId && entry.content === message.content;
+  });
+
+  if (existingIndex < 0) {
+    return [...messages, message];
+  }
+
+  const nextMessages = [...messages];
+  nextMessages[existingIndex] = {
+    ...nextMessages[existingIndex],
+    ...message,
+  };
+  return nextMessages;
+}
+
 declare global {
   var __oceankingAgentRoomSessions: Map<RoomAgentId, AgentRuntimeSession> | undefined;
 }
@@ -406,7 +430,7 @@ export function recordAgentToolEvent(agentId: RoomAgentId, requestId: string, to
 
   run.toolEvents.push(tool);
   if (tool.roomMessage) {
-    run.emittedMessages.push(tool.roomMessage);
+    run.emittedMessages = upsertEmittedRoomMessage(run.emittedMessages, tool.roomMessage);
   }
   if (tool.roomAction) {
     run.roomActions.push(tool.roomAction);

@@ -4,11 +4,13 @@ import { previewCronSchedule } from "@/lib/server/cron-service";
 import type {
   AgentInfoCard,
   AttachedRoomDefinition,
+  BeginRoomMessageStreamAction,
   RoomCronJob,
   RoomCronRunRecord,
   RoomCronSchedule,
   RoomAgentId,
   RoomHistoryMessageSummary,
+  RoomMessageStreamAction,
   RoomManagementToolAction,
   RoomMessageEmission,
   RoomToolActionUnion,
@@ -26,6 +28,8 @@ export type ToolName =
   | "project_context_list"
   | "project_context_read"
   | "send_message_to_room"
+  | "begin_room_message_stream"
+  | "finalize_room_message_stream"
   | "read_no_reply"
   | "list_attached_rooms"
   | "list_known_agents"
@@ -69,6 +73,7 @@ export interface ToolRuntimeResult {
   output: string;
   details?: ToolExecutionDetails;
   roomMessage?: RoomMessageEmission;
+  roomMessageStream?: RoomMessageStreamAction;
   roomAction?: RoomToolActionUnion;
 }
 
@@ -155,11 +160,31 @@ export const projectContextReadArgsSchema = z
 
 export const roomMessageArgsSchema = z.object({
   roomId: z.string().trim().min(1).max(120),
+  messageKey: z.string().trim().min(1).max(120).optional(),
   content: z.string().trim().min(1).max(4_000),
   kind: z.enum(["answer", "progress", "warning", "error", "clarification"]).optional().default("answer"),
   status: z.enum(["pending", "streaming", "completed", "failed"]).optional().default("completed"),
   final: z.boolean().optional().default(true),
 });
+
+export const beginRoomMessageStreamArgsSchema = z
+  .object({
+    roomId: z.string().trim().min(1).max(120),
+    messageKey: z.string().trim().min(1).max(120),
+    kind: z.enum(["answer", "progress", "warning", "error", "clarification"]).optional().default("answer"),
+    initialContent: z.string().max(4_000).optional().default(""),
+  })
+  .strict();
+
+export const finalizeRoomMessageStreamArgsSchema = z
+  .object({
+    roomId: z.string().trim().min(1).max(120),
+    messageKey: z.string().trim().min(1).max(120),
+    kind: z.enum(["answer", "progress", "warning", "error", "clarification"]).optional().default("answer"),
+    status: z.enum(["completed", "failed"]).optional().default("completed"),
+    final: z.boolean().optional().default(true),
+  })
+  .strict();
 
 export const readNoReplyArgsSchema = z
   .object({
@@ -549,7 +574,39 @@ export function createRoomMessageResult(args: z.infer<typeof roomMessageArgsSche
     output: `Sent a room message (${args.kind}/${args.status}/${args.final ? "final" : "non-final"}).`,
     roomMessage: {
       roomId: args.roomId,
+      ...(args.messageKey ? { messageKey: args.messageKey } : {}),
       content: args.content,
+      kind: args.kind,
+      status: args.status,
+      final: args.final,
+    },
+  } satisfies ToolRuntimeResult;
+}
+
+export function createBeginRoomMessageStreamResult(
+  args: z.infer<typeof beginRoomMessageStreamArgsSchema>,
+): ToolRuntimeResult {
+  return {
+    output: `Opened a streamed room message (${args.kind}/streaming) with messageKey ${args.messageKey}.`,
+    roomMessageStream: {
+      type: "begin_room_message_stream",
+      roomId: args.roomId,
+      messageKey: args.messageKey,
+      kind: args.kind,
+      initialContent: args.initialContent,
+    } satisfies BeginRoomMessageStreamAction,
+  } satisfies ToolRuntimeResult;
+}
+
+export function createFinalizeRoomMessageStreamResult(
+  args: z.infer<typeof finalizeRoomMessageStreamArgsSchema>,
+): ToolRuntimeResult {
+  return {
+    output: `Closed the streamed room message (${args.kind}/${args.status}/${args.final ? "final" : "non-final"}) with messageKey ${args.messageKey}.`,
+    roomMessageStream: {
+      type: "finalize_room_message_stream",
+      roomId: args.roomId,
+      messageKey: args.messageKey,
       kind: args.kind,
       status: args.status,
       final: args.final,
@@ -692,6 +749,29 @@ export function appendVisibleHistoryMessage(
 
   const createdAt = new Date().toISOString();
   const currentHistory = context.roomHistoryById[roomId] ?? [];
+  const existingIndex = message.messageKey
+    ? currentHistory.findIndex(
+        (entry) => entry.messageKey === message.messageKey && entry.senderId === message.senderId,
+      )
+    : -1;
+
+  if (existingIndex >= 0) {
+    const existingMessage = currentHistory[existingIndex];
+    const nextHistory = [...currentHistory];
+    nextHistory[existingIndex] = {
+      ...existingMessage,
+      ...message,
+      messageId: existingMessage.messageId,
+      seq: existingMessage.seq,
+      createdAt: existingMessage.createdAt,
+      receipts: message.receipts ? [...message.receipts] : [...existingMessage.receipts],
+    };
+    context.roomHistoryById[roomId] = nextHistory;
+    room.messageCount = nextHistory.length;
+    room.latestMessageAt = nextHistory[nextHistory.length - 1]?.createdAt ?? room.latestMessageAt;
+    return;
+  }
+
   const nextMessage: RoomHistoryMessageSummary = {
     messageId: createUuid(),
     seq: (currentHistory[currentHistory.length - 1]?.seq ?? 0) + 1,

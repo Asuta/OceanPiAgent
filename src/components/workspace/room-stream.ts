@@ -41,6 +41,11 @@ function handleRoomStreamEvent(
   emittedMessages: RoomMessage[],
   receiptUpdates: RoomMessageReceiptUpdate[],
 ): void {
+  if (event.type === "turn-start") {
+    args.onTurnStart(event.turn);
+    return;
+  }
+
   if (event.type === "agent-text-delta") {
     args.onTextDelta(event.delta);
     return;
@@ -48,6 +53,11 @@ function handleRoomStreamEvent(
 
   if (event.type === "tool") {
     args.onTool(event.tool);
+    return;
+  }
+
+  if (event.type === "room-message-preview") {
+    args.onRoomMessagePreview(event.message);
     return;
   }
 
@@ -77,8 +87,10 @@ function handleRoomStreamEvent(
 export async function readRoomStream(args: {
   response: Response;
   shouldContinue: () => boolean;
+  onTurnStart: (turn: Extract<RoomChatStreamEvent, { type: "turn-start" }>["turn"]) => void;
   onTextDelta: (delta: string) => void;
   onTool: (tool: ToolExecution) => void;
+  onRoomMessagePreview: (message: RoomMessage) => void;
   onRoomMessage: (message: RoomMessage) => void;
   onReceiptUpdate: (update: RoomMessageReceiptUpdate) => void;
   onDone: (event: Extract<RoomChatStreamEvent, { type: "done" }>) => void;

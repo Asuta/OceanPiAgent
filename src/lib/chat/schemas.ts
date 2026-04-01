@@ -107,6 +107,7 @@ const roomParticipantSchema = z.object({
 
 const roomMessageEmissionSchema = z.object({
   roomId: z.string(),
+  messageKey: z.string().optional(),
   content: z.string(),
   kind: z.enum(["answer", "progress", "warning", "error", "clarification"]),
   status: roomMessageStatusSchema,
@@ -118,6 +119,24 @@ const roomToolActionSchema = z.object({
   roomId: z.string(),
   messageId: z.string(),
 }).strict();
+
+const roomMessageStreamActionSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("begin_room_message_stream"),
+    roomId: z.string(),
+    messageKey: z.string(),
+    kind: z.enum(["answer", "progress", "warning", "error", "clarification"]),
+    initialContent: z.string(),
+  }).strict(),
+  z.object({
+    type: z.literal("finalize_room_message_stream"),
+    roomId: z.string(),
+    messageKey: z.string(),
+    kind: z.enum(["answer", "progress", "warning", "error", "clarification"]),
+    status: z.enum(["completed", "failed"]),
+    final: z.boolean(),
+  }).strict(),
+]);
 
 const roomToolActionUnionSchema = z.union([roomToolActionSchema, roomManagementActionSchema]);
 
@@ -196,6 +215,7 @@ const assistantHistoryToolCallPartSchema = z.object({
   id: z.string(),
   name: z.string(),
   arguments: z.record(z.string(), z.unknown()),
+  partialJson: z.string().optional(),
   thoughtSignature: z.string().optional(),
 }).strict();
 
@@ -285,6 +305,7 @@ const toolExecutionSchema = z.object({
   durationMs: z.number(),
   details: toolExecutionDetailsSchema.optional(),
   roomMessage: roomMessageEmissionSchema.optional(),
+  roomMessageStream: roomMessageStreamActionSchema.optional(),
   roomAction: roomToolActionUnionSchema.optional(),
 }).strict();
 
@@ -306,6 +327,13 @@ const roomMessageSchema = z.object({
   receiptUpdatedAt: z.string().nullable(),
 }).strict();
 
+const draftTextSegmentSchema = z.object({
+  id: z.string(),
+  sequence: z.number().int(),
+  content: z.string(),
+  status: z.enum(["streaming", "completed"]),
+}).strict();
+
 const turnTimelineEventSchema = z.discriminatedUnion("type", [
   z.object({
     id: z.string(),
@@ -320,6 +348,12 @@ const turnTimelineEventSchema = z.discriminatedUnion("type", [
     messageId: z.string(),
     roomId: z.string(),
   }).strict(),
+  z.object({
+    id: z.string(),
+    sequence: z.number().int(),
+    type: z.literal("draft-segment"),
+    segmentId: z.string(),
+  }).strict(),
 ]);
 
 const agentRoomTurnSchema = z.object({
@@ -332,6 +366,7 @@ const agentRoomTurnSchema = z.object({
   anchorMessageId: z.string().optional(),
   continuationSnapshot: z.string().optional(),
   assistantContent: z.string(),
+  draftSegments: z.array(draftTextSegmentSchema).optional(),
   timeline: z.array(turnTimelineEventSchema).optional(),
   tools: z.array(toolExecutionSchema),
   emittedMessages: z.array(roomMessageSchema),

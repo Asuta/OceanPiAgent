@@ -1,4 +1,4 @@
-import type { RoomAgentDefinition, RoomAgentId, RoomParticipant, RoomSession } from "@/lib/chat/types";
+import type { MessageImageAttachment, RoomAgentDefinition, RoomAgentId, RoomParticipant, RoomSession } from "@/lib/chat/types";
 import {
   appendMessageToRoom,
   createAgentParticipant,
@@ -38,10 +38,23 @@ export function resolveRoomMessageSender(args: {
   );
 }
 
+export function getSuggestedRoomTitle(content: string): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  return normalized.length > 30 ? `${normalized.slice(0, 30).trim()}...` : normalized;
+}
+
+export function shouldAutoTitleRoom(room: RoomSession): boolean {
+  return /^Room \d+$/.test(room.title) && room.roomMessages.length === 0 && room.agentTurns.length === 0;
+}
+
 export function applyOutgoingUserMessage(args: {
   room: RoomSession;
   content: string;
-  attachments?: RoomSession["roomMessages"][number]["attachments"];
+  attachments?: MessageImageAttachment[];
   sender: RoomParticipant;
   nextTitle: string;
 }): RoomSession {

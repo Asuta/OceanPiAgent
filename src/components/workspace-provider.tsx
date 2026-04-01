@@ -14,14 +14,12 @@ import {
 } from "react";
 import { ROOM_AGENTS } from "@/lib/chat/catalog";
 import type {
-  AgentInfoCard,
   AgentRoomTurn,
   AgentSharedState,
   ChatSettings,
   MessageImageAttachment,
   ProviderCompatibility,
   RoomAgentDefinition,
-  RoomHistoryMessageSummary,
   RoomAgentId,
   RoomMessage,
   RoomMessageEmission,
@@ -44,16 +42,15 @@ import {
   MIN_MAX_TOOL_LOOP_STEPS,
 } from "@/lib/chat/types";
 import {
-  createKnownAgentCards,
+  applyMessageReceiptUpdate,
   createAgentParticipant,
   createAgentSharedState,
-  createAttachedRoomDefinition,
   createHumanParticipant,
   createInitialAgentStates,
-  createRoomHistorySummary,
   createRoomSession,
   createSchedulerState,
   createTimestamp,
+  dedupeRoomMessages,
   getActiveRooms,
   getAgentParticipants,
   getArchivedRooms,
@@ -65,37 +62,27 @@ import {
   getRoomAgent,
   getRoomPreview,
   pickRoomOwnerParticipantId,
-  reduceRoomManagementActions as reduceSharedRoomManagementActions,
   sortRoomParticipants,
   sortRoomsByUpdatedAt,
-  upsertRoomMessageReceipt,
+  upsertMessageToRoom,
 } from "@/lib/chat/workspace-domain";
+import { applyWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
 import { hasMessagePayload } from "@/lib/chat/message-attachments";
 import {
   clearPersistedWorkspaceState,
   fetchWorkspaceEnvelope,
   loadLocalWorkspaceState,
+  postRoomCommand,
   saveWorkspaceEnvelope,
   saveWorkspaceStateToLocalStorage,
 } from "@/components/workspace/persistence";
-import { buildWorkspaceStateSnapshot, workspaceStatesEqual } from "@/components/workspace/workspace-state";
-import {
-  addAgentParticipantToRoom,
-  addHumanParticipantToRoom,
-  applyOutgoingUserMessage,
-  moveAgentParticipantInRoom,
-  removeParticipantFromRoom,
-  resolveRoomMessageSender,
-  toggleAgentParticipantInRoom,
-} from "@/components/workspace/room-actions";
-import type { ActiveSchedulerRun } from "@/components/workspace/scheduler";
-import { useRoomExecution } from "@/components/workspace/use-room-execution";
-import type { ActiveRoomRun } from "@/components/workspace/use-room-execution";
-import { useRoomScheduler } from "@/components/workspace/use-room-scheduler";
+import { buildWorkspaceStateSnapshot, canApplyConflictWorkspaceSnapshot, workspaceStatesEqual } from "@/components/workspace/workspace-state";
+import { readRoomStream } from "@/components/workspace/room-stream";
+import { upsertRoomMessageInTurn } from "@/components/workspace/room-turn-state";
 
 const DEFAULT_AGENT_ID: RoomAgentId = "concierge";
-const ROOM_LOOP_MAX_ROUNDS = 20;
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
+const LEGACY_DEFAULT_MAX_TOOL_LOOP_STEPS = 6;
 
 const DEFAULT_SETTINGS: ChatSettings = {
   modelConfigId: null,
@@ -199,18 +186,19 @@ interface WorkspaceContextValue {
   isAgentRunning: (agentId: RoomAgentId) => boolean;
   isAgentCompacting: (agentId: RoomAgentId) => boolean;
   isRoomRunning: (roomId: string) => boolean;
-  createRoom: (agentId?: RoomAgentId) => RoomSession;
+  createRoom: (agentId?: RoomAgentId) => Promise<RoomSession | null>;
   createAgentDefinition: (input: AgentMutationInput) => Promise<RoomAgentDefinition>;
-  renameRoom: (roomId: string, title: string) => void;
-  archiveRoom: (roomId: string) => void;
-  restoreRoom: (roomId: string) => void;
-  deleteRoom: (roomId: string) => void;
-  clearRoom: (roomId: string) => void;
-  addHumanParticipant: (roomId: string, name: string) => void;
-  addAgentParticipant: (roomId: string, agentId: RoomAgentId) => void;
-  removeParticipant: (roomId: string, participantId: string) => void;
-  toggleAgentParticipant: (roomId: string, participantId: string) => void;
-  moveAgentParticipant: (roomId: string, participantId: string, direction: -1 | 1) => void;
+  renameRoom: (roomId: string, title: string) => Promise<void>;
+  archiveRoom: (roomId: string) => Promise<void>;
+  restoreRoom: (roomId: string) => Promise<void>;
+  deleteRoom: (roomId: string) => Promise<void>;
+  clearRoom: (roomId: string) => Promise<void>;
+  addHumanParticipant: (roomId: string, name: string) => Promise<void>;
+  addAgentParticipant: (roomId: string, agentId: RoomAgentId) => Promise<void>;
+  removeParticipant: (roomId: string, participantId: string) => Promise<void>;
+  toggleAgentParticipant: (roomId: string, participantId: string) => Promise<void>;
+  moveAgentParticipant: (roomId: string, participantId: string, direction: -1 | 1) => Promise<void>;
+  stopRoom: (roomId: string) => Promise<void>;
   sendMessage: (args: SendMessageArgs) => Promise<void>;
   clearAllWorkspace: () => Promise<void>;
   clearAgentConsole: (agentId: RoomAgentId) => void;
@@ -371,6 +359,10 @@ function mergeAgentTurns(...turnGroups: AgentRoomTurn[][]): AgentRoomTurn[] {
   return sortAgentTurnsByUserMessageTime([...turnsById.values()]);
 }
 
+function dedupeAgentTurns(turns: AgentRoomTurn[]): AgentRoomTurn[] {
+  return mergeAgentTurns(turns);
+}
+
 function getRoomIndexTitle(index: number): string {
   return `Room ${index}`;
 }
@@ -382,10 +374,6 @@ function getSuggestedRoomTitle(content: string): string {
   }
 
   return normalized.length > 30 ? `${normalized.slice(0, 30).trim()}...` : normalized;
-}
-
-function shouldAutoTitleRoom(room: RoomSession): boolean {
-  return /^Room \d+$/.test(room.title) && room.roomMessages.length === 0 && room.agentTurns.length === 0;
 }
 
 function formatReceiptSummary(receipts: RoomMessageReceipt[]): string {
@@ -835,7 +823,97 @@ function normalizeTurnTimelineEvent(value: unknown, index: number): NonNullable<
     };
   }
 
+  if (value.type === "draft-segment" && typeof value.segmentId === "string" && value.segmentId) {
+    return {
+      id,
+      sequence,
+      type: "draft-segment",
+      segmentId: value.segmentId,
+    };
+  }
+
   return null;
+}
+
+function appendTimelineEvent(turn: AgentRoomTurn, event: NonNullable<AgentRoomTurn["timeline"]>[number]): AgentRoomTurn {
+  if ((turn.timeline ?? []).some((entry) => entry.id === event.id)) {
+    return turn;
+  }
+
+  return {
+    ...turn,
+    timeline: [...(turn.timeline ?? []), event],
+  };
+}
+
+function appendDraftDelta(turn: AgentRoomTurn, delta: string): AgentRoomTurn {
+  const draftSegments = turn.draftSegments ?? [];
+  const lastSegment = draftSegments[draftSegments.length - 1];
+  if (lastSegment && lastSegment.status === "streaming") {
+    const nextDraftSegments = [...draftSegments];
+    nextDraftSegments[nextDraftSegments.length - 1] = {
+      ...lastSegment,
+      content: `${lastSegment.content}${delta}`,
+    };
+    return {
+      ...turn,
+      assistantContent: `${turn.assistantContent}${delta}`,
+      draftSegments: nextDraftSegments,
+    };
+  }
+
+  const segment = {
+    id: createUuid(),
+    sequence: (turn.timeline?.length ?? 0) + 1,
+    content: delta,
+    status: "streaming" as const,
+  };
+  return {
+    ...appendTimelineEvent(turn, {
+      id: `draft-segment:${segment.id}`,
+      sequence: segment.sequence,
+      type: "draft-segment",
+      segmentId: segment.id,
+    }),
+    assistantContent: `${turn.assistantContent}${delta}`,
+    draftSegments: [...draftSegments, segment],
+  };
+}
+
+function finalizeLatestDraftSegment(turn: AgentRoomTurn): AgentRoomTurn {
+  const draftSegments = turn.draftSegments ?? [];
+  const lastSegment = draftSegments[draftSegments.length - 1];
+  if (!lastSegment || lastSegment.status !== "streaming") {
+    return turn;
+  }
+
+  const nextDraftSegments = [...draftSegments];
+  nextDraftSegments[nextDraftSegments.length - 1] = {
+    ...lastSegment,
+    status: "completed",
+  };
+  return {
+    ...turn,
+    draftSegments: nextDraftSegments,
+  };
+}
+
+function normalizeDraftTextSegment(value: unknown, index: number): NonNullable<AgentRoomTurn["draftSegments"]>[number] | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = typeof value.id === "string" && value.id ? value.id : createUuid();
+  const sequence = typeof value.sequence === "number" && Number.isFinite(value.sequence) ? Math.max(1, Math.round(value.sequence)) : index + 1;
+  const content = typeof value.content === "string" ? value.content : "";
+  const status = value.status === "streaming" ? "streaming" : "completed";
+
+  return {
+    id,
+    sequence,
+    content,
+    status,
+  };
 }
 
 function normalizeCompatibility(value: unknown): ProviderCompatibility | null {
@@ -961,6 +1039,11 @@ function normalizeAssistantHistoryToolCallPart(value: unknown) {
     id: value.id,
     name: value.name,
     arguments: isRecord(value.arguments) ? value.arguments : {},
+    ...(typeof value.partialJson === "string" && value.partialJson
+      ? {
+          partialJson: value.partialJson,
+        }
+      : {}),
     ...(typeof value.thoughtSignature === "string" && value.thoughtSignature
       ? {
           thoughtSignature: value.thoughtSignature,
@@ -1371,6 +1454,12 @@ function normalizeAgentTurn(value: unknown, fallbackAgentId: RoomAgentId): Agent
         .filter((event): event is NonNullable<AgentRoomTurn["timeline"]>[number] => Boolean(event))
         .sort((left, right) => left.sequence - right.sequence)
     : [];
+  const draftSegments = Array.isArray(value.draftSegments)
+    ? value.draftSegments
+        .map((segment, index) => normalizeDraftTextSegment(segment, index))
+        .filter((segment): segment is NonNullable<AgentRoomTurn["draftSegments"]>[number] => Boolean(segment))
+        .sort((left, right) => left.sequence - right.sequence)
+    : [];
 
   return {
     id: typeof value.id === "string" && value.id ? value.id : createUuid(),
@@ -1402,6 +1491,11 @@ function normalizeAgentTurn(value: unknown, fallbackAgentId: RoomAgentId): Agent
         }
       : {}),
     assistantContent: typeof value.assistantContent === "string" ? value.assistantContent : "",
+    ...(draftSegments.length > 0
+      ? {
+          draftSegments,
+        }
+      : {}),
     ...(timeline.length > 0
       ? {
           timeline,
@@ -1445,7 +1539,10 @@ function normalizeSettings(value: unknown): ChatSettings {
       value.providerMode === "auto"
         ? value.providerMode
         : "auto",
-    maxToolLoopSteps: coerceMaxToolLoopSteps(value.maxToolLoopSteps),
+    maxToolLoopSteps:
+      value.maxToolLoopSteps === LEGACY_DEFAULT_MAX_TOOL_LOOP_STEPS
+        ? DEFAULT_MAX_TOOL_LOOP_STEPS
+        : coerceMaxToolLoopSteps(value.maxToolLoopSteps),
     thinkingLevel: coerceThinkingLevel(value.thinkingLevel),
     enabledSkillIds: coerceSkillIds(value.enabledSkillIds),
   };
@@ -1523,7 +1620,7 @@ function normalizeRoomSession(value: unknown, index: number): RoomSession | null
     participants,
     scheduler,
     roomMessages: normalizedRoomMessages,
-    agentTurns,
+    agentTurns: dedupeAgentTurns(agentTurns),
     error: typeof value.error === "string" ? value.error : "",
     createdAt: typeof value.createdAt === "string" && value.createdAt ? value.createdAt : createTimestamp(),
     updatedAt: typeof value.updatedAt === "string" && value.updatedAt ? value.updatedAt : createTimestamp(),
@@ -1543,7 +1640,7 @@ function normalizeAgentSharedState(agentId: RoomAgentId, value: unknown): AgentS
 
   return createAgentSharedState({
     settings: normalizeSettings(value.settings),
-    agentTurns,
+    agentTurns: dedupeAgentTurns(agentTurns),
     resolvedModel: typeof value.resolvedModel === "string" ? value.resolvedModel : "",
     compatibility: normalizeCompatibility(value.compatibility),
     updatedAt: typeof value.updatedAt === "string" && value.updatedAt ? value.updatedAt : createTimestamp(),
@@ -1746,12 +1843,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaceVersion, setWorkspaceVersion] = useState(0);
   const [selectedSenderByRoomId, setSelectedSenderByRoomId] = useState<Record<string, string>>({});
   const [draftsByRoomId, setDraftsByRoomId] = useState<Record<string, string>>({});
-  const [runningAgentRequestIds, setRunningAgentRequestIds] = useState<Record<string, string>>({});
+  const [pendingRoomCommandIds, setPendingRoomCommandIds] = useState<Record<string, boolean>>({});
+  const [streamingAgentIdsByRoomId, setStreamingAgentIdsByRoomId] = useState<Record<string, RoomAgentId>>({});
   const [resettingAgentContextIds, setResettingAgentContextIds] = useState<Record<string, boolean>>({});
   const [compactingAgentContextIds, setCompactingAgentContextIds] = useState<Record<string, boolean>>({});
   const [hydrated, setHydrated] = useState(false);
-  const activeRunsRef = useRef<Record<string, ActiveRoomRun>>({});
-  const activeSchedulerRunsRef = useRef<Record<string, ActiveSchedulerRun>>({});
   const agentsRef = useRef<RoomAgentDefinition[]>(ROOM_AGENTS);
   const roomsRef = useRef<RoomSession[]>([]);
   const agentStatesRef = useRef<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates(ROOM_AGENTS));
@@ -1763,7 +1859,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const pendingWorkspacePersistRef = useRef<RoomWorkspaceState | null>(null);
   const workspacePersistInFlightRef = useRef(false);
   const workspacePersistNonceRef = useRef(0);
-  const maybeStartSchedulerForRoomMessageRef = useRef<(roomId: string, message: RoomMessage) => void>(() => undefined);
+  const activeRoomStreamRequestIdsRef = useRef<Record<string, string>>({});
+  const activeRoomStreamControllersRef = useRef<Record<string, AbortController>>({});
 
   const applyWorkspaceSnapshot = useCallback(
     (
@@ -1776,7 +1873,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (options?.skipServerPersist) {
         skipNextServerPersistRef.current = true;
       }
-      const nextRooms = snapshot.rooms.length > 0 ? snapshot.rooms : [createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current)];
+      const nextRooms = (snapshot.rooms.length > 0 ? snapshot.rooms : [createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current)]).map((room) => ({
+        ...room,
+        roomMessages: dedupeRoomMessages(room.roomMessages),
+      }));
       const nextAgentStates = ensureAgentStateMap(snapshot.agentStates, agentsRef.current, nextRooms);
       const nextActiveRoomId =
         snapshot.activeRoomId && nextRooms.some((room) => room.id === snapshot.activeRoomId)
@@ -1786,6 +1886,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
       roomsRef.current = nextRooms;
       agentStatesRef.current = nextAgentStates;
+      activeRoomIdRef.current = nextActiveRoomId;
+      selectedConsoleAgentIdRef.current = nextSelectedConsoleAgentId;
       workspaceVersionRef.current = version;
       setRooms(nextRooms);
       setAgentStates(nextAgentStates);
@@ -1797,6 +1899,88 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     },
     [],
   );
+
+  const applyWorkspaceEnvelope = useCallback(
+    (envelope: { version?: number; state?: RoomWorkspaceState } | null | undefined) => {
+      if (!envelope?.state || typeof envelope.version !== "number") {
+        throw new Error("Room command did not return a valid workspace snapshot.");
+      }
+
+      applyWorkspaceSnapshot(envelope.state, envelope.version, { skipServerPersist: true });
+      return envelope.state;
+    },
+    [applyWorkspaceSnapshot],
+  );
+
+  const applyWorkspaceStreamEvent = useCallback(
+    (event: WorkspaceStreamEvent) => {
+      if (event.type === "snapshot") {
+        applyWorkspaceSnapshot(event.state, event.version, { skipServerPersist: true });
+        return;
+      }
+
+      const baseState: RoomWorkspaceState = {
+        rooms: roomsRef.current,
+        agentStates: agentStatesRef.current,
+        activeRoomId: activeRoomIdRef.current,
+        ...(selectedConsoleAgentIdRef.current
+          ? {
+              selectedConsoleAgentId: selectedConsoleAgentIdRef.current,
+            }
+          : {}),
+      };
+      const nextState = applyWorkspaceStatePatch(baseState, event.patch);
+      applyWorkspaceSnapshot(nextState, event.version, { skipServerPersist: true });
+    },
+    [applyWorkspaceSnapshot],
+  );
+
+  const runRoomCommandRequest = useCallback(
+    async (
+      payload: Record<string, unknown>,
+      options?: {
+        pendingRoomId?: string;
+      },
+    ) => {
+      if (options?.pendingRoomId) {
+        setPendingRoomCommandIds((current) => ({
+          ...current,
+          [options.pendingRoomId as string]: true,
+        }));
+      }
+
+      try {
+        const response = await postRoomCommand(payload);
+        if (!response?.ok) {
+          throw new Error(response?.error ?? "Room command failed.");
+        }
+
+        return applyWorkspaceEnvelope(response.envelope);
+      } finally {
+        if (options?.pendingRoomId) {
+          setPendingRoomCommandIds((current) => {
+            const nextState = { ...current };
+            delete nextState[options.pendingRoomId as string];
+            return nextState;
+          });
+        }
+      }
+    },
+    [applyWorkspaceEnvelope],
+  );
+
+  const refreshWorkspaceFromServer = useCallback(async () => {
+    const payload = await fetchWorkspaceEnvelope();
+    if (typeof payload?.version !== "number" || !payload.state) {
+      return null;
+    }
+
+    if (payload.version >= workspaceVersionRef.current) {
+      applyWorkspaceSnapshot(payload.state, payload.version, { skipServerPersist: true });
+    }
+
+    return payload;
+  }, [applyWorkspaceSnapshot]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1983,7 +2167,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           && !localPersistStillQueued
           && typeof conflictVersion === "number"
           && conflictState
-          && Object.keys(activeRunsRef.current).length === 0
+          && canApplyConflictWorkspaceSnapshot({
+            localState: latestSnapshot,
+            conflictState,
+          })
         ) {
           applyWorkspaceSnapshot(conflictState, conflictVersion, {
             skipServerPersist: true,
@@ -2038,36 +2225,26 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const interval = setInterval(() => {
-      if (Object.keys(activeRunsRef.current).length > 0) {
-        return;
-      }
-
-      void (async () => {
-        const payload = await fetchWorkspaceEnvelope();
-        if (
-          typeof payload?.version === "number"
-          && payload.version > workspaceVersionRef.current
-          && payload.state
-        ) {
-          applyWorkspaceSnapshot(payload.state, payload.version, { skipServerPersist: true });
+    const workspaceEvents = new EventSource("/api/workspace/stream");
+    workspaceEvents.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as WorkspaceStreamEvent;
+        if (typeof payload.version === "number" && payload.version > workspaceVersionRef.current) {
+          applyWorkspaceStreamEvent(payload);
         }
-      })();
-    }, 15_000);
+      } catch {
+        // Ignore malformed SSE payloads and wait for the next envelope.
+      }
+    };
+
+    workspaceEvents.onerror = () => {
+      void refreshWorkspaceFromServer();
+    };
 
     return () => {
-      clearInterval(interval);
+      workspaceEvents.close();
     };
-  }, [applyWorkspaceSnapshot, hydrated]);
-
-  useEffect(
-    () => () => {
-      Object.values(activeRunsRef.current).forEach((run) => run.controller.abort());
-      activeRunsRef.current = {};
-      activeSchedulerRunsRef.current = {};
-    },
-    [],
-  );
+  }, [applyWorkspaceStreamEvent, hydrated, refreshWorkspaceFromServer]);
 
   useEffect(() => {
     roomsRef.current = rooms;
@@ -2077,51 +2254,22 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     agentStatesRef.current = agentStates;
   }, [agentStates]);
 
-  const replaceRooms = useCallback((nextRooms: RoomSession[]) => {
-    roomsRef.current = nextRooms;
-    setRooms(nextRooms);
-  }, []);
+  useEffect(() => {
+    activeRoomIdRef.current = activeRoomId;
+  }, [activeRoomId]);
 
   useEffect(() => {
-    if (!hydrated) {
-      return;
-    }
+    selectedConsoleAgentIdRef.current = selectedConsoleAgentId ?? null;
+  }, [selectedConsoleAgentId]);
 
-    const staleRunningRoomIds = roomsRef.current
-      .filter((room) => room.scheduler.status === "running" && !activeSchedulerRunsRef.current[room.id])
-      .map((room) => room.id);
-
-    if (staleRunningRoomIds.length === 0) {
-      return;
-    }
-
-    const staleRunningRoomIdSet = new Set(staleRunningRoomIds);
-    replaceRooms(
-      sortRoomsByUpdatedAt(
-        roomsRef.current.map((room) =>
-          staleRunningRoomIdSet.has(room.id)
-            ? {
-                ...room,
-                scheduler: {
-                  ...room.scheduler,
-                  status: "idle",
-                  activeParticipantId: null,
-                  roundCount: 0,
-                },
-                updatedAt: createTimestamp(),
-              }
-            : room,
-        ),
-      ),
-    );
-  }, [hydrated, replaceRooms, rooms]);
-
-  const updateRoomState = useCallback(
-    (roomId: string, updater: (room: RoomSession) => RoomSession) => {
-      replaceRooms(sortRoomsByUpdatedAt(roomsRef.current.map((room) => (room.id === roomId ? updater(room) : room))));
-    },
-    [replaceRooms],
-  );
+  useEffect(() => {
+    return () => {
+      for (const controller of Object.values(activeRoomStreamControllersRef.current)) {
+        controller.abort();
+      }
+      activeRoomStreamControllersRef.current = {};
+    };
+  }, []);
 
   const updateAgentState = useCallback((agentId: RoomAgentId, updater: (state: AgentSharedState) => AgentSharedState) => {
     setAgentStates((current) => {
@@ -2134,59 +2282,70 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const updateAgentTurns = useCallback(
-    (agentId: RoomAgentId, updater: (turns: AgentRoomTurn[]) => AgentRoomTurn[]) => {
-      updateAgentState(agentId, (state) => ({
-        ...state,
-        agentTurns: sortAgentTurnsByUserMessageTime(updater(state.agentTurns)),
-        updatedAt: createTimestamp(),
-      }));
+  const updateRoomStateEphemeral = useCallback(
+    (roomId: string, updater: (room: RoomSession) => RoomSession) => {
+      skipNextServerPersistRef.current = true;
+      setRooms((current) => {
+        const nextRooms = current.map((room) => (room.id === roomId ? updater(room) : room)).map((room) => ({
+          ...room,
+          roomMessages: dedupeRoomMessages(room.roomMessages),
+        }));
+        roomsRef.current = nextRooms;
+        return nextRooms;
+      });
     },
-    [updateAgentState],
+    [],
   );
 
-  const applyReceiptUpdateToTurns = useCallback((turns: AgentRoomTurn[], update: RoomMessageReceiptUpdate): AgentRoomTurn[] => {
-    let changed = false;
-    const nextTurns = turns.map((turn) => {
-      if (turn.userMessage.id !== update.messageId) {
-        return turn;
-      }
+  const updateAgentTurnsEphemeral = useCallback(
+    (agentId: RoomAgentId, updater: (turns: AgentRoomTurn[]) => AgentRoomTurn[]) => {
+      skipNextServerPersistRef.current = true;
+      setAgentStates((current) => {
+        const state = current[agentId] ?? createAgentSharedState();
+        const nextState = {
+          ...current,
+          [agentId]: {
+            ...state,
+            agentTurns: sortAgentTurnsByUserMessageTime(updater(state.agentTurns)),
+            updatedAt: createTimestamp(),
+          },
+        };
+        agentStatesRef.current = nextState;
+        return nextState;
+      });
+    },
+    [],
+  );
 
-      const receipts = upsertRoomMessageReceipt(turn.userMessage.receipts, update.receipt);
-      changed = true;
-      return {
-        ...turn,
-        userMessage: {
-          ...turn.userMessage,
-          receipts,
-          receiptStatus: getReceiptStatus(receipts),
-          receiptUpdatedAt: getReceiptUpdatedAt(receipts),
-        },
-      };
-    });
-
-    return changed ? nextTurns : turns;
-  }, []);
-
-  const applyReceiptUpdateToAllAgentConsoles = useCallback(
+  const applyReceiptUpdateToAllAgentConsolesEphemeral = useCallback(
     (update: RoomMessageReceiptUpdate) => {
+      skipNextServerPersistRef.current = true;
       setAgentStates((current) => {
         let changed = false;
         const nextState = { ...current };
 
         for (const agentId of Object.keys(current) as RoomAgentId[]) {
           const state = current[agentId];
-          const nextTurns = applyReceiptUpdateToTurns(state.agentTurns, update);
-          if (nextTurns === state.agentTurns) {
-            continue;
-          }
+          const nextTurns = state.agentTurns.map((turn) => {
+            if (turn.userMessage.id !== update.messageId) {
+              return turn;
+            }
 
-          changed = true;
-          nextState[agentId] = {
-            ...state,
-            agentTurns: sortAgentTurnsByUserMessageTime(nextTurns),
-            updatedAt: createTimestamp(),
-          };
+            changed = true;
+            const nextMessages = applyMessageReceiptUpdate([turn.userMessage], update);
+            return {
+              ...turn,
+              userMessage: nextMessages[0] ?? turn.userMessage,
+            };
+          });
+
+          if (nextTurns !== state.agentTurns) {
+            nextState[agentId] = {
+              ...state,
+              agentTurns: sortAgentTurnsByUserMessageTime(nextTurns),
+              updatedAt: createTimestamp(),
+            };
+          }
         }
 
         if (changed) {
@@ -2197,13 +2356,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return current;
       });
     },
-    [applyReceiptUpdateToTurns],
-  );
-
-  const reduceRoomManagementActions = useCallback(
-    (currentRooms: RoomSession[], actions: RoomToolActionUnion[], actorAgentId: RoomAgentId): RoomSession[] => {
-      return reduceSharedRoomManagementActions(currentRooms, actions, actorAgentId, agentsRef.current);
-    },
     [],
   );
 
@@ -2211,94 +2363,32 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return getRoomAgent(agentId, agentsRef.current);
   }, []);
 
-  const applyRoomToolActions = useCallback(
-    (actions: RoomToolActionUnion[], actorAgentId: RoomAgentId) => {
-      if (actions.length === 0) {
-        return;
-      }
-
-      const nextRooms = reduceRoomManagementActions(roomsRef.current, actions, actorAgentId);
-      if (nextRooms === roomsRef.current) {
-        return;
-      }
-
-      replaceRooms(sortRoomsByUpdatedAt(nextRooms));
-    },
-    [reduceRoomManagementActions, replaceRooms],
-  );
-
-  const getAttachedRoomsForAgent = useCallback((agentId: RoomAgentId, currentRoomId: string, currentRoomTitle: string) => {
-    return getActiveRooms(roomsRef.current)
-      .filter((room) => room.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === agentId))
-      .map((room) => {
-        const attachedRoom = createAttachedRoomDefinition(room, agentId);
-        return room.id === currentRoomId
-          ? {
-              ...attachedRoom,
-              title: currentRoomTitle,
-            }
-          : attachedRoom;
-      });
-  }, []);
-
-  const getKnownAgentsForToolContext = useCallback((): AgentInfoCard[] => {
-    return createKnownAgentCards(agentsRef.current);
-  }, []);
-
-  const getRoomHistoryByIdForAgent = useCallback((agentId: RoomAgentId): Record<string, RoomHistoryMessageSummary[]> => {
-    return Object.fromEntries(
-      getActiveRooms(roomsRef.current)
-        .filter((room) => room.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === agentId))
-        .map((room) => [room.id, createRoomHistorySummary(room)]),
-    );
-  }, []);
-
-  const { executeAgentTurn, clearAllActiveRuns } = useRoomExecution({
-    roomsRef,
-    agentStatesRef,
-    activeRunsRef,
-    activeSchedulerRunsRef,
-    setRunningAgentRequestIds,
-    updateAgentTurns,
-    updateRoomState,
-    updateAgentState,
-    applyReceiptUpdateToAllAgentConsoles,
-    applyRoomToolActions,
-    getAgentDefinition,
-    getAttachedRoomsForAgent,
-    getKnownAgentsForToolContext,
-    getRoomHistoryByIdForAgent,
-    maybeStartSchedulerForRoomMessage: (roomId, message) => maybeStartSchedulerForRoomMessageRef.current(roomId, message),
-    mergeAgentTurns,
-    normalizeAssistantMeta,
-  });
-
-  const {
-    interruptRoomScheduler,
-    maybeStartSchedulerForRoomMessage,
-    roomHasRunningAgent,
-    runRoomScheduler,
-    clearAllSchedulerRuns,
-  } = useRoomScheduler({
-    roomsRef,
-    activeRunsRef,
-    activeSchedulerRunsRef,
-    updateRoomState,
-    executeAgentTurn,
-    defaultAgentId: DEFAULT_AGENT_ID,
-    maxRounds: ROOM_LOOP_MAX_ROUNDS,
-  });
-
-  useEffect(() => {
-    maybeStartSchedulerForRoomMessageRef.current = maybeStartSchedulerForRoomMessage;
-  }, [maybeStartSchedulerForRoomMessage]);
-
   const activeRooms = useMemo(() => getActiveRooms(rooms), [rooms]);
   const archivedRooms = useMemo(() => getArchivedRooms(rooms), [rooms]);
   const activeRoom = useMemo(
     () => activeRooms.find((room) => room.id === activeRoomId) ?? activeRooms[0] ?? null,
     [activeRoomId, activeRooms],
   );
+  const runningAgentRequestIds = useMemo(() => {
+    const nextState: Record<string, string> = {};
+
+    for (const room of rooms) {
+      if (room.scheduler.status !== "running") {
+        continue;
+      }
+
+      const activeParticipant = room.participants.find((participant) => participant.id === room.scheduler.activeParticipantId);
+      if (activeParticipant?.agentId) {
+        nextState[activeParticipant.agentId] = room.id;
+      }
+    }
+
+    for (const [roomId, agentId] of Object.entries(streamingAgentIdsByRoomId)) {
+      nextState[agentId] = roomId;
+    }
+
+    return nextState;
+  }, [rooms, streamingAgentIdsByRoomId]);
 
   useEffect(() => {
     if (selectedConsoleAgentId === null && activeRoom) {
@@ -2329,206 +2419,167 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const createRoom = useCallback(
-    (agentId: RoomAgentId = DEFAULT_AGENT_ID) => {
+    async (agentId: RoomAgentId = DEFAULT_AGENT_ID) => {
       const resolvedAgentId = agentsRef.current.some((agent) => agent.id === agentId) ? agentId : (agentsRef.current[0]?.id ?? DEFAULT_AGENT_ID);
-      const nextRoom = createRoomSession(getNextRoomIndex(roomsRef.current), resolvedAgentId, agentsRef.current);
-      replaceRooms(sortRoomsByUpdatedAt([nextRoom, ...roomsRef.current]));
-      setActiveRoomId(nextRoom.id);
-      setSelectedSenderByRoomId((current) => ({
-        ...current,
-        [nextRoom.id]: DEFAULT_LOCAL_PARTICIPANT_ID,
-      }));
+      const snapshot = await runRoomCommandRequest({
+        type: "create_room",
+        agentId: resolvedAgentId,
+      });
+      const nextRoom = snapshot.rooms[0] ?? null;
+      if (nextRoom) {
+        setActiveRoomId(nextRoom.id);
+        setSelectedConsoleAgentId(getPrimaryRoomAgentId(nextRoom));
+        setSelectedSenderByRoomId((current) => ({
+          ...current,
+          [nextRoom.id]: DEFAULT_LOCAL_PARTICIPANT_ID,
+        }));
+      }
       return nextRoom;
     },
-    [replaceRooms],
+    [runRoomCommandRequest],
   );
 
   const renameRoom = useCallback(
-    (roomId: string, title: string) => {
+    async (roomId: string, title: string) => {
       const normalizedTitle = title.trim();
       if (!normalizedTitle) {
         return;
       }
 
-      replaceRooms(
-        sortRoomsByUpdatedAt(
-          roomsRef.current.map((room) =>
-            room.id === roomId
-              ? {
-                  ...room,
-                  title: normalizedTitle,
-                  updatedAt: createTimestamp(),
-                }
-              : room,
-          ),
-        ),
-      );
+      await runRoomCommandRequest({
+        type: "rename_room",
+        roomId,
+        title: normalizedTitle,
+      }, { pendingRoomId: roomId });
     },
-    [replaceRooms],
+    [runRoomCommandRequest],
   );
 
   const archiveRoom = useCallback(
-    (roomId: string) => {
-      const targetRoom = roomsRef.current.find((room) => room.id === roomId);
-      if (!targetRoom || roomHasRunningAgent(targetRoom)) {
-        return;
-      }
-
+    async (roomId: string) => {
+      await runRoomCommandRequest({
+        type: "archive_room",
+        roomId,
+      }, { pendingRoomId: roomId });
       clearDraftForRoom(roomId);
-      replaceRooms(
-        sortRoomsByUpdatedAt(
-          roomsRef.current.map((room) =>
-            room.id === roomId
-              ? {
-                  ...room,
-                  archivedAt: createTimestamp(),
-                  updatedAt: createTimestamp(),
-                }
-              : room,
-          ),
-        ),
-      );
     },
-    [clearDraftForRoom, replaceRooms, roomHasRunningAgent],
+    [clearDraftForRoom, runRoomCommandRequest],
   );
 
   const restoreRoom = useCallback(
-    (roomId: string) => {
-      const targetRoom = roomsRef.current.find((room) => room.id === roomId);
-      if (!targetRoom || roomHasRunningAgent(targetRoom)) {
-        return;
-      }
-
-      replaceRooms(
-        sortRoomsByUpdatedAt(
-          roomsRef.current.map((room) =>
-            room.id === roomId
-              ? {
-                  ...room,
-                  archivedAt: null,
-                  updatedAt: createTimestamp(),
-                }
-              : room,
-          ),
-        ),
-      );
+    async (roomId: string) => {
+      await runRoomCommandRequest({
+        type: "restore_room",
+        roomId,
+      }, { pendingRoomId: roomId });
       setActiveRoomId(roomId);
     },
-    [replaceRooms, roomHasRunningAgent],
+    [runRoomCommandRequest],
   );
 
   const deleteRoom = useCallback(
-    (roomId: string) => {
-      const targetRoom = roomsRef.current.find((room) => room.id === roomId);
-      if (!targetRoom || roomHasRunningAgent(targetRoom)) {
-        return;
-      }
-
+    async (roomId: string) => {
+      await runRoomCommandRequest({
+        type: "delete_room",
+        roomId,
+      }, { pendingRoomId: roomId });
       clearDraftForRoom(roomId);
       setSelectedSenderByRoomId((current) => {
         const nextState = { ...current };
         delete nextState[roomId];
         return nextState;
       });
-      replaceRooms(sortRoomsByUpdatedAt(roomsRef.current.filter((room) => room.id !== roomId)));
     },
-    [clearDraftForRoom, replaceRooms, roomHasRunningAgent],
+    [clearDraftForRoom, runRoomCommandRequest],
   );
 
   const clearRoom = useCallback(
-    (roomId: string) => {
-      const room = roomsRef.current.find((entry) => entry.id === roomId);
-      if (!room || roomHasRunningAgent(room)) {
-        return;
-      }
-
+    async (roomId: string) => {
+      await runRoomCommandRequest({
+        type: "clear_room",
+        roomId,
+      }, { pendingRoomId: roomId });
       clearDraftForRoom(roomId);
-      updateRoomState(roomId, (currentRoom) => ({
-        ...currentRoom,
-        roomMessages: [],
-        receiptRevision: 0,
-        scheduler: {
-          ...currentRoom.scheduler,
-          status: "idle",
-          activeParticipantId: null,
-          roundCount: 0,
-          agentCursorByParticipantId: {},
-          agentReceiptRevisionByParticipantId: {},
-        },
-        error: "",
-        updatedAt: createTimestamp(),
-      }));
     },
-    [clearDraftForRoom, roomHasRunningAgent, updateRoomState],
+    [clearDraftForRoom, runRoomCommandRequest],
   );
 
   const addHumanParticipant = useCallback(
-    (roomId: string, name: string) => {
+    async (roomId: string, name: string) => {
       const normalizedName = name.trim();
-      const room = roomsRef.current.find((entry) => entry.id === roomId);
-      if (!room || roomHasRunningAgent(room) || !normalizedName) {
+      if (!normalizedName) {
         return;
       }
 
-      updateRoomState(roomId, (currentRoom) => {
-        return addHumanParticipantToRoom({
-          room: currentRoom,
-          name: normalizedName,
-          createParticipantId,
-        });
-      });
+      await runRoomCommandRequest({
+        type: "add_human_participant",
+        roomId,
+        name: normalizedName,
+      }, { pendingRoomId: roomId });
     },
-    [roomHasRunningAgent, updateRoomState],
+    [runRoomCommandRequest],
   );
 
   const addAgentParticipant = useCallback(
-    (roomId: string, agentId: RoomAgentId) => {
-      const room = roomsRef.current.find((entry) => entry.id === roomId);
-      if (!room || roomHasRunningAgent(room)) {
-        return;
-      }
-
-      updateRoomState(roomId, (currentRoom) => {
-        return addAgentParticipantToRoom({ room: currentRoom, agentId, agentDefinitions: agentsRef.current });
-      });
+    async (roomId: string, agentId: RoomAgentId) => {
+      await runRoomCommandRequest({
+        type: "add_agent_participant",
+        roomId,
+        agentId,
+      }, { pendingRoomId: roomId });
     },
-    [roomHasRunningAgent, updateRoomState],
+    [runRoomCommandRequest],
   );
 
   const removeParticipant = useCallback(
-    (roomId: string, participantId: string) => {
-      const room = roomsRef.current.find((entry) => entry.id === roomId);
-      if (!room || roomHasRunningAgent(room)) {
-        return;
-      }
-
-      updateRoomState(roomId, (currentRoom) => removeParticipantFromRoom({ room: currentRoom, participantId }));
+    async (roomId: string, participantId: string) => {
+      await runRoomCommandRequest({
+        type: "remove_participant",
+        roomId,
+        participantId,
+      }, { pendingRoomId: roomId });
     },
-    [roomHasRunningAgent, updateRoomState],
+    [runRoomCommandRequest],
   );
 
   const toggleAgentParticipant = useCallback(
-    (roomId: string, participantId: string) => {
-      const room = roomsRef.current.find((entry) => entry.id === roomId);
-      if (!room || roomHasRunningAgent(room)) {
-        return;
-      }
-
-      updateRoomState(roomId, (currentRoom) => toggleAgentParticipantInRoom({ room: currentRoom, participantId }));
+    async (roomId: string, participantId: string) => {
+      await runRoomCommandRequest({
+        type: "toggle_agent_participant",
+        roomId,
+        participantId,
+      }, { pendingRoomId: roomId });
     },
-    [roomHasRunningAgent, updateRoomState],
+    [runRoomCommandRequest],
   );
 
   const moveAgentParticipant = useCallback(
-    (roomId: string, participantId: string, direction: -1 | 1) => {
-      const room = roomsRef.current.find((entry) => entry.id === roomId);
-      if (!room || roomHasRunningAgent(room)) {
-        return;
-      }
-
-      updateRoomState(roomId, (currentRoom) => moveAgentParticipantInRoom({ room: currentRoom, participantId, direction }));
+    async (roomId: string, participantId: string, direction: -1 | 1) => {
+      await runRoomCommandRequest({
+        type: "move_agent_participant",
+        roomId,
+        participantId,
+        direction,
+      }, { pendingRoomId: roomId });
     },
-    [roomHasRunningAgent, updateRoomState],
+    [runRoomCommandRequest],
+  );
+
+  const stopRoom = useCallback(
+    async (roomId: string) => {
+      activeRoomStreamControllersRef.current[roomId]?.abort();
+      delete activeRoomStreamRequestIdsRef.current[roomId];
+      setStreamingAgentIdsByRoomId((current) => {
+        const nextState = { ...current };
+        delete nextState[roomId];
+        return nextState;
+      });
+      await runRoomCommandRequest({
+        type: "stop_room",
+        roomId,
+      }, { pendingRoomId: roomId });
+    },
+    [runRoomCommandRequest],
   );
 
   const sendMessage = useCallback(
@@ -2543,32 +2594,221 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const sender = resolveRoomMessageSender({
-        room: roomSnapshot,
-        senderId,
-        defaultLocalParticipantId: DEFAULT_LOCAL_PARTICIPANT_ID,
-        defaultLocalParticipantName: LOCAL_PARTICIPANT_SENDER.name,
-      });
-      if (!sender) {
-        return;
-      }
-
-      const nextTitle = shouldAutoTitleRoom(roomSnapshot) ? getSuggestedRoomTitle(normalizedContent) || roomSnapshot.title : roomSnapshot.title;
-
       setActiveRoomId(roomId);
-      setSelectedSender(roomId, sender.id);
-      interruptRoomScheduler(roomId);
-      updateRoomState(roomId, (room) => applyOutgoingUserMessage({ room, content: normalizedContent, attachments, sender, nextTitle }));
-      clearDraftForRoom(roomId);
-      await runRoomScheduler(roomId);
+      setSelectedSender(roomId, senderId ?? DEFAULT_LOCAL_PARTICIPANT_ID);
+      const localRequestId = createUuid();
+      activeRoomStreamControllersRef.current[roomId]?.abort();
+      const requestController = new AbortController();
+      activeRoomStreamControllersRef.current[roomId] = requestController;
+      activeRoomStreamRequestIdsRef.current[roomId] = localRequestId;
+      setPendingRoomCommandIds((current) => ({
+        ...current,
+        [roomId]: true,
+      }));
+
+      let activeTurnId: string | null = null;
+      let activeTurnAgentId: RoomAgentId | null = null;
+      const previewMessageIds = new Set<string>();
+      const previewMessageRoomIdById = new Map<string, string>();
+
+      try {
+        const response = await fetch("/api/rooms/stream", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          signal: requestController.signal,
+          body: JSON.stringify({
+            roomId,
+            content: normalizedContent,
+            attachments,
+            ...(senderId ? { senderId } : {}),
+          }),
+        });
+
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(payload?.error || "The room stream returned an unknown error.");
+        }
+
+        await readRoomStream({
+          response,
+          shouldContinue: () => activeRoomStreamRequestIdsRef.current[roomId] === localRequestId,
+          onTurnStart: (turn) => {
+            activeTurnId = turn.id;
+            activeTurnAgentId = turn.agent.id;
+            setStreamingAgentIdsByRoomId((current) => ({
+              ...current,
+              [roomId]: turn.agent.id,
+            }));
+            updateAgentTurnsEphemeral(turn.agent.id, (turns) => mergeAgentTurns(turns, [turn]));
+          },
+          onTextDelta: (delta) => {
+            if (!activeTurnId || !activeTurnAgentId) {
+              return;
+            }
+
+            updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
+              turns.map((turn) => (turn.id === activeTurnId ? appendDraftDelta(turn, delta) : turn)),
+            );
+          },
+          onTool: (tool) => {
+            if (!activeTurnId || !activeTurnAgentId) {
+              return;
+            }
+
+            updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
+              turns.map((turn) =>
+                turn.id === activeTurnId
+                  ? {
+                      ...appendTimelineEvent(finalizeLatestDraftSegment(turn), {
+                        id: `tool:${tool.id}`,
+                        sequence: (turn.timeline?.length ?? 0) + 1,
+                        type: "tool",
+                        toolId: tool.id,
+                      }),
+                      tools: [...turn.tools, tool],
+                    }
+                  : turn,
+              ),
+            );
+          },
+          onRoomMessagePreview: (message) => {
+            previewMessageIds.add(message.id);
+            previewMessageRoomIdById.set(message.id, message.roomId);
+            updateRoomStateEphemeral(message.roomId, (room) => upsertMessageToRoom(room, message));
+            if (!activeTurnId || !activeTurnAgentId) {
+              return;
+            }
+
+            updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
+              turns.map((turn) => (turn.id === activeTurnId ? upsertRoomMessageInTurn(turn, message) : turn)),
+            );
+          },
+          onRoomMessage: (message) => {
+            previewMessageIds.delete(message.id);
+            previewMessageRoomIdById.delete(message.id);
+            updateRoomStateEphemeral(message.roomId, (room) => upsertMessageToRoom(room, message));
+            if (!activeTurnId || !activeTurnAgentId) {
+              return;
+            }
+
+            updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
+              turns.map((turn) => (turn.id === activeTurnId ? upsertRoomMessageInTurn(turn, message) : turn)),
+            );
+          },
+          onReceiptUpdate: (update) => {
+            updateRoomStateEphemeral(update.roomId, (room) => {
+              const nextMessages = applyMessageReceiptUpdate(room.roomMessages, update);
+              if (nextMessages === room.roomMessages) {
+                return room;
+              }
+
+              return {
+                ...room,
+                roomMessages: nextMessages,
+                receiptRevision: room.receiptRevision + 1,
+                updatedAt: createTimestamp(),
+              };
+            });
+            applyReceiptUpdateToAllAgentConsolesEphemeral(update);
+          },
+          onDone: (event) => {
+            const finalTurn = event.turn;
+            activeTurnId = finalTurn.id;
+            activeTurnAgentId = finalTurn.agent.id;
+            updateRoomStateEphemeral(roomId, (room) => ({
+              ...room,
+              roomMessages: room.roomMessages.map((message) =>
+                message.id === finalTurn.userMessage.id ? finalTurn.userMessage : message,
+              ),
+              error: "",
+              updatedAt: createTimestamp(),
+            }));
+
+            const finalizedMessageIds = new Set(finalTurn.emittedMessages.map((message) => message.id));
+            for (const previewMessageId of previewMessageIds) {
+              if (finalizedMessageIds.has(previewMessageId)) {
+                continue;
+              }
+
+              const previewRoomId = previewMessageRoomIdById.get(previewMessageId) ?? roomId;
+              updateRoomStateEphemeral(previewRoomId, (room) => ({
+                ...room,
+                roomMessages: room.roomMessages.filter((message) => message.id !== previewMessageId),
+                updatedAt: createTimestamp(),
+              }));
+            }
+
+            updateAgentTurnsEphemeral(finalTurn.agent.id, (turns) => {
+              const existingIndex = turns.findIndex((turn) => turn.id === finalTurn.id);
+              if (existingIndex >= 0) {
+                const nextTurns = [...turns];
+                nextTurns[existingIndex] = finalTurn;
+                return nextTurns;
+              }
+
+              return mergeAgentTurns(turns, [finalTurn]);
+            });
+            updateAgentState(finalTurn.agent.id, (state) => ({
+              ...state,
+              resolvedModel: event.resolvedModel,
+              compatibility: event.compatibility,
+              updatedAt: createTimestamp(),
+            }));
+          },
+          onMeta: (meta) => {
+            const normalizedMeta = normalizeAssistantMeta(meta);
+            if (!normalizedMeta || !activeTurnId || !activeTurnAgentId) {
+              return;
+            }
+
+            updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
+              turns.map((turn) => (turn.id === activeTurnId ? { ...turn, meta: normalizedMeta } : turn)),
+            );
+          },
+        });
+
+        await refreshWorkspaceFromServer();
+        clearDraftForRoom(roomId);
+      } catch (error) {
+        if (requestController.signal.aborted) {
+          return;
+        }
+
+        throw error;
+      } finally {
+        if (activeRoomStreamControllersRef.current[roomId] === requestController) {
+          delete activeRoomStreamControllersRef.current[roomId];
+        }
+        const isCurrentRequest = activeRoomStreamRequestIdsRef.current[roomId] === localRequestId;
+        if (isCurrentRequest) {
+          delete activeRoomStreamRequestIdsRef.current[roomId];
+          setPendingRoomCommandIds((current) => {
+            const nextState = { ...current };
+            delete nextState[roomId];
+            return nextState;
+          });
+          setStreamingAgentIdsByRoomId((current) => {
+            const nextState = { ...current };
+            delete nextState[roomId];
+            return nextState;
+          });
+        }
+      }
     },
-    [clearDraftForRoom, interruptRoomScheduler, runRoomScheduler, setSelectedSender, updateRoomState],
+    [
+      applyReceiptUpdateToAllAgentConsolesEphemeral,
+      clearDraftForRoom,
+      refreshWorkspaceFromServer,
+      setSelectedSender,
+      updateAgentState,
+      updateAgentTurnsEphemeral,
+      updateRoomStateEphemeral,
+    ],
   );
 
   const clearAllWorkspace = useCallback(async () => {
-    clearAllActiveRuns("Workspace reset by operator.");
-    clearAllSchedulerRuns();
-
     const initialRoom = createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current);
     const initialAgentStates = createInitialAgentStates(agentsRef.current);
 
@@ -2598,7 +2838,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }),
       ),
     );
-  }, [clearAllActiveRuns, clearAllSchedulerRuns]);
+  }, []);
 
   const clearAgentConsole = useCallback(
     (agentId: RoomAgentId) => {
@@ -2806,7 +3046,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const isAgentRunning = useCallback(
     (agentId: RoomAgentId) => {
-      return Boolean(runningAgentRequestIds[agentId]);
+      if (runningAgentRequestIds[agentId]) {
+        return true;
+      }
+
+      return roomsRef.current.some((room) => {
+        if (room.scheduler.status !== "running") {
+          return false;
+        }
+
+        const activeParticipant = room.participants.find((participant) => participant.id === room.scheduler.activeParticipantId);
+        return activeParticipant?.agentId === agentId;
+      });
     },
     [runningAgentRequestIds],
   );
@@ -2821,9 +3072,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const isRoomRunning = useCallback(
     (roomId: string) => {
       const room = roomsRef.current.find((entry) => entry.id === roomId);
-      return room ? roomHasRunningAgent(room) : false;
+      return room ? room.scheduler.status === "running" || Boolean(pendingRoomCommandIds[roomId]) : Boolean(pendingRoomCommandIds[roomId]);
     },
-    [roomHasRunningAgent],
+    [pendingRoomCommandIds],
   );
 
   const contextValue = useMemo<WorkspaceContextValue>(
@@ -2862,6 +3113,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       removeParticipant,
       toggleAgentParticipant,
       moveAgentParticipant,
+      stopRoom,
       sendMessage,
       clearAllWorkspace,
       clearAgentConsole,
@@ -2894,6 +3146,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       isAgentCompacting,
       isRoomRunning,
       moveAgentParticipant,
+      stopRoom,
       removeParticipant,
       resetAgentContext,
       renameRoom,

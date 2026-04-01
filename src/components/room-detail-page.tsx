@@ -20,7 +20,8 @@ import {
   useWorkspace,
 } from "@/components/workspace-provider";
 import { RoomCronPanel } from "@/components/room-cron-panel";
-import { buildRoomThreadToolEntries, type RoomThreadToolEntry } from "@/components/workspace/room-thread";
+import { DraftHistoryInline } from "@/components/workspace/draft-history-inline";
+import { buildRoomThreadDraftEntries, buildRoomThreadToolEntries, type RoomThreadDraftEntry, type RoomThreadToolEntry } from "@/components/workspace/room-thread";
 import { ToolHistoryInline } from "@/components/workspace/tool-history-inline";
 import type { AgentRoomTurn, MessageImageAttachment, RoomAgentId, RoomMessage, RoomParticipant } from "@/lib/chat/types";
 
@@ -222,6 +223,14 @@ function getMessageCardClass(message: RoomMessage) {
   return parts.join(" ");
 }
 
+function dedupeTurnsById<T extends { id: string }>(turns: T[]): T[] {
+  const turnsById = new Map<string, T>();
+  for (const turn of turns) {
+    turnsById.set(turn.id, turn);
+  }
+  return [...turnsById.values()];
+}
+
 export function RoomDetailPage({ roomId }: { roomId: string }) {
   const router = useRouter();
   const {
@@ -248,6 +257,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     removeParticipant,
     toggleAgentParticipant,
     moveAgentParticipant,
+    stopRoom,
     isAgentRunning,
     isRoomRunning,
     clearAgentConsole,
@@ -265,6 +275,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const [isUploadingImages, setIsUploadingImages] = useState(false);
   const [titleDraftByRoomId, setTitleDraftByRoomId] = useState<Record<string, string>>({});
   const [showStarterPrompts, setShowStarterPrompts] = useState(false);
+  const [isStoppingRoom, setIsStoppingRoom] = useState(false);
   const threadListRef = useRef<HTMLDivElement | null>(null);
   const workbenchBodyRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
@@ -348,10 +359,23 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
         : new Map<string, RoomThreadToolEntry[]>(),
     [agentStates, room],
   );
+  const roomThreadDraftEntries = useMemo<Map<string, RoomThreadDraftEntry[]>>(
+    () =>
+      room
+        ? buildRoomThreadDraftEntries({
+            roomId: room.id,
+            roomMessages: room.roomMessages,
+            agentStates,
+          })
+        : new Map<string, RoomThreadDraftEntry[]>(),
+    [agentStates, room],
+  );
   const visibleInlineTools = useMemo(() => Array.from(roomThreadToolEntries.values()).flat(), [roomThreadToolEntries]);
+  const visibleInlineDrafts = useMemo(() => Array.from(roomThreadDraftEntries.values()).flat(), [roomThreadDraftEntries]);
   const latestInlineTool = visibleInlineTools.at(-1) ?? null;
+  const latestInlineDraft = visibleInlineDrafts.at(-1) ?? null;
   const threadScrollKey = room
-    ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}:${latestMessage?.attachments.length ?? 0}:${visibleInlineTools.length}:${latestInlineTool?.turn.id ?? ""}:${latestInlineTool?.tool.id ?? ""}:${latestInlineTool?.event.sequence ?? 0}`
+    ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}:${latestMessage?.attachments.length ?? 0}:${visibleInlineTools.length}:${latestInlineTool?.turn.id ?? ""}:${latestInlineTool?.tool.id ?? ""}:${latestInlineTool?.event.sequence ?? 0}:${visibleInlineDrafts.length}:${latestInlineDraft?.turn.id ?? ""}:${latestInlineDraft?.turn.status ?? ""}:${latestInlineDraft?.turn.assistantContent.length ?? 0}`
     : "";
 
   useLayoutEffect(() => {
@@ -465,7 +489,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   }, [roomTurns]);
   const visibleConsoleTurns = useMemo(() => {
     const turns = consoleScope === "room" ? roomTurns : (consoleAgentState?.agentTurns ?? []);
-    return [...turns].sort((left, right) => getSortableTime(left.userMessage.createdAt) - getSortableTime(right.userMessage.createdAt));
+    return [...dedupeTurnsById(turns)].sort((left, right) => getSortableTime(left.userMessage.createdAt) - getSortableTime(right.userMessage.createdAt));
   }, [consoleAgentState?.agentTurns, consoleScope, roomTurns]);
 
   useLayoutEffect(() => {
@@ -790,7 +814,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               <Link href="/settings" className="secondary-button">
                 打开设置
               </Link>
-              <button type="button" className="ghost-button" onClick={() => clearRoom(room.id)} disabled={isRunning}>
+              <button type="button" className="ghost-button" onClick={() => void clearRoom(room.id)} disabled={isRunning}>
                 清空房间
               </button>
             </div>
@@ -802,6 +826,23 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                 <strong>{activeParticipant?.name || getAgentDefinition(primaryAgentId).label} 正在继续处理这条会话</strong>
                 <p>如果你现在发送新消息，会中断当前轮询并接管为新的上下文。</p>
               </div>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  void (async () => {
+                    setIsStoppingRoom(true);
+                    try {
+                      await stopRoom(room.id);
+                    } finally {
+                      setIsStoppingRoom(false);
+                    }
+                  })();
+                }}
+                disabled={isStoppingRoom}
+              >
+                {isStoppingRoom ? "停止中..." : "强制停止当前回复"}
+              </button>
               <span className="thread-live-badge">live</span>
             </div>
           ) : null}
@@ -832,6 +873,11 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                 const shouldShowState = message.role === "assistant" && (message.kind !== "answer" || message.status !== "completed");
                 const isLatestMessage = index === room.roomMessages.length - 1;
                 const inlineToolEntries = roomThreadToolEntries.get(message.id) ?? [];
+                const inlineDraftEntries = roomThreadDraftEntries.get(message.id) ?? [];
+                const inlineArtifacts = [
+                  ...inlineToolEntries.map((entry) => ({ kind: "tool" as const, sequence: entry.event.sequence, id: entry.id, entry })),
+                  ...inlineDraftEntries.map((entry) => ({ kind: "draft" as const, sequence: entry.event.sequence, id: entry.id, entry })),
+                ].sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id));
                 return (
                   <Fragment key={message.id}>
                     <article
@@ -887,14 +933,22 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                       </div>
                     </article>
 
-                    {inlineToolEntries.length > 0 ? (
-                      <div className="thread-turn-inline-stack">
-                        {inlineToolEntries.map((entry) => (
-                          <ToolHistoryInline
-                            key={entry.id}
-                            entry={entry}
-                            defaultOpen={false}
-                          />
+                    {inlineArtifacts.length > 0 ? (
+                      <div className="thread-turn-inline-stack draft-stack">
+                        {inlineArtifacts.map((artifact) => (
+                          artifact.kind === "tool" ? (
+                            <ToolHistoryInline
+                              key={artifact.id}
+                              entry={artifact.entry}
+                              defaultOpen={false}
+                            />
+                          ) : (
+                            <DraftHistoryInline
+                              key={artifact.id}
+                              entry={artifact.entry}
+                              defaultOpen={artifact.entry.segment.status === "streaming"}
+                            />
+                          )
                         ))}
                       </div>
                     ) : null}
@@ -1230,19 +1284,19 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                               <span className="meta-chip subtle">{participant.runtimeKind}</span>
                               {isAgent ? (
                                 <>
-                                  <button type="button" className="mini-button" onClick={() => moveAgentParticipant(room.id, participant.id, -1)} disabled={isRunning}>
+                                  <button type="button" className="mini-button" onClick={() => void moveAgentParticipant(room.id, participant.id, -1)} disabled={isRunning}>
                                     上移
                                   </button>
-                                  <button type="button" className="mini-button" onClick={() => moveAgentParticipant(room.id, participant.id, 1)} disabled={isRunning}>
+                                  <button type="button" className="mini-button" onClick={() => void moveAgentParticipant(room.id, participant.id, 1)} disabled={isRunning}>
                                     下移
                                   </button>
-                                  <button type="button" className="mini-button" onClick={() => toggleAgentParticipant(room.id, participant.id)} disabled={isRunning}>
+                                  <button type="button" className="mini-button" onClick={() => void toggleAgentParticipant(room.id, participant.id)} disabled={isRunning}>
                                     {participant.enabled ? "停用" : "启用"}
                                   </button>
                                 </>
                               ) : null}
                               {participant.id !== "local-operator" ? (
-                                <button type="button" className="mini-button danger-text" onClick={() => removeParticipant(room.id, participant.id)} disabled={isRunning}>
+                                <button type="button" className="mini-button danger-text" onClick={() => void removeParticipant(room.id, participant.id)} disabled={isRunning}>
                                   移除
                                 </button>
                               ) : null}
@@ -1263,7 +1317,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                         type="button"
                         className="secondary-button"
                         onClick={() => {
-                          addHumanParticipant(room.id, newParticipantName);
+                          void addHumanParticipant(room.id, newParticipantName);
                           setNewParticipantName("");
                         }}
                         disabled={!newParticipantName.trim() || isRunning}
@@ -1280,7 +1334,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                             key={agent.id}
                             type="button"
                             className={exists ? "preset-chip active" : "preset-chip"}
-                            onClick={() => addAgentParticipant(room.id, agent.id)}
+                            onClick={() => void addAgentParticipant(room.id, agent.id)}
                             disabled={exists || isRunning}
                           >
                             <strong>{agent.label}</strong>
@@ -1298,7 +1352,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                         type="button"
                         className="ghost-button"
                         onClick={() => {
-                          archiveRoom(room.id);
+                          void archiveRoom(room.id);
                           router.push("/rooms");
                         }}
                         disabled={isRunning}
@@ -1311,7 +1365,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                         onClick={() => {
                           if (window.confirm(`确认永久删除“${room.title}”吗？此操作不可恢复。`)) {
                             const fallback = activeRooms.find((entry) => entry.id !== room.id)?.id;
-                            deleteRoom(room.id);
+                            void deleteRoom(room.id);
                             router.push(fallback ? `/rooms/${fallback}` : "/rooms");
                           }
                         }}

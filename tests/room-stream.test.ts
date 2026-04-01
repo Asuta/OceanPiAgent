@@ -90,9 +90,21 @@ function createSseResponse(body: string): Response {
 test("readRoomStream processes a trailing done event without a final separator", async () => {
   const tool = createToolExecution();
   const emittedMessage = createRoomMessage();
+  const previewMessage = createRoomMessage({ id: "preview-1", content: "Visible pre", status: "streaming", final: false });
   const turn = createTurn(emittedMessage);
+  const pendingTurn = {
+    ...turn,
+    id: "turn-pending-1",
+    status: "running" as const,
+    tools: [],
+    emittedMessages: [],
+  };
   const events = [
+    `data: ${JSON.stringify({ type: "turn-start", turn: pendingTurn })}`,
+    "",
     `data: ${JSON.stringify({ type: "tool", tool })}`,
+    "",
+    `data: ${JSON.stringify({ type: "room-message-preview", message: previewMessage })}`,
     "",
     `data: ${JSON.stringify({ type: "room-message", message: emittedMessage })}`,
     "",
@@ -100,14 +112,18 @@ test("readRoomStream processes a trailing done event without a final separator",
   ].join("\n");
 
   const seenTools: ToolExecution[] = [];
+  const seenPreviewMessages: RoomMessage[] = [];
   const seenMessages: RoomMessage[] = [];
+  const seenTurnStarts: AgentRoomTurn[] = [];
   const seenDone: AgentRoomTurn[] = [];
 
   const result = await readRoomStream({
     response: createSseResponse(events),
     shouldContinue: () => true,
+    onTurnStart: (nextTurn) => seenTurnStarts.push(nextTurn),
     onTextDelta: () => undefined,
     onTool: (nextTool) => seenTools.push(nextTool),
+    onRoomMessagePreview: (message) => seenPreviewMessages.push(message),
     onRoomMessage: (message) => seenMessages.push(message),
     onReceiptUpdate: () => undefined,
     onDone: (event) => seenDone.push(event.turn),
@@ -115,6 +131,8 @@ test("readRoomStream processes a trailing done event without a final separator",
   });
 
   assert.equal(seenTools.length, 1);
+  assert.equal(seenTurnStarts.length, 1);
+  assert.equal(seenPreviewMessages.length, 1);
   assert.equal(seenMessages.length, 1);
   assert.equal(seenDone.length, 1);
   assert.equal(result.emittedMessages.length, 1);

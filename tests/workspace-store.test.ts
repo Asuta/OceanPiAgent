@@ -56,3 +56,103 @@ test("workspace store persists valid workspace envelopes", async () => {
     assert.equal(loaded.state.rooms.length, 1);
   });
 });
+
+test("workspace store accepts assistant history tool-call parts with partialJson", async () => {
+  await withTempCwd(async ({ domain, store }) => {
+    const state = domain.createDefaultWorkspaceState();
+    const room = state.rooms[0]!;
+    const userMessage = {
+      ...domain.createRoomMessage(room.id, "user", "ping", "user"),
+      id: "user-msg-1",
+      seq: 1,
+    };
+
+    state.rooms[0] = {
+      ...room,
+      roomMessages: [userMessage],
+      agentTurns: [
+        {
+          id: "turn-1",
+          agent: {
+            id: room.agentId,
+            label: "Harbor Concierge",
+          },
+          userMessage,
+          assistantContent: "",
+          tools: [],
+          emittedMessages: [],
+          status: "completed",
+          meta: {
+            apiFormat: "chat_completions",
+            compatibility: {
+              providerKey: "generic",
+              providerLabel: "Generic",
+              baseUrl: "https://example.test/v1",
+              chatCompletionsToolStyle: "tools",
+              responsesContinuation: "replay",
+              responsesPayloadMode: "json",
+              notes: [],
+            },
+            historyDelta: [
+              {
+                role: "assistant",
+                content: [
+                  {
+                    type: "toolCall",
+                    id: "tool-1",
+                    name: "send_message_to_room",
+                    arguments: {},
+                    partialJson: '{"roomId":"room-1","content":"hello"}',
+                  },
+                ],
+                api: "chat_completions",
+                provider: "generic",
+                model: "fake-model",
+                usage: {
+                  input: 1,
+                  output: 1,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  totalTokens: 2,
+                  cost: {
+                    input: 0,
+                    output: 0,
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    total: 0,
+                  },
+                },
+                stopReason: "toolUse",
+                timestamp: Date.now(),
+              },
+            ],
+          },
+          resolvedModel: "generic/fake-model",
+        },
+      ],
+    };
+    state.agentStates[room.agentId] = {
+      ...state.agentStates[room.agentId],
+      agentTurns: state.rooms[0].agentTurns,
+      resolvedModel: "generic/fake-model",
+      compatibility: {
+        providerKey: "generic",
+        providerLabel: "Generic",
+        baseUrl: "https://example.test/v1",
+        chatCompletionsToolStyle: "tools",
+        responsesContinuation: "replay",
+        responsesPayloadMode: "json",
+        notes: [],
+      },
+      updatedAt: new Date().toISOString(),
+    };
+
+    const currentEnvelope = await store.loadWorkspaceEnvelope();
+    const saved = await store.saveWorkspaceState({
+      expectedVersion: currentEnvelope.version,
+      state,
+    });
+
+    assert.equal(saved.version, currentEnvelope.version + 1);
+  });
+});
