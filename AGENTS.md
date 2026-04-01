@@ -26,10 +26,13 @@ Repository guidance for coding agents working in this project.
 ## Important Boundaries
 
 - Do not duplicate room/workspace business rules in both client and server when a shared domain helper can be used instead.
+- Keep room membership and room-management mutations converged in shared domain helpers under `src/lib/chat/workspace-domain.ts`; avoid letting similar rules drift separately in `src/lib/chat/room-actions.ts`, server reducers, and client-only helpers.
 - Do not bypass `src/lib/server/room-runner.ts` by re-implementing room turn execution in API routes.
 - Do not put new pure domain logic, persistence conflict handling, or reusable normalization helpers directly into `src/components/workspace-provider.tsx` when they can live in shared modules.
+- Do not add more hydration, persistence, SSE reconciliation, or optimistic sync logic directly into `src/components/workspace-provider.tsx`; extract that work into focused hooks or shared helpers first.
 - Do not bypass `src/lib/server/agent-registry.ts` when creating or updating custom agent definitions.
 - Do not bypass the allowlisted project-context or skill loaders with ad hoc filesystem reads when the same behavior belongs in `src/lib/ai/project-context.ts` or `src/lib/ai/skills.ts`.
+- Do not maintain parallel tool schemas or descriptions in multiple places when they can be derived from canonical definitions under `src/lib/ai/tools/`.
 - Prefer extracting reusable logic into:
   - `src/lib/chat/` for shared domain logic and schemas
   - `src/lib/server/` for server orchestration and persistence
@@ -60,16 +63,19 @@ When adding a tool:
 - Reuse schemas and helper functions from `src/lib/ai/tools/shared.ts` when possible.
 - Keep room-only behavior constrained to room-aware tool context.
 - Check whether the change also requires updating `src/lib/ai/pi-agent-tools.ts` so the Pi runtime exposes the same capability and schema.
+- Prefer generating or adapting Pi runtime tool metadata from the canonical `ToolDefinition` shape instead of hand-maintaining a second copy of names, descriptions, enums, and argument schemas.
 
 ## Persistence
 
 - Local browser persistence and server workspace persistence are both in use.
 - Client persistence uses local storage plus server-backed workspace envelopes fetched through `/api/workspace`.
 - Server persistence uses versioned workspace envelopes and optimistic conflict handling; do not remove version conflict handling casually.
+- Keep workspace conflict detection and merge heuristics narrow, explicit, and shared where possible; avoid broad `JSON.stringify` equality checks or message-only reconciliation shortcuts when changing sync behavior.
 - Background server flows such as cron mutate workspace state through `src/lib/server/workspace-store.ts` instead of bypassing shared validation.
 - Shared per-agent runtime history, continuation snapshots, and compaction state flow through `src/lib/server/agent-room-sessions.ts`, `src/lib/server/agent-runtime-store.ts`, and `src/lib/server/agent-memory-store.ts`.
 - Custom agent profiles and prompts persist inside each agent workspace through `src/lib/server/agent-registry.ts`.
 - If you change workspace shape, update validation in `src/lib/chat/schemas.ts` and check migration/hydration behavior.
+- If you change room-turn application logic, keep `applyRoomTurnToWorkspace` and cron turn application paths aligned through shared helpers rather than letting them drift as near-duplicate implementations.
 
 ## Testing And Validation
 
@@ -97,6 +103,15 @@ Add tests when changing:
 - Reuse existing helpers before adding new parallel implementations.
 - Keep module responsibilities narrow.
 - Preserve existing user-visible behavior unless the task explicitly changes product behavior.
+
+## Current Refactor Priorities
+
+- `src/components/workspace-provider.tsx` is the main client hotspot. Treat it as a composition boundary, and keep extracting hydration, persistence, server-sync, and ephemeral streaming state into focused hooks under `src/components/workspace/`.
+- `src/lib/server/room-runner.ts` is the main room-execution hotspot. Keep visible room emissions, hidden console state, receipt updates, and tool-driven room actions clearly separated; prefer extracting reducers/assemblers over extending the central turn runner.
+- `src/lib/server/room-scheduler.ts` is the main scheduling hotspot. Prefer isolating pure scheduling decisions from workspace I/O and queue orchestration so abort, rerun, and superseded-turn logic stay testable.
+- `src/lib/server/workspace-state.ts` and `src/components/workspace/workspace-state.ts` are the main state-reconciliation hotspots. Keep shared turn-application behavior centralized and make conflict-handling rules explicit before adding new sync paths.
+- `src/lib/ai/pi-agent-tools.ts` is a maintenance hotspot because it mirrors canonical tool definitions. Prefer reducing duplication rather than extending the handwritten adapter surface.
+- Large page components such as `src/components/room-detail-page.tsx` and `src/components/settings-page.tsx` should keep shedding side effects and stateful workflows into focused hooks or leaf components instead of growing in place.
 
 ## Known Project Conventions
 
