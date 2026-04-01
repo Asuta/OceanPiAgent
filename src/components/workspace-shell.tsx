@@ -2,10 +2,27 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { applyModelConfigToSettings } from "@/lib/ai/model-configs";
 import { useTheme } from "@/components/theme-provider";
 import { formatTimestamp, getRoomPreview, useWorkspace } from "@/components/workspace-provider";
+import type { ModelConfig } from "@/lib/chat/types";
 import { RESOLVED_THEME_LABELS, THEME_OPTION_LABELS, THEME_PREFERENCES } from "@/lib/theme";
+
+const MIXED_MODEL_CONFIG_VALUE = "__mixed_model_config__";
+const EMPTY_MODEL_CONFIG_VALUE = "";
+
+async function fetchModelConfigs(): Promise<ModelConfig[]> {
+  const response = await fetch("/api/model-configs", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error("Failed to load model configs.");
+  }
+
+  const payload = (await response.json().catch(() => null)) as { modelConfigs?: ModelConfig[] } | null;
+  return [...(payload?.modelConfigs ?? [])].sort(
+    (left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.name.localeCompare(right.name),
+  );
+}
 
 function getShellTitle(pathname: string) {
   if (pathname.startsWith("/settings")) {
@@ -32,10 +49,62 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
+  const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
   const { mounted: themeMounted, resolvedTheme, setThemePreference, systemTheme, themePreference } = useTheme();
-  const { activeRooms, archivedRooms, activeRoomId, archiveRoom, createRoom, hydrated, isRoomRunning, setActiveRoomId } = useWorkspace();
+  const { activeRooms, agents, agentStates, archivedRooms, activeRoomId, archiveRoom, createRoom, hydrated, isRoomRunning, setActiveRoomId, updateAgentSettings } = useWorkspace();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const nextModelConfigs = await fetchModelConfigs();
+        if (!cancelled) {
+          setModelConfigs(nextModelConfigs);
+        }
+      } catch {
+        if (!cancelled) {
+          setModelConfigs([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingModelConfigs(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const shellTitle = useMemo(() => getShellTitle(pathname), [pathname]);
+  const globalModelConfigValue = useMemo(() => {
+    if (agents.length === 0) {
+      return EMPTY_MODEL_CONFIG_VALUE;
+    }
+
+    const configuredIds = new Set(
+      agents.map((agent) => {
+        const modelConfigId = agentStates[agent.id]?.settings.modelConfigId;
+        return typeof modelConfigId === "string" && modelConfigId.trim() ? modelConfigId : EMPTY_MODEL_CONFIG_VALUE;
+      }),
+    );
+
+    if (configuredIds.size !== 1) {
+      return MIXED_MODEL_CONFIG_VALUE;
+    }
+
+    return [...configuredIds][0] ?? EMPTY_MODEL_CONFIG_VALUE;
+  }, [agentStates, agents]);
+  const selectedGlobalModelConfig = useMemo(() => {
+    if (!globalModelConfigValue || globalModelConfigValue === MIXED_MODEL_CONFIG_VALUE) {
+      return null;
+    }
+
+    return modelConfigs.find((modelConfig) => modelConfig.id === globalModelConfigValue) ?? null;
+  }, [globalModelConfigValue, modelConfigs]);
   const sidebarRooms = useMemo(() => {
     if (!hydrated || activeRooms.length === 0) {
       return [];
@@ -56,6 +125,24 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
       void archiveRoom(roomId);
     },
     [archiveRoom],
+  );
+  const handleGlobalModelConfigChange = useCallback(
+    (nextModelConfigId: string) => {
+      const nextModelConfig = modelConfigs.find((modelConfig) => modelConfig.id === nextModelConfigId);
+      if (!nextModelConfig) {
+        return;
+      }
+
+      for (const agent of agents) {
+        const state = agentStates[agent.id];
+        if (!state) {
+          continue;
+        }
+
+        updateAgentSettings(agent.id, applyModelConfigToSettings(state.settings, nextModelConfig));
+      }
+    },
+    [agentStates, agents, modelConfigs, updateAgentSettings],
   );
 
   return (
@@ -192,6 +279,27 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
             <p>{shellTitle.subtitle}</p>
           </div>
           <div className="topbar-actions">
+            <label className="topbar-model-switcher" aria-label="切换所有 agent 的模型配置">
+              <span className="eyebrow-label">Agent 模型</span>
+              <select
+                className="text-input topbar-model-select"
+                value={globalModelConfigValue}
+                disabled={loadingModelConfigs || modelConfigs.length === 0}
+                onChange={(event) => handleGlobalModelConfigChange(event.target.value)}
+              >
+                {loadingModelConfigs ? <option value="">加载模型配置中...</option> : null}
+                {!loadingModelConfigs && modelConfigs.length === 0 ? <option value="">先去设置页添加模型配置</option> : null}
+                {globalModelConfigValue === MIXED_MODEL_CONFIG_VALUE ? <option value={MIXED_MODEL_CONFIG_VALUE}>当前 agent 使用不同模型</option> : null}
+                {globalModelConfigValue && globalModelConfigValue !== MIXED_MODEL_CONFIG_VALUE && !selectedGlobalModelConfig ? (
+                  <option value={globalModelConfigValue}>当前配置已不存在</option>
+                ) : null}
+                {modelConfigs.map((modelConfig) => (
+                  <option key={modelConfig.id} value={modelConfig.id}>
+                    {modelConfig.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="theme-toggle-cluster compact" role="group" aria-label="切换浅色和深色模式">
               {THEME_PREFERENCES.map((option) => (
                 <button
@@ -211,6 +319,13 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
                   ? `系统${RESOLVED_THEME_LABELS[systemTheme]}`
                   : `当前${RESOLVED_THEME_LABELS[resolvedTheme]}`
                 : "外观"}
+            </span>
+            <span className="meta-chip subtle theme-status-chip">
+              {loadingModelConfigs
+                ? "模型加载中"
+                : globalModelConfigValue === MIXED_MODEL_CONFIG_VALUE
+                  ? "当前未统一"
+                  : selectedGlobalModelConfig?.name || "未配置模型"}
             </span>
           </div>
         </header>
