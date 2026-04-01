@@ -1,5 +1,6 @@
 import type { RoomAgentDefinition, RoomMessage, RoomWorkspaceState } from "@/lib/chat/types";
 import { createAgentSharedState, createExternalRoomSession, createRoomMessage, createTimestamp, sortRoomsByUpdatedAt, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
+import { createExternalOutboundMessages } from "@/lib/server/channel-outbound-service";
 import { findChannelBinding, touchChannelBinding, upsertChannelBinding } from "@/lib/server/channel-bindings-store";
 import { beginInboundMessage, finishInboundMessage, runSerializedDelivery } from "@/lib/server/channel-delivery-queue";
 import { createChannelMessageLink, findChannelMessageLink, upsertChannelMessageLink } from "@/lib/server/channel-message-links-store";
@@ -8,6 +9,7 @@ import { applyFeishuRoomMetadata, buildFeishuRoomTitle } from "@/lib/server/chan
 import type { ChannelBinding, ChannelMessageLink, ExternalInboundMessage, ExternalOutboundMessage } from "@/lib/server/channels/types";
 import { listAgentDefinitions } from "@/lib/server/agent-registry";
 import { appendFeishuRuntimeLog } from "@/lib/server/channel-runtime-log";
+import { enqueueRoomScheduler } from "@/lib/server/room-scheduler";
 import { runRoomTurnNonStreaming } from "@/lib/server/room-runner";
 import { applyRoomTurnToWorkspace } from "@/lib/server/workspace-state";
 import { loadWorkspaceEnvelope, mutateWorkspace, type WorkspaceEnvelope } from "@/lib/server/workspace-store";
@@ -27,6 +29,7 @@ export interface ExternalMessageServiceDependencies {
   applyFeishuDoneReaction?: typeof applyFeishuDoneReaction;
   listAgentDefinitions?: () => Promise<RoomAgentDefinition[]>;
   runRoomTurnNonStreaming?: typeof runRoomTurnNonStreaming;
+  enqueueRoomScheduler?: typeof enqueueRoomScheduler;
   deliverMessages?: (messages: ExternalOutboundMessage[]) => Promise<void>;
   logger?: (args: {
     level: "info" | "warn" | "error";
@@ -84,6 +87,10 @@ function hasNewerUserMessageInRoom(workspace: RoomWorkspaceState, roomId: string
   }
 
   return room.roomMessages.some((entry) => entry.seq > currentMessage.seq && entry.role === "user");
+}
+
+function collectAdditionalRoomIds(emittedMessages: RoomMessage[], targetRoomId: string): string[] {
+  return [...new Set(emittedMessages.map((message) => message.roomId).filter((roomId) => roomId && roomId !== targetRoomId))];
 }
 
 async function ensureChannelMessageLink(args: {
@@ -286,19 +293,6 @@ async function appendInboundMessageToWorkspace(
   }));
 }
 
-function createExternalOutboundMessages(binding: ChannelBinding, emittedMessages: RoomMessage[]): ExternalOutboundMessage[] {
-  return emittedMessages
-    .filter((message) => message.roomId === binding.roomId && message.final && message.status === "completed" && message.content.trim())
-    .map((message) => ({
-      channel: binding.channel,
-      accountId: binding.accountId,
-      peerKind: binding.peerKind,
-      peerId: binding.peerId,
-      roomId: binding.roomId,
-      content: message.content,
-    }));
-}
-
 export async function receiveExternalMessage(message: ExternalInboundMessage, overrides: ExternalMessageServiceDependencies = {}): Promise<ExternalMessageProcessResult> {
   const deps: Required<ExternalMessageServiceDependencies> = {
     loadWorkspaceEnvelope: overrides.loadWorkspaceEnvelope ?? loadWorkspaceEnvelope,
@@ -312,6 +306,7 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
     applyFeishuDoneReaction: overrides.applyFeishuDoneReaction ?? applyFeishuDoneReaction,
     listAgentDefinitions: overrides.listAgentDefinitions ?? listAgentDefinitions,
     runRoomTurnNonStreaming: overrides.runRoomTurnNonStreaming ?? runRoomTurnNonStreaming,
+    enqueueRoomScheduler: overrides.enqueueRoomScheduler ?? enqueueRoomScheduler,
     deliverMessages: overrides.deliverMessages ?? (async () => {}),
     logger: overrides.logger ?? appendFeishuRuntimeLog,
   };
@@ -397,6 +392,11 @@ export async function receiveExternalMessage(message: ExternalInboundMessage, ov
 
     if (hasReadNoReplyForInboundMessage(result, processing.binding.roomId, processing.inboundRoomMessage.id)) {
       await deps.applyFeishuDoneReaction(processing.messageLink, { logger: deps.logger });
+    }
+
+    const additionalRoomIds = collectAdditionalRoomIds(result.emittedMessages, processing.binding.roomId);
+    for (const additionalRoomId of additionalRoomIds) {
+      await deps.enqueueRoomScheduler(additionalRoomId);
     }
 
     deps.logger({
