@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { closeLcmDatabase } from "@/lib/server/lcm/db";
 
 type AgentRegistryModule = typeof import("../src/lib/server/agent-registry");
 
@@ -19,6 +20,7 @@ async function withAgentRegistry(run: (mod: AgentRegistryModule, tempDir: string
     const mod = (await import(`${moduleUrl}?test=${Date.now()}-${Math.random()}`)) as AgentRegistryModule;
     await run(mod, tempDir);
   } finally {
+    await closeLcmDatabase();
     process.chdir(previousCwd);
     let lastError: unknown;
     for (let attempt = 0; attempt < 5; attempt += 1) {

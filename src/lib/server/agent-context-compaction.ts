@@ -1,4 +1,3 @@
-import { appendAgentCompactionMemory } from "./agent-memory-store";
 import {
   getAgentContextStateSnapshot,
   insertAgentContextSummary,
@@ -205,15 +204,6 @@ export async function compactAgentContext(args: {
 
   const nextState = await getAgentContextStateSnapshot(args.agentId);
   const charsAfter = nextState ? estimateContextChars(nextState.items) : Math.max(0, charsBefore - summary.length);
-
-  await appendAgentCompactionMemory({
-    agentId: args.agentId,
-    summary,
-    reason: args.reason,
-    prunedMessages: prunedItems.length,
-    charsBefore,
-    charsAfter,
-  });
 
   return {
     compacted: true,

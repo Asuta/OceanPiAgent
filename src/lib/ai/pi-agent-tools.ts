@@ -388,12 +388,9 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "memory_get",
       label: "Memory Get",
-      description: "Read a specific memory handle directly, or fall back to a legacy persisted markdown file slice when memory_search returns a file path.",
+      description: "Read a specific structured memory handle directly after memory_search returns a promising message, summary, or file handle.",
       parameters: Type.Object({
-        path: Type.Optional(Type.String({ description: "Legacy markdown path returned by memory_search." })),
-        handle: Type.Optional(Type.String({ description: "Structured memory handle such as message:<id>, summary:<id>, or file:<path>." })),
-        from: Type.Optional(Type.Integer({ description: "Optional starting line number." })),
-        lines: Type.Optional(Type.Integer({ description: "Optional number of lines to read." })),
+        handle: Type.String({ description: "Structured memory handle such as message:<id>, summary:<id>, or file:<id>." }),
       }),
       scope,
       roomToolContext,
@@ -424,7 +421,7 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
     createPiTool({
       name: "memory_status",
       label: "Memory Status",
-      description: "Inspect the current agent memory backend, index health, and whether a rebuild is needed.",
+      description: "Inspect the current structured memory state, including how many messages, summaries, and live context items are stored.",
       parameters: Type.Object({}),
       scope,
       roomToolContext,

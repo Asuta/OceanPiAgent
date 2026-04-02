@@ -1,8 +1,14 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { generateCompactionSummary } from "./agent-compaction";
-import { appendAgentCompactionMemory, clearAgentMemory } from "./agent-memory-store";
-import { appendAgentLcmMessage, assembleAgentLcmContext, clearAgentLcmConversation, compactAgentLcmContext, getAgentLcmRetrieval, getOrCreateAgentConversation } from "./lcm/facade";
+import { clearAgentMemory } from "./agent-memory-store";
+import {
+  appendAgentLcmMessage,
+  assembleAgentLcmContext,
+  clearAgentLcmConversation,
+  compactAgentLcmContext,
+  getAgentLcmRetrieval,
+  getOrCreateAgentConversation,
+} from "./lcm/facade";
 import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runtime-hooks";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
@@ -44,8 +50,6 @@ export interface CompactRuntimeResult {
 }
 
 const RUNTIME_ROOT = path.join(process.cwd(), ".oceanking", "agent-runtime");
-const AUTO_COMPACT_CHAR_THRESHOLD = 26_000;
-const KEEP_RECENT_MESSAGE_COUNT = 8;
 const MAX_COMPACTION_RECORDS = 24;
 
 function createTimestamp(): string {
@@ -92,15 +96,15 @@ function normalizeMessage(value: unknown): PersistedVisibleMessage | null {
     attachments: Array.isArray(value.attachments)
       ? value.attachments.filter(
           (attachment): attachment is MessageImageAttachment =>
-            typeof attachment === "object"
-            && attachment !== null
-            && (attachment as MessageImageAttachment).kind === "image"
-            && typeof (attachment as MessageImageAttachment).id === "string"
-            && typeof (attachment as MessageImageAttachment).mimeType === "string"
-            && typeof (attachment as MessageImageAttachment).filename === "string"
-            && typeof (attachment as MessageImageAttachment).sizeBytes === "number"
-            && typeof (attachment as MessageImageAttachment).storagePath === "string"
-            && typeof (attachment as MessageImageAttachment).url === "string",
+            typeof attachment === "object" &&
+            attachment !== null &&
+            (attachment as MessageImageAttachment).kind === "image" &&
+            typeof (attachment as MessageImageAttachment).id === "string" &&
+            typeof (attachment as MessageImageAttachment).mimeType === "string" &&
+            typeof (attachment as MessageImageAttachment).filename === "string" &&
+            typeof (attachment as MessageImageAttachment).sizeBytes === "number" &&
+            typeof (attachment as MessageImageAttachment).storagePath === "string" &&
+            typeof (attachment as MessageImageAttachment).url === "string",
         )
       : [],
     ...(isRecord(value.meta)
@@ -197,25 +201,9 @@ function extractSummaryText(content: string): string {
   return match?.[1] ?? content;
 }
 
-async function assembleLcmPersistedHistory(agentId: RoomAgentId): Promise<PersistedVisibleMessage[] | null> {
-  const assembled = await assembleAgentLcmContext(agentId, 20_000);
-  if (!assembled) {
-    return null;
-  }
-
-  return assembled.messages.map((message, index) => ({
-    id: `lcm-${index}-${createUuid()}`,
-    role: message.role === "user" && typeof message.content === "string" && message.content.includes("<summary ") ? "assistant" : (message.role === "user" ? "user" : "assistant"),
-    content: typeof message.content === "string" && message.content.includes("<summary ") ? extractSummaryText(message.content) : contentToText(message.content),
-    attachments: [],
-    createdAt: createTimestamp(),
-  }));
-}
-
-export async function loadPersistedAgentRuntime(agentId: RoomAgentId): Promise<PersistedAgentRuntime> {
+async function readStoredRuntime(agentId: RoomAgentId): Promise<PersistedAgentRuntime> {
   await ensureRuntimeDir();
-  const filePath = getRuntimeFilePath(agentId);
-  const raw = await readFile(filePath, "utf8").catch(() => "");
+  const raw = await readFile(getRuntimeFilePath(agentId), "utf8").catch(() => "");
   if (!raw.trim()) {
     return createEmptyRuntime(agentId);
   }
@@ -227,42 +215,85 @@ export async function loadPersistedAgentRuntime(agentId: RoomAgentId): Promise<P
   }
 }
 
-export async function savePersistedAgentRuntime(runtime: PersistedAgentRuntime): Promise<void> {
+async function assembleLcmPersistedHistory(agentId: RoomAgentId): Promise<PersistedVisibleMessage[] | null> {
+  const assembled = await assembleAgentLcmContext(agentId, 20_000);
+  if (!assembled) {
+    return null;
+  }
+
+  return assembled.messages.map((message, index) => ({
+    id: `lcm-${index}-${createUuid()}`,
+    role:
+      message.role === "user" && typeof message.content === "string" && message.content.includes("<summary ")
+        ? "assistant"
+        : message.role === "user"
+          ? "user"
+          : "assistant",
+    content:
+      typeof message.content === "string" && message.content.includes("<summary ")
+        ? extractSummaryText(message.content)
+        : contentToText(message.content),
+    attachments: [],
+    createdAt: createTimestamp(),
+  }));
+}
+
+async function saveStoredRuntime(runtime: PersistedAgentRuntime): Promise<void> {
   await ensureRuntimeDir();
-  await writeFile(getRuntimeFilePath(runtime.agentId), JSON.stringify(runtime, null, 2), "utf8");
+  await writeFile(
+    getRuntimeFilePath(runtime.agentId),
+    JSON.stringify(runtime, null, 2),
+    "utf8",
+  );
+}
+
+export async function loadPersistedAgentRuntime(agentId: RoomAgentId): Promise<PersistedAgentRuntime> {
+  return readStoredRuntime(agentId);
+}
+
+export async function savePersistedAgentRuntime(runtime: PersistedAgentRuntime): Promise<void> {
+  await saveStoredRuntime(normalizeRuntime(runtime.agentId, runtime));
 }
 
 export async function appendPersistedHistoryMessage(args: {
   agentId: RoomAgentId;
   message: Omit<PersistedVisibleMessage, "id" | "createdAt" | "attachments" | "meta"> & Partial<Pick<PersistedVisibleMessage, "id" | "createdAt" | "attachments" | "meta">>;
 }): Promise<PersistedAgentRuntime> {
-  await getOrCreateAgentConversation(args.agentId);
-  const runtime = await loadPersistedAgentRuntime(args.agentId);
-  runtime.history.push({
-    id: args.message.id || createUuid(),
+  const persistedMessage: PersistedVisibleMessage = {
+    id: args.message.id ?? createUuid(),
     role: args.message.role,
     content: args.message.content,
-    attachments: args.message.attachments ? [...args.message.attachments] : [],
+    attachments: [...(args.message.attachments ?? [])],
     ...(args.message.meta ? { meta: args.message.meta } : {}),
     createdAt: args.message.createdAt || createTimestamp(),
-  });
-  runtime.updatedAt = createTimestamp();
-  await savePersistedAgentRuntime(runtime);
+  };
+
+  await getOrCreateAgentConversation(args.agentId);
   await appendAgentLcmMessage({
     agentId: args.agentId,
-    role: args.message.role,
-    content: args.message.content,
-    createdAt: args.message.createdAt || createTimestamp(),
+    role: persistedMessage.role,
+    content: persistedMessage.content,
+    createdAt: persistedMessage.createdAt,
     parts: [
       {
         sessionId: `agent:${args.agentId}`,
         partType: "text",
         ordinal: 0,
-        textContent: args.message.content,
-        metadata: JSON.stringify({ originalRole: args.message.role, rawType: "runtime_history_seed", attachments: args.message.attachments ?? [], meta: args.message.meta }),
+        textContent: persistedMessage.content,
+        metadata: JSON.stringify({
+          originalRole: persistedMessage.role,
+          rawType: "runtime_history_seed",
+          attachments: persistedMessage.attachments,
+          meta: persistedMessage.meta,
+        }),
       },
     ],
   }).catch(() => undefined);
+
+  const runtime = await readStoredRuntime(args.agentId);
+  runtime.history = [...runtime.history, persistedMessage];
+  runtime.updatedAt = createTimestamp();
+  await saveStoredRuntime(runtime);
   return runtime;
 }
 
@@ -272,12 +303,12 @@ export async function finalizePersistedAgentRuntime(args: {
   resolvedModel: string;
   compatibility: ProviderCompatibility;
 }): Promise<void> {
-  const runtime = await loadPersistedAgentRuntime(args.agentId);
-  runtime.history.push(args.assistantMessage);
+  const runtime = await readStoredRuntime(args.agentId);
+  runtime.history = [...runtime.history, args.assistantMessage];
   runtime.resolvedModel = args.resolvedModel;
   runtime.compatibility = args.compatibility;
   runtime.updatedAt = createTimestamp();
-  await savePersistedAgentRuntime(runtime);
+  await saveStoredRuntime(runtime);
 }
 
 export async function compactPersistedAgentRuntime(args: {
@@ -285,153 +316,71 @@ export async function compactPersistedAgentRuntime(args: {
   reason: "automatic" | "manual";
   force?: boolean;
 }): Promise<CompactRuntimeResult> {
+  const runtimeBefore = await readStoredRuntime(args.agentId);
+  const charsBefore = estimateHistoryChars(runtimeBefore.history);
   const lcmCompaction = await compactAgentLcmContext(args.agentId, 20_000, args.force).catch(() => null);
-  if (lcmCompaction) {
-    const runtime = await loadPersistedAgentRuntime(args.agentId);
-    const lcmHistory = (await assembleLcmPersistedHistory(args.agentId)) ?? runtime.history;
-    const charsBefore = estimateHistoryChars(runtime.history);
-    const charsAfter = estimateHistoryChars(lcmHistory);
-    if (!lcmCompaction.actionTaken) {
-      runtime.history = lcmHistory;
-      runtime.updatedAt = createTimestamp();
-      await savePersistedAgentRuntime(runtime);
-      return { compacted: false, history: lcmHistory };
-    }
-
-    await runBeforeCompactionHooks({
-      agentId: args.agentId,
-      reason: args.reason,
-      historyCount: runtime.history.length,
-      charsBefore,
-    });
-    const describedSummary = lcmCompaction.createdSummaryId
-      ? await getAgentLcmRetrieval(args.agentId)
-          .then(({ retrieval }) => retrieval.describe(lcmCompaction.createdSummaryId!))
-          .catch(() => null)
-      : null;
-    const summary = describedSummary?.summary?.content || (lcmCompaction.createdSummaryId ? `LCM summary ${lcmCompaction.createdSummaryId}` : "LCM compaction");
-    const record: CompactionRecord = {
-      id: createUuid(),
-      createdAt: createTimestamp(),
-      reason: args.reason,
-      summary,
-      prunedMessages: Math.max(0, runtime.history.length - lcmHistory.length),
-      keptMessages: lcmHistory.length,
-      charsBefore,
-      charsAfter,
+  if (!lcmCompaction) {
+    return {
+      compacted: false,
+      history: runtimeBefore.history,
     };
-    runtime.history = lcmHistory;
-    runtime.compactions = [...runtime.compactions, record].slice(-MAX_COMPACTION_RECORDS);
+  }
+
+  const lcmHistory = (await assembleLcmPersistedHistory(args.agentId)) ?? runtimeBefore.history;
+  const charsAfter = estimateHistoryChars(lcmHistory);
+  if (!lcmCompaction.actionTaken) {
+    const runtime = await readStoredRuntime(args.agentId);
     runtime.updatedAt = createTimestamp();
-    await savePersistedAgentRuntime(runtime);
-    await appendAgentCompactionMemory({
-      agentId: args.agentId,
-      summary,
-      reason: args.reason,
-      prunedMessages: record.prunedMessages,
-      charsBefore,
-      charsAfter,
-    });
-    await runAfterCompactionHooks({
-      agentId: args.agentId,
-      reason: args.reason,
-      historyCount: runtime.history.length,
-      charsBefore,
-      charsAfter,
-      summary,
-      prunedMessages: record.prunedMessages,
-    });
-    return {
-      compacted: true,
-      record,
-      history: lcmHistory,
-    };
-  }
-
-  const runtime = await loadPersistedAgentRuntime(args.agentId);
-  const charsBefore = estimateHistoryChars(runtime.history);
-  const shouldCompact =
-    runtime.history.length >= 4
-    && (args.force || (runtime.history.length > KEEP_RECENT_MESSAGE_COUNT + 2 && charsBefore >= AUTO_COMPACT_CHAR_THRESHOLD));
-  if (!shouldCompact) {
-    return {
-      compacted: false,
-      history: runtime.history,
-    };
-  }
-
-  let splitIndex = args.force
-    ? Math.max(2, Math.floor(runtime.history.length / 2))
-    : Math.max(1, runtime.history.length - KEEP_RECENT_MESSAGE_COUNT);
-  if (splitIndex % 2 !== 0 && splitIndex < runtime.history.length - 1) {
-    splitIndex += 1;
-  }
-  const prunedMessages = runtime.history.slice(0, splitIndex);
-  const keptMessages = runtime.history.slice(splitIndex);
-  if (prunedMessages.length === 0) {
-    return {
-      compacted: false,
-      history: runtime.history,
-    };
+    await saveStoredRuntime(runtime);
+    return { compacted: false, history: lcmHistory };
   }
 
   await runBeforeCompactionHooks({
     agentId: args.agentId,
     reason: args.reason,
-    historyCount: runtime.history.length,
+    historyCount: runtimeBefore.history.length,
     charsBefore,
   });
 
-  const summary = await generateCompactionSummary({
-    agentId: args.agentId,
-    messages: prunedMessages,
-    resolvedModel: runtime.resolvedModel,
-  });
-  const summaryMessage: PersistedVisibleMessage = {
-    id: createUuid(),
-    role: "assistant",
-    content: summary,
-    attachments: [],
-    createdAt: createTimestamp(),
-  };
-
-  runtime.history = [summaryMessage, ...keptMessages];
-  const charsAfter = estimateHistoryChars(runtime.history);
+  const describedSummary = lcmCompaction.createdSummaryId
+    ? await getAgentLcmRetrieval(args.agentId)
+        .then(({ retrieval }) => retrieval.describe(lcmCompaction.createdSummaryId!))
+        .catch(() => null)
+    : null;
+  const summary =
+    describedSummary?.summary?.content ||
+    (lcmCompaction.createdSummaryId ? `LCM summary ${lcmCompaction.createdSummaryId}` : "LCM compaction");
   const record: CompactionRecord = {
     id: createUuid(),
-    createdAt: summaryMessage.createdAt,
+    createdAt: createTimestamp(),
     reason: args.reason,
     summary,
-    prunedMessages: prunedMessages.length,
-    keptMessages: keptMessages.length,
+    prunedMessages: Math.max(0, runtimeBefore.history.length - lcmHistory.length),
+    keptMessages: lcmHistory.length,
     charsBefore,
     charsAfter,
   };
+
+  const runtime = await readStoredRuntime(args.agentId);
+  runtime.history = lcmHistory;
   runtime.compactions = [...runtime.compactions, record].slice(-MAX_COMPACTION_RECORDS);
   runtime.updatedAt = createTimestamp();
-  await savePersistedAgentRuntime(runtime);
-  await appendAgentCompactionMemory({
-    agentId: args.agentId,
-    summary,
-    reason: args.reason,
-    prunedMessages: prunedMessages.length,
-    charsBefore,
-    charsAfter,
-  });
+  await saveStoredRuntime(runtime);
+
   await runAfterCompactionHooks({
     agentId: args.agentId,
     reason: args.reason,
-    historyCount: runtime.history.length,
+    historyCount: lcmHistory.length,
     charsBefore,
     charsAfter,
     summary,
-    prunedMessages: prunedMessages.length,
+    prunedMessages: record.prunedMessages,
   });
 
   return {
     compacted: true,
     record,
-    history: runtime.history,
+    history: lcmHistory,
   };
 }
 

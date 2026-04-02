@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -14,7 +14,6 @@ async function withMemoryRetrievalModules(
   run: (modules: {
     contextStore: AgentContextStoreModule;
     retrieval: AgentMemoryRetrievalModule;
-    tempDir: string;
   }) => Promise<void>,
 ) {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "oceanking-agent-memory-retrieval-test-"));
@@ -30,7 +29,7 @@ async function withMemoryRetrievalModules(
       import(`${contextStoreUrl}${querySuffix}`) as Promise<AgentContextStoreModule>,
       import(`${retrievalUrl}${querySuffix}`) as Promise<AgentMemoryRetrievalModule>,
     ]);
-    await run({ contextStore, retrieval, tempDir });
+    await run({ contextStore, retrieval });
     await contextStore.closeAgentContextStore();
   } finally {
     process.chdir(previousCwd);
@@ -126,31 +125,3 @@ test("memory retrieval searches structured messages and summaries, then describe
   });
 });
 
-test("memory retrieval falls back to legacy markdown files for file handles and plain paths", async () => {
-  await withMemoryRetrievalModules(async ({ retrieval, tempDir }) => {
-    const agentId = "researcher";
-    const memoryDir = path.join(tempDir, ".oceanking", "memory", agentId, "timeline");
-    await mkdir(memoryDir, { recursive: true });
-    await writeFile(
-      path.join(memoryDir, "2026-04.md"),
-      "## 2026-04 shard\nlegacy phoenix rollback notes\noperator: ops\n",
-      "utf8",
-    );
-
-    const searchResults = await retrieval.searchAgentMemoryUnified(agentId, "legacy phoenix rollback", { maxResults: 3 });
-    const fileResult = searchResults.find((result) => result.handle === "file:timeline/2026-04.md");
-    const fileDescription = await retrieval.describeAgentMemoryHandle(agentId, "file:timeline/2026-04.md");
-    const fileRead = await retrieval.readAgentMemoryHandle({
-      agentId,
-      handleOrPath: "timeline/2026-04.md",
-      from: 1,
-      lines: 3,
-    });
-
-    assert.ok(fileResult);
-    assert.equal(fileDescription?.type, "file");
-    assert.match(fileDescription?.file?.text ?? "", /legacy phoenix rollback notes/);
-    assert.equal("path" in (fileRead ?? {}), true);
-    assert.match((fileRead as { text: string }).text, /legacy phoenix rollback notes/);
-  });
-});

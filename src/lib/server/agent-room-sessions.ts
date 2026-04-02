@@ -1,4 +1,3 @@
-import { appendAgentTurnMemory } from "./agent-memory-store";
 import { assembleAgentLcmContext, ingestCompletedRun, ingestContinuationSnapshot, ingestIncomingRoomEnvelope } from "./lcm/facade";
 import {
   compactPersistedAgentRuntime,
@@ -56,6 +55,16 @@ interface AgentRuntimeSession {
   compatibility: ProviderCompatibility | null;
   updatedAt: string;
   loaded: boolean;
+}
+
+export interface AgentRunStartupTiming {
+  startedAt: number;
+  hydrateMs: number;
+  continuationMs: number;
+  persistAndIngestMs: number;
+  assembleMs: number;
+  totalStartupMs: number;
+  hadContinuationSnapshot: boolean;
 }
 
 function upsertEmittedRoomMessage(
@@ -175,23 +184,28 @@ function lcmMessageToVisibleMessage(content: unknown): PersistedVisibleMessage {
   };
 }
 
-async function syncSessionHistoryFromLcm(agentId: RoomAgentId, session: AgentRuntimeSession): Promise<void> {
+async function assembleSessionViewFromLcm(agentId: RoomAgentId): Promise<{
+  history: PersistedVisibleMessage[];
+  systemPromptAddition?: string;
+} | null> {
   const assembled = await assembleAgentLcmContext(agentId, 20_000);
   if (!assembled) {
-    return;
+    return null;
   }
-  session.history = assembled.messages.map((message) => ({
-    id: createUuid(),
-    role: message.role === "user" ? "user" : "assistant",
-    content: lcmMessageToVisibleMessage(message.content).content,
-    attachments: Array.isArray((message as { attachments?: unknown }).attachments)
-      ? ((message as { attachments: MessageImageAttachment[] }).attachments ?? [])
-      : [],
-    ...((message as { meta?: AssistantMessageMeta }).meta ? { meta: (message as { meta: AssistantMessageMeta }).meta } : {}),
-    createdAt: createTimestamp(),
-  }));
-  session.updatedAt = createTimestamp();
-  await persistSession(agentId);
+
+  return {
+    history: assembled.messages.map((message) => ({
+      id: createUuid(),
+      role: message.role === "user" ? "user" : "assistant",
+      content: lcmMessageToVisibleMessage(message.content).content,
+      attachments: Array.isArray((message as { attachments?: unknown }).attachments)
+        ? ((message as { attachments: MessageImageAttachment[] }).attachments ?? [])
+        : [],
+      ...((message as { meta?: AssistantMessageMeta }).meta ? { meta: (message as { meta: AssistantMessageMeta }).meta } : {}),
+      createdAt: createTimestamp(),
+    })),
+    systemPromptAddition: assembled.systemPromptAddition,
+  };
 }
 
 function truncateText(value: string, maxLength: number): string {
@@ -360,11 +374,16 @@ export async function startAgentRoomRun(args: {
   userAttachments: MessageImageAttachment[];
   requestSignal: AbortSignal;
 }) {
+  const startupStartedAt = performance.now();
+  const hydrateStartedAt = performance.now();
   const session = await hydrateSession(args.agentId);
+  const hydrateMs = performance.now() - hydrateStartedAt;
   const previousRun = session.activeRun;
   const continuationSnapshot = previousRun ? buildContinuationSnapshot(previousRun) : undefined;
+  let continuationMs = 0;
 
   if (previousRun && continuationSnapshot) {
+    const continuationStartedAt = performance.now();
     session.history.push({
       id: createUuid(),
       role: "assistant",
@@ -389,15 +408,7 @@ export async function startAgentRoomRun(args: {
       roomActions: previousRun.roomActions,
       createdAt: createTimestamp(),
     }).catch(() => undefined);
-  }
-
-  const compactResult = await compactPersistedAgentRuntime({
-    agentId: args.agentId,
-    reason: "automatic",
-  });
-  if (compactResult.compacted) {
-    session.history = compactResult.history;
-    session.updatedAt = createTimestamp();
+    continuationMs = performance.now() - continuationStartedAt;
   }
 
   const requestId = createUuid();
@@ -435,6 +446,7 @@ export async function startAgentRoomRun(args: {
     abortController,
   };
   session.updatedAt = createTimestamp();
+  const persistAndIngestStartedAt = performance.now();
   await persistSession(args.agentId);
   await ingestIncomingRoomEnvelope({
     agentId: args.agentId,
@@ -449,7 +461,13 @@ export async function startAgentRoomRun(args: {
     envelope: incomingMessage.content,
     createdAt: incomingMessage.createdAt,
   }).catch(() => undefined);
-  await syncSessionHistoryFromLcm(args.agentId, session).catch(() => undefined);
+  const persistAndIngestMs = performance.now() - persistAndIngestStartedAt;
+  const assembleStartedAt = performance.now();
+  const assembledPromptContext = await assembleSessionViewFromLcm(args.agentId).catch(() => null);
+  const assembleMs = performance.now() - assembleStartedAt;
+  if (assembledPromptContext) {
+    session.history = assembledPromptContext.history;
+  }
 
   previousRun?.abortController.abort(new Error("Superseded by a newer room message."));
 
@@ -460,6 +478,16 @@ export async function startAgentRoomRun(args: {
     compatibility: session.compatibility,
     resolvedModel: session.resolvedModel,
     continuationSnapshot,
+    systemPromptAddition: assembledPromptContext?.systemPromptAddition,
+    startupTiming: {
+      startedAt: startupStartedAt,
+      hydrateMs,
+      continuationMs,
+      persistAndIngestMs,
+      assembleMs,
+      totalStartupMs: performance.now() - startupStartedAt,
+      hadContinuationSnapshot: Boolean(previousRun && continuationSnapshot),
+    } satisfies AgentRunStartupTiming,
   };
 }
 
@@ -547,19 +575,15 @@ export async function completeAgentRoomRun(args: {
     meta: args.meta,
     createdAt: assistantMessage.createdAt,
   }).catch(() => undefined);
-  await syncSessionHistoryFromLcm(args.agentId, session).catch(() => undefined);
-  await appendAgentTurnMemory({
+
+  const compactResult = await compactPersistedAgentRuntime({
     agentId: args.agentId,
-    roomId: run.roomId,
-    roomTitle: run.roomTitle,
-    userMessageId: run.userMessageId,
-    senderName: run.userSender.name,
-    userContent: run.userContent,
-    assistantContent: args.assistantText,
-    tools: run.toolEvents,
-    emittedMessages: run.emittedMessages,
-    resolvedModel: args.resolvedModel,
-  });
+    reason: "automatic",
+  }).catch(() => null);
+  if (compactResult?.compacted) {
+    session.history = compactResult.history;
+    session.updatedAt = createTimestamp();
+  }
 }
 
 export function clearAgentRoomRun(agentId: RoomAgentId, requestId: string): void {

@@ -1541,7 +1541,7 @@ function normalizeSettings(value: unknown): ChatSettings {
       value.providerMode === "auto"
         ? value.providerMode
         : "auto",
-    memoryBackend: value.memoryBackend === "markdown" ? "markdown" : "sqlite-fts",
+    memoryBackend: "sqlite-fts",
     maxToolLoopSteps:
       value.maxToolLoopSteps === LEGACY_DEFAULT_MAX_TOOL_LOOP_STEPS
         ? DEFAULT_MAX_TOOL_LOOP_STEPS
@@ -2990,7 +2990,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         settings: {
           ...state.settings,
           ...patch,
-          memoryBackend: (patch.memoryBackend === "markdown" ? "markdown" : patch.memoryBackend === "sqlite-fts" ? "sqlite-fts" : state.settings.memoryBackend) as MemoryBackendId,
+          memoryBackend: "sqlite-fts" as MemoryBackendId,
           maxToolLoopSteps: coerceMaxToolLoopSteps(patch.maxToolLoopSteps ?? state.settings.maxToolLoopSteps),
           thinkingLevel: coerceThinkingLevel(patch.thinkingLevel ?? state.settings.thinkingLevel),
           enabledSkillIds: coerceSkillIds(patch.enabledSkillIds ?? state.settings.enabledSkillIds),

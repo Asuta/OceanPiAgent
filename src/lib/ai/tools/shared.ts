@@ -242,17 +242,9 @@ export const memorySearchArgsSchema = z
 
 export const memoryGetArgsSchema = z
   .object({
-    path: z.string().trim().min(1).max(200).optional(),
-    handle: z.string().trim().min(1).max(200).optional(),
-    from: z.number().int().min(1).optional(),
-    lines: z.number().int().min(1).max(200).optional().default(40),
+    handle: z.string().trim().min(1).max(200),
   })
-  .strict()
-  .superRefine((value, ctx) => {
-    if (!value.path && !value.handle) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["path"], message: "path or handle is required." });
-    }
-  });
+  .strict();
 
 export const memoryDescribeArgsSchema = z
   .object({

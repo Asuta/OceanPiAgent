@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import type { ChatSettings, RoomToolContext } from "@/lib/chat/types";
 import { executeTool, getChatCompletionsTools, getResponsesTools } from "@/lib/ai/tools";
+import { closeLcmDatabase } from "@/lib/server/lcm/db";
 
 async function withTempCwd(run: (tempDir: string) => Promise<void>) {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "oceanking-ai-tools-test-"));
@@ -14,6 +15,7 @@ async function withTempCwd(run: (tempDir: string) => Promise<void>) {
   try {
     await run(tempDir);
   } finally {
+    await closeLcmDatabase();
     process.chdir(previousCwd);
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -223,10 +225,10 @@ test("executeTool exposes memory status and memory index for room agents", async
     const indexResult = await executeTool("memory_index", { force: true }, "room", undefined, context);
 
     assert.equal(statusResult.event.status, "success");
-    assert.match(statusResult.output, /"backend": "markdown"/);
+    assert.match(statusResult.output, /"backend": "sqlite-fts"/);
 
     assert.equal(indexResult.event.status, "success");
     assert.match(indexResult.output, /"mode": "full"/);
-    assert.match(indexResult.output, /"backend": "markdown"/);
+    assert.match(indexResult.output, /"backend": "sqlite-fts"/);
   });
 });

@@ -69,7 +69,7 @@ export const TOOL_CATALOG = [
   {
     name: "memory_get",
     title: "Memory Get",
-    description: "读取 memory_search 返回的 handle，或兼容读取旧 markdown 路径片段，避免把整份记忆全部塞回 prompt。",
+    description: "读取 memory_search 返回的结构化 handle，避免把整段历史或大文件摘要整份塞回 prompt。",
   },
   {
     name: "memory_describe",
@@ -84,12 +84,12 @@ export const TOOL_CATALOG = [
   {
     name: "memory_status",
     title: "Memory Status",
-    description: "查看当前 agent memory 的后端类型、索引状态，以及记忆文件是否需要重建索引。",
+    description: "查看当前 agent 的结构化 memory 状态，包括消息、摘要和当前上下文项规模。",
   },
   {
     name: "memory_index",
     title: "Memory Index",
-    description: "增量刷新或强制重建当前 agent 的 memory 索引，用来修复检索结果陈旧或缺失。",
+    description: "刷新当前 agent 的结构化 memory 统计信息；LCM 存储本身不再依赖独立 markdown 索引。",
   },
   {
     name: "workspace_list",
