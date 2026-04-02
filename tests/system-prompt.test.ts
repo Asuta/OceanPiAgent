@@ -91,6 +91,40 @@ test("buildRoomBridgePrompt explains that send_message_to_room content can previ
   assert.doesNotMatch(prompt, /ordinary assistant text that continues a streamed room bubble/);
 });
 
+test("buildRoomBridgePrompt requires early progress acknowledgments for multi-step room work", () => {
+  const prompt = buildRoomBridgePrompt({
+    roomTitle: "Test Room",
+    roomId: "room-1",
+    agentLabel: "Harbor Concierge",
+  });
+
+  assert.match(prompt, /send a brief send_message_to_room progress update early in the turn to acknowledge receipt and state the immediate plan before doing the deeper work/);
+  assert.match(prompt, /If the task can be answered immediately with one concise final room reply, you do not need a separate acknowledgment message first/);
+});
+
+test("buildRoomBridgePrompt explains that each send_message_to_room call creates its own bubble", () => {
+  const prompt = buildRoomBridgePrompt({
+    roomTitle: "Test Room",
+    roomId: "room-1",
+    agentLabel: "Harbor Concierge",
+  });
+
+  assert.match(prompt, /Each send_message_to_room call creates one separate visible room bubble/);
+  assert.match(prompt, /send_message_to_room\.messageKey is optional bookkeeping and usually unnecessary/);
+});
+
+test("buildRoomBridgePrompt explains that send_message_to_room content can preview-stream on its own", () => {
+  const prompt = buildRoomBridgePrompt({
+    roomTitle: "Test Room",
+    roomId: "room-1",
+    agentLabel: "Harbor Concierge",
+  });
+
+  assert.match(prompt, /Put the full human-visible message directly in send_message_to_room\.content instead of relying on ordinary assistant text to continue it/);
+  assert.match(prompt, /That content may preview-stream while the tool call arguments are being generated/);
+  assert.doesNotMatch(prompt, /ordinary assistant text that continues a streamed room bubble/);
+});
+
 test("prompt hooks append a skill catalog and injected project context", async () => {
   await withTempCwd(async (tempDir) => {
     await mkdir(path.join(tempDir, "skills", "precision"), { recursive: true });

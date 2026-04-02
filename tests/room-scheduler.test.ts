@@ -6,7 +6,7 @@ import { appendMessageToRoom, createAgentOwnedRoomSession, createAgentSharedStat
 import type { RunRoomTurnResult } from "@/lib/server/room-runner";
 import { runRoomSchedulerNow, stopRoomScheduler } from "@/lib/server/room-scheduler";
 
-test("createSchedulerPacket includes the full unseen visible delta for the target participant", () => {
+test("createSchedulerPacket includes a compact unseen visible delta for the target participant", () => {
   const state = createDefaultWorkspaceState();
   let room = addAgentParticipantToRoom({ room: state.rooms[0]!, agentId: "researcher" });
   const targetParticipant = room.participants.find((participant) => participant.id === "researcher");
@@ -56,9 +56,16 @@ test("createSchedulerPacket includes the full unseen visible delta for the targe
     hasNewDelta: true,
   });
 
-  assert.match(packet.content, /Visible unseen message count: 2/);
-  assert.match(packet.content, /Concierge already summarized the brief\./);
-  assert.match(packet.content, /Please also check the numbers in this chart\./);
+  assert.equal(
+    packet.content,
+    [
+      "[Room scheduler sync packet]",
+      `Latest messageId: ${secondMessage.id}`,
+      "Unseen messages:",
+      "- Harbor Concierge: Concierge already summarized the brief. [Image: brief.png, 0.00 MB]",
+      "- You: Please also check the numbers in this chart. [Image: chart.png, 0.00 MB]",
+    ].join("\n"),
+  );
   assert.equal(packet.attachments.length, 2);
   assert.equal(packet.attachments[0]?.id, "attachment-a");
   assert.equal(packet.attachments[1]?.id, "attachment-b");

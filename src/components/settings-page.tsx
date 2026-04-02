@@ -49,7 +49,7 @@ const PROVIDER_MODE_OPTIONS: Array<{ value: ProviderMode; label: string }> = [
 
 const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
   off: "默认",
-  minimal: "none",
+  none: "none",
   low: "Low",
   medium: "Medium",
   high: "High",
@@ -58,7 +58,7 @@ const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
 
 const THINKING_LEVEL_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
   { value: "off", label: "默认" },
-  { value: "minimal", label: "none" },
+  { value: "none", label: "none" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },

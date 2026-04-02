@@ -1,13 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import {
-  MEMORY_BACKENDS,
-  DEFAULT_MAX_TOOL_LOOP_STEPS,
-  MAX_MAX_TOOL_LOOP_STEPS,
-  MIN_MAX_TOOL_LOOP_STEPS,
-  THINKING_LEVELS,
-  type AgentInfoCard,
-  type AttachedRoomDefinition,
   type RoomChatStreamEvent,
 } from "@/lib/chat/types";
 import { messageImageAttachmentSchema } from "@/lib/chat/schemas";
@@ -43,24 +36,6 @@ const requestSchema = z.object({
       });
     }
   }),
-  settings: z.object({
-    modelConfigId: z.string().max(120).nullable().optional().default(null),
-    apiFormat: z.enum(["chat_completions", "responses"]),
-    model: z.string().max(200).optional().default(""),
-    systemPrompt: z.string().max(4_000).optional().default(""),
-    providerMode: z.enum(["auto", "openai", "right_codes", "generic"]).optional().default("auto"),
-    memoryBackend: z.enum(MEMORY_BACKENDS).optional().default("sqlite-fts"),
-    thinkingLevel: z.enum(THINKING_LEVELS).optional().default("off"),
-    enabledSkillIds: z.array(z.string().trim().min(1).max(120)).max(24).optional().default([]),
-    maxToolLoopSteps: z
-      .number()
-      .int()
-      .min(MIN_MAX_TOOL_LOOP_STEPS)
-      .max(MAX_MAX_TOOL_LOOP_STEPS)
-      .optional()
-      .default(DEFAULT_MAX_TOOL_LOOP_STEPS),
-  }),
-  roomId: z.string().trim().min(1).max(120).optional(),
   roomId: z.string().trim().min(1).max(120).optional(),
   room: z.object({
     id: z.string().max(120),

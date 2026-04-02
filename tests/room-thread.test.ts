@@ -99,6 +99,7 @@ function createAgentState(turns: AgentRoomTurn[]): AgentSharedState {
       model: "gpt-5.4",
       systemPrompt: "",
       providerMode: "auto",
+      memoryBackend: "sqlite-fts",
       maxToolLoopSteps: 8,
       thinkingLevel: "off",
       enabledSkillIds: [],
@@ -257,6 +258,40 @@ test("falls back to scheduler packet latest message id for legacy turns", () => 
       source: "system",
       kind: "system",
       content: "[Room scheduler sync packet]\nLatest message: seq 1 | messageId user-1 | from You (local-user, participant) | user_input/completed: hi",
+    }),
+    anchorMessageId: undefined,
+    timeline: [{ id: `tool:${tool.id}`, sequence: 1, type: "tool", toolId: tool.id }],
+    tools: [tool],
+    emittedMessages: [],
+  });
+
+  const entries = buildRoomThreadToolEntries({
+    roomId: "room-1",
+    roomMessages: [createMessage({ id: "user-1", role: "user", source: "user", kind: "user_input", sender: { id: "local-user", name: "You", role: "participant" }, content: "hi" })],
+    agentStates: {
+      concierge: createAgentState([turn]),
+    },
+  });
+
+  assert.equal(entries.get("user-1")?.[0]?.tool.id, "tool-1");
+});
+
+test("falls back to compact scheduler packet latest message id", () => {
+  const tool = createTool("tool-1", 1);
+  const turn = createTurn({
+    userMessage: createMessage({
+      id: "scheduler-1",
+      roomId: "room-1",
+      seq: 0,
+      role: "system",
+      sender: {
+        id: "room-scheduler",
+        name: "Room Scheduler",
+        role: "system",
+      },
+      source: "system",
+      kind: "system",
+      content: "[Room scheduler sync packet]\nLatest messageId: user-1\nUnseen messages:\n- You: hi",
     }),
     anchorMessageId: undefined,
     timeline: [{ id: `tool:${tool.id}`, sequence: 1, type: "tool", toolId: tool.id }],

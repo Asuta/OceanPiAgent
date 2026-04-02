@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
+import { Agent, type AgentEvent, type ThinkingLevel as PiAgentThinkingLevel } from "@mariozechner/pi-agent-core";
 import type { Api, AssistantMessage, Message, Model, Usage, UserMessage } from "@mariozechner/pi-ai";
 import {
   getResponsesContinuationOrder,
@@ -27,6 +27,7 @@ import type {
   RecoveryDiagnostic,
   RoomMessagePreviewEmission,
   RoomToolContext,
+  ThinkingLevel,
   ToolExecution,
   ToolScope,
 } from "@/lib/chat/types";
@@ -37,6 +38,10 @@ type VisibleMessage = Pick<ChatMessage, "role" | "content" | "attachments" | "me
 type ResponsesContinuationStrategy = "replay" | "previous_response_id";
 
 type PayloadRecord = Record<string, unknown>;
+
+function toPiAgentThinkingLevel(level: ThinkingLevel): PiAgentThinkingLevel {
+  return level === "none" ? "minimal" : level;
+}
 
 interface RunConversationResult {
   assistantText: string;
@@ -656,7 +661,7 @@ async function runConversationAttempt(args: {
     initialState: {
       systemPrompt: args.systemPromptText,
       model,
-      thinkingLevel: args.resolvedModel.actualThinkingLevel,
+      thinkingLevel: toPiAgentThinkingLevel(args.resolvedModel.actualThinkingLevel),
       tools: getPiAgentTools(args.resolvedOptions.toolScope, args.resolvedOptions.toolContext),
       messages: await createConversationHistory(historyMessages, model),
     },
@@ -904,7 +909,7 @@ export async function runTextPrompt(args: {
     initialState: {
       systemPrompt: args.systemPrompt?.trim() || "",
       model: resolvedModel.model,
-      thinkingLevel: resolvedModel.actualThinkingLevel,
+      thinkingLevel: toPiAgentThinkingLevel(resolvedModel.actualThinkingLevel),
       tools: [],
       messages: [
         {
