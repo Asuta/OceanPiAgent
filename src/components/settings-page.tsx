@@ -359,11 +359,13 @@ export function SettingsPage() {
     agents,
     agentStates,
     agentCompactionFeedback,
+    runningAgentRequestIds,
     isAgentRunning,
     isAgentCompacting,
     clearAgentConsole,
     compactAgentContext,
     createAgentDefinition,
+    getRoomById,
     updateAgentSettings,
     updateAgentDefinition,
   } = useWorkspace();
@@ -830,6 +832,8 @@ export function SettingsPage() {
     const isCompacting = isAgentCompacting(agent.id);
     const isLoadingMemory = Boolean(loadingAgentMemoryById[agent.id]);
     const isReindexingMemory = Boolean(reindexingAgentMemoryById[agent.id]);
+    const runningRoomId = runningAgentRequestIds[agent.id] ?? null;
+    const runningRoom = runningRoomId ? getRoomById(runningRoomId) : null;
     const compatibilityPills = getCompatibilityDetailPills(state.compatibility);
     const selectedConfig = modelConfigs.find((modelConfig) => modelConfig.id === state.settings.modelConfigId) ?? null;
     const effectiveModelRef = selectedConfig?.model ?? state.settings.model;
@@ -865,7 +869,7 @@ export function SettingsPage() {
                 className="text-input"
                 value={agentDraft.label}
                 onChange={(event) => updateAgentDraft(agent.id, { label: event.target.value })}
-                disabled={isRunning || isSavingAgent}
+                disabled={isSavingAgent}
               />
             </label>
 
@@ -876,7 +880,7 @@ export function SettingsPage() {
                 className="text-input"
                 value={agentDraft.skillsText}
                 onChange={(event) => updateAgentDraft(agent.id, { skillsText: event.target.value })}
-                disabled={isRunning || isSavingAgent}
+                disabled={isSavingAgent}
               />
             </label>
 
@@ -887,7 +891,7 @@ export function SettingsPage() {
                 className="text-area compact"
                 value={agentDraft.summary}
                 onChange={(event) => updateAgentDraft(agent.id, { summary: event.target.value })}
-                disabled={isRunning || isSavingAgent}
+                disabled={isSavingAgent}
               />
             </label>
 
@@ -898,7 +902,7 @@ export function SettingsPage() {
                 className="text-area compact"
                 value={agentDraft.workingStyle}
                 onChange={(event) => updateAgentDraft(agent.id, { workingStyle: event.target.value })}
-                disabled={isRunning || isSavingAgent}
+                disabled={isSavingAgent}
               />
             </label>
           </div>
@@ -911,14 +915,22 @@ export function SettingsPage() {
               value={agentDraft.instruction}
               onChange={(event) => updateAgentDraft(agent.id, { instruction: event.target.value })}
               placeholder="写入这个 Agent workspace 的私有提示词。"
-              disabled={isRunning || isSavingAgent}
+              disabled={isSavingAgent}
             />
           </label>
+
+          {isRunning ? (
+            <p className="muted-copy top-gap">
+              {runningRoom
+                ? `当前 Agent 正在房间“${runningRoom.title}”中运行。你现在的修改会从下一轮开始生效，不影响这轮已启动的执行。`
+                : "当前 Agent 正在运行。你现在的修改会从下一轮开始生效，不影响这轮已启动的执行。"}
+            </p>
+          ) : null}
 
           {agentError ? <p className="muted-copy top-gap danger-text">{agentError}</p> : null}
 
           <div className="card-actions compact-right top-gap">
-            <button type="button" className="ghost-button" onClick={() => void handleSaveAgent(agent.id)} disabled={isRunning || isSavingAgent}>
+            <button type="button" className="ghost-button" onClick={() => void handleSaveAgent(agent.id)} disabled={isSavingAgent}>
               {isSavingAgent ? "保存中..." : "保存 Agent 资料"}
             </button>
           </div>
@@ -944,7 +956,6 @@ export function SettingsPage() {
 
                   updateAgentSettings(agent.id, applyModelConfigToSettings(state.settings, nextModelConfig));
                 }}
-                disabled={isRunning}
               >
                 <option value="">未选择</option>
                 {modelConfigs.map((modelConfig) => (
@@ -968,7 +979,6 @@ export function SettingsPage() {
                 className="text-input"
                 value={state.settings.thinkingLevel}
                 onChange={(event) => updateAgentSettings(agent.id, { thinkingLevel: event.target.value as ThinkingLevel })}
-                disabled={isRunning}
               >
                 {THINKING_LEVEL_OPTIONS.map((option, index) => (
                   <option key={`${option.value}-${index}`} value={option.value}>
@@ -996,7 +1006,6 @@ export function SettingsPage() {
                 className="text-input"
                 value={state.settings.maxToolLoopSteps}
                 onChange={(event) => updateAgentSettings(agent.id, { maxToolLoopSteps: event.target.valueAsNumber })}
-                disabled={isRunning}
               />
             </label>
 
@@ -1027,7 +1036,6 @@ export function SettingsPage() {
               value={state.settings.systemPrompt}
               onChange={(event) => updateAgentSettings(agent.id, { systemPrompt: event.target.value })}
               placeholder="追加到基础 system prompt 的临时 operator note。"
-              disabled={isRunning}
             />
           </label>
 
@@ -1050,7 +1058,6 @@ export function SettingsPage() {
                               : [...state.settings.enabledSkillIds, skill.id],
                           })
                         }
-                        disabled={isRunning}
                       >
                         {skill.title}
                       </button>

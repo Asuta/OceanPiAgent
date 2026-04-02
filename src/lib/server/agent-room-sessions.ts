@@ -203,21 +203,6 @@ function truncateText(value: string, maxLength: number): string {
   return `${normalized.slice(0, maxLength).trim()}...`;
 }
 
-function formatAttachedRooms(attachedRooms: AttachedRoomDescriptor[], currentRoomId: string): string {
-  if (attachedRooms.length === 0) {
-    return "- none supplied";
-  }
-
-  return attachedRooms
-    .map((room, index) => {
-      const markers = [room.id === currentRoomId ? "current" : null, room.archived ? "archived" : "routable"]
-        .filter(Boolean)
-        .join(", ");
-      return `${index + 1}. ${room.title} (roomId: ${room.id}; ${markers})`;
-    })
-    .join("\n");
-}
-
 function buildIncomingRoomEnvelope(
   roomId: string,
   roomTitle: string,
@@ -225,19 +210,15 @@ function buildIncomingRoomEnvelope(
   sender: RoomSender,
   content: string,
   attachments: MessageImageAttachment[],
-  attachedRooms: AttachedRoomDescriptor[],
 ): string {
   return [
     "[Incoming Chat Room message]",
-    "All rooms attached to this agent intentionally share one memory space and belong to the same operator unless a user explicitly asks for isolation.",
     `Room ID: ${roomId}`,
     `Room Title: ${roomTitle}`,
     `Message ID: ${messageId}`,
     `Sender ID: ${sender.id}`,
     `Sender Name: ${sender.name}`,
     `Sender Role: ${sender.role}`,
-    "Currently attached rooms for this agent:",
-    formatAttachedRooms(attachedRooms, roomId),
     attachments.length > 0 ? "Visible room attachments:" : null,
     ...(attachments.length > 0 ? summarizeImageAttachments(attachments) : []),
     "Visible room message:",
@@ -433,7 +414,6 @@ export async function startAgentRoomRun(args: {
       args.userSender,
       args.userContent,
       args.userAttachments,
-      args.attachedRooms,
     ),
     attachments: [...args.userAttachments],
     createdAt: createTimestamp(),
