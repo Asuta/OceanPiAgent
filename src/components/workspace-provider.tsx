@@ -69,13 +69,16 @@ import {
 } from "@/lib/chat/workspace-domain";
 import { applyWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
 import { hasMessagePayload } from "@/lib/chat/message-attachments";
+import { applyWorkspaceBootstrapToSnapshot, mergeBrowserWorkspaceIntoSnapshot } from "@/components/workspace/browser-workspace-cache";
 import {
   clearPersistedWorkspaceState,
   fetchWorkspaceEnvelope,
-  loadLocalWorkspaceState,
+  loadBrowserWorkspaceState,
+  loadWorkspaceBootstrapFromLocalStorage,
   postRoomCommand,
+  saveWorkspaceBootstrapToLocalStorage,
   saveWorkspaceEnvelope,
-  saveWorkspaceStateToLocalStorage,
+  saveWorkspaceStateToIndexedDb,
 } from "@/components/workspace/persistence";
 import { buildWorkspaceStateSnapshot, canApplyConflictWorkspaceSnapshot, workspaceStatesEqual } from "@/components/workspace/workspace-state";
 import { readRoomStream } from "@/components/workspace/room-stream";
@@ -1989,9 +1992,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
 
     void (async () => {
-      const [serverEnvelope, loadedAgents] = await Promise.all([
+      const bootstrap = loadWorkspaceBootstrapFromLocalStorage();
+      const [serverEnvelope, loadedAgents, browserWorkspace] = await Promise.all([
         fetchWorkspaceEnvelope(),
         fetchAgentDefinitions().catch(() => ROOM_AGENTS),
+        loadBrowserWorkspaceState({
+          parseWorkspaceState,
+          migrateLegacyWorkspaceState,
+        }),
       ]);
       agentsRef.current = loadedAgents.length > 0 ? loadedAgents : ROOM_AGENTS;
       if (!cancelled) {
@@ -2000,11 +2008,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setAgentCompactionFeedback((current) => ensureAgentFeedbackMap(current, agentsRef.current, agentStatesRef.current));
       }
       const serverVersion = typeof serverEnvelope?.version === "number" ? serverEnvelope.version : 0;
-      const serverState = serverEnvelope?.state ?? null;
-      const localWorkspace = loadLocalWorkspaceState({
-        parseWorkspaceState,
-        migrateLegacyWorkspaceState,
-      });
+      const recoveredServerState = serverEnvelope?.state
+        ? mergeBrowserWorkspaceIntoSnapshot(serverEnvelope.state, browserWorkspace)
+        : null;
+      const serverState = recoveredServerState ? applyWorkspaceBootstrapToSnapshot(recoveredServerState, bootstrap) : null;
+      const cachedBrowserState = browserWorkspace ? applyWorkspaceBootstrapToSnapshot(browserWorkspace, bootstrap) : null;
 
       if (cancelled) {
         return;
@@ -2015,8 +2023,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      if (localWorkspace) {
-        applyWorkspaceSnapshot(localWorkspace, serverVersion, { skipServerPersist: false });
+      if (cachedBrowserState) {
+        applyWorkspaceSnapshot(cachedBrowserState, serverVersion, { skipServerPersist: true });
         return;
       }
 
@@ -2070,12 +2078,21 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    saveWorkspaceStateToLocalStorage(buildWorkspaceStateSnapshot({
+    const snapshot = buildWorkspaceStateSnapshot({
       rooms,
       agentStates,
       activeRoomId,
       selectedConsoleAgentId,
-    }));
+    });
+
+    saveWorkspaceBootstrapToLocalStorage(snapshot);
+    const timer = window.setTimeout(() => {
+      void saveWorkspaceStateToIndexedDb(snapshot);
+    }, 200);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [activeRoomId, agentStates, hydrated, rooms, selectedConsoleAgentId]);
 
   useEffect(() => {
@@ -2828,7 +2845,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setResettingAgentContextIds({});
     setCompactingAgentContextIds({});
 
-    clearPersistedWorkspaceState();
+    await clearPersistedWorkspaceState();
 
     await Promise.allSettled(
       agentsRef.current.map((agent) =>
