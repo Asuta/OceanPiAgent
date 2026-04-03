@@ -1,9 +1,8 @@
 import { z } from "zod";
-import { describeAgentMemory, expandAgentMemory, getAgentMemoryStatus, readAgentMemoryFile, reindexAgentMemory, searchAgentMemory } from "@/lib/server/agent-memory-store";
+import { describeAgentMemory, expandAgentMemory, getAgentMemoryStatus, reindexAgentMemory, searchAgentMemory } from "@/lib/server/agent-memory-store";
 import {
   createStructuredOutput,
   getCurrentAgentId,
-  getCurrentChatSettings,
   memoryDescribeArgsSchema,
   memoryExpandArgsSchema,
   memoryGetArgsSchema,
@@ -33,9 +32,7 @@ export const memoryTools = {
     execute: async (value: unknown, _signal?: AbortSignal, context?: Parameters<ToolDefinition<unknown>["execute"]>[2]) => {
       const args = value as z.infer<typeof memorySearchArgsSchema>;
       const agentId = getCurrentAgentId(context);
-      const backendId = getCurrentChatSettings(context)?.memoryBackend;
       const results = await searchAgentMemory(agentId, args.query, {
-        backendId,
         maxResults: args.maxResults,
         minScore: args.minScore,
       });
@@ -51,39 +48,24 @@ export const memoryTools = {
     name: "memory_get",
     displayName: "Memory Get",
     description:
-      "Read a focused structured memory handle directly, or fall back to a persisted markdown file slice after memory_search returns a useful path.",
+      "Read a focused structured memory handle directly after memory_search returns a useful message, summary, or file handle.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        path: { type: "string", description: "Legacy markdown path returned by memory_search." },
-        handle: { type: "string", description: "Structured memory handle such as message:<id>, summary:<id>, or file:<path>." },
-        from: { type: "number", description: "Optional starting line number." },
-        lines: { type: "number", description: "Optional number of lines to read. Defaults to 40." },
+        handle: { type: "string", description: "Structured memory handle such as message:<id>, summary:<id>, or file:<id>." },
       },
-      anyOf: [{ required: ["path"] }, { required: ["handle"] }],
+      required: ["handle"],
     },
     validate: (value: unknown) => memoryGetArgsSchema.parse(value),
     execute: async (value: unknown, _signal?: AbortSignal, context?: Parameters<ToolDefinition<unknown>["execute"]>[2]) => {
       const args = value as z.infer<typeof memoryGetArgsSchema>;
       const agentId = getCurrentAgentId(context);
-      const backendId = getCurrentChatSettings(context)?.memoryBackend;
-      if (args.handle) {
-        const described = await describeAgentMemory(agentId, args.handle);
-        if (!described) {
-          throw new Error("Memory item not found.");
-        }
-        return createStructuredOutput(described);
+      const described = await describeAgentMemory(agentId, args.handle);
+      if (!described) {
+        throw new Error("Memory item not found.");
       }
-
-      const result = await readAgentMemoryFile({
-        agentId,
-        relPath: args.path || "",
-        from: args.from,
-        lines: args.lines,
-      }, { backendId });
-
-      return createStructuredOutput(result);
+      return createStructuredOutput(described);
     },
   } satisfies ToolDefinition<unknown>,
   memory_describe: {
@@ -150,8 +132,7 @@ export const memoryTools = {
     validate: (value: unknown) => memoryStatusArgsSchema.parse(value),
     execute: async (_value: unknown, _signal?: AbortSignal, context?: Parameters<ToolDefinition<unknown>["execute"]>[2]) => {
       const agentId = getCurrentAgentId(context);
-      const backendId = getCurrentChatSettings(context)?.memoryBackend;
-      const result = await getAgentMemoryStatus(agentId, { backendId });
+      const result = await getAgentMemoryStatus(agentId);
 
       return createStructuredOutput(result);
     },
@@ -172,8 +153,7 @@ export const memoryTools = {
     execute: async (value: unknown, _signal?: AbortSignal, context?: Parameters<ToolDefinition<unknown>["execute"]>[2]) => {
       const args = value as z.infer<typeof memoryIndexArgsSchema>;
       const agentId = getCurrentAgentId(context);
-      const backendId = getCurrentChatSettings(context)?.memoryBackend;
-      const result = await reindexAgentMemory(agentId, { force: args.force, backendId });
+      const result = await reindexAgentMemory(agentId, { force: args.force });
 
       return createStructuredOutput(result);
     },

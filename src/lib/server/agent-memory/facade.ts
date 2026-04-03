@@ -1,7 +1,6 @@
-import type { MemoryBackendId } from "@/lib/chat/types";
-import { loadWorkspaceEnvelope } from "@/lib/server/workspace-store";
-import { MarkdownMemoryBackend } from "./backends/markdown-backend";
-import type { AgentMemoryBackend } from "./backend";
+import { rm } from "node:fs/promises";
+import path from "node:path";
+import type { MemoryBackendId, RoomAgentId } from "@/lib/chat/types";
 import type {
   AgentMemoryIndexResult,
   AgentMemorySearchOptions,
@@ -14,75 +13,21 @@ import type {
   MemorySearchResult,
   ReadAgentMemoryFileArgs,
 } from "./types";
-import type { RoomAgentId } from "@/lib/chat/types";
-import { getAgentLcmRetrieval } from "../lcm/facade";
+import { getAgentLcmRetrieval, getLcmStores } from "../lcm/facade";
+import { extractSearchTerms } from "../lcm/full-text-fallback";
 import { estimateTokens } from "../lcm/estimate-tokens";
 
-type ResolvedMemoryBackend = {
-  requestedId: MemoryBackendId;
-  backend: AgentMemoryBackend;
-  fallbackReason?: string;
-};
+const LEGACY_FALLBACK_REASON =
+  "Legacy markdown memory has been removed; OceanKing now always uses structured LCM memory.";
 
-const cachedBackends = new Map<MemoryBackendId, ResolvedMemoryBackend>();
-
-function normalizeBackendId(value: unknown): MemoryBackendId {
-  return value === "markdown" ? "markdown" : "sqlite-fts";
+function getLegacyFallbackReason(backendId?: MemoryBackendId): string | undefined {
+  return backendId === "markdown" || process.env.OCEANKING_MEMORY_BACKEND === "markdown"
+    ? LEGACY_FALLBACK_REASON
+    : undefined;
 }
 
-function getConfiguredBackendId(): MemoryBackendId {
-  return process.env.OCEANKING_MEMORY_BACKEND === "markdown" ? "markdown" : "sqlite-fts";
-}
-
-async function createBackend(requestedId: MemoryBackendId): Promise<ResolvedMemoryBackend> {
-  if (requestedId === "markdown") {
-    return {
-      requestedId,
-      backend: new MarkdownMemoryBackend(),
-    };
-  }
-
-  try {
-    const { SqliteFtsMemoryBackend } = await import("./backends/sqlite-fts-backend");
-    return {
-      requestedId,
-      backend: new SqliteFtsMemoryBackend(),
-    };
-  } catch (error) {
-    return {
-      requestedId,
-      backend: new MarkdownMemoryBackend(),
-      fallbackReason: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
-async function resolveRequestedBackendId(agentId: RoomAgentId, override?: MemoryBackendId): Promise<MemoryBackendId> {
-  if (override) {
-    return normalizeBackendId(override);
-  }
-
-  try {
-    const workspace = await loadWorkspaceEnvelope();
-    return normalizeBackendId(workspace.state.agentStates[agentId]?.settings?.memoryBackend);
-  } catch {
-    return getConfiguredBackendId();
-  }
-}
-
-async function getResolvedBackend(agentId: RoomAgentId, override?: MemoryBackendId): Promise<ResolvedMemoryBackend> {
-  const requestedId = await resolveRequestedBackendId(agentId, override);
-  const cached = cachedBackends.get(requestedId);
-  if (cached) {
-    return cached;
-  }
-
-  const resolved = await createBackend(requestedId);
-  cachedBackends.set(requestedId, resolved);
-  return resolved;
-}
-
-function withFallbackReason<T extends { fallbackReason?: string }>(value: T, fallbackReason?: string): T {
+function withFallbackReason<T extends object>(value: T, backendId?: MemoryBackendId): T & { fallbackReason?: string } {
+  const fallbackReason = getLegacyFallbackReason(backendId);
   if (!fallbackReason) {
     return value;
   }
@@ -93,14 +38,51 @@ function withFallbackReason<T extends { fallbackReason?: string }>(value: T, fal
   };
 }
 
-export async function appendAgentTurnMemory(args: AppendAgentTurnMemoryArgs, options?: { backendId?: MemoryBackendId }): Promise<void> {
-  const resolved = await getResolvedBackend(args.agentId, options?.backendId);
-  await resolved.backend.appendTurnMemory(args);
+async function getStructuredMemoryStats(agentId: RoomAgentId) {
+  const { conversationStore, summaryStore } = await getLcmStores();
+  const conversation = await conversationStore.getConversationBySessionKey(agentId);
+  if (!conversation) {
+    return {
+      conversation,
+      messageCount: 0,
+      summaryCount: 0,
+      largeFileCount: 0,
+      contextItemCount: 0,
+    };
+  }
+
+  const [messageCount, summaries, largeFiles, contextItems] = await Promise.all([
+    conversationStore.getMessageCount(conversation.conversationId),
+    summaryStore.getSummariesByConversation(conversation.conversationId),
+    summaryStore.getLargeFilesByConversation(conversation.conversationId),
+    summaryStore.getContextItems(conversation.conversationId),
+  ]);
+
+  return {
+    conversation,
+    messageCount,
+    summaryCount: summaries.length,
+    largeFileCount: largeFiles.length,
+    contextItemCount: contextItems.length,
+  };
 }
 
-export async function appendAgentCompactionMemory(args: AppendAgentCompactionMemoryArgs, options?: { backendId?: MemoryBackendId }): Promise<void> {
-  const resolved = await getResolvedBackend(args.agentId, options?.backendId);
-  await resolved.backend.appendCompactionMemory(args);
+export async function appendAgentTurnMemory(
+  args: AppendAgentTurnMemoryArgs,
+  options?: { backendId?: MemoryBackendId },
+): Promise<void> {
+  void args;
+  void options;
+  // Legacy markdown timeline writes were removed. LCM ingestion is handled elsewhere.
+}
+
+export async function appendAgentCompactionMemory(
+  args: AppendAgentCompactionMemoryArgs,
+  options?: { backendId?: MemoryBackendId },
+): Promise<void> {
+  void args;
+  void options;
+  // Legacy compaction markdown writes were removed. Summary lineage now lives in LCM.
 }
 
 export async function searchAgentMemory(
@@ -109,50 +91,112 @@ export async function searchAgentMemory(
   options?: AgentMemorySearchOptions & { backendId?: MemoryBackendId },
 ): Promise<MemorySearchResult[]> {
   const { conversation, retrieval } = await getAgentLcmRetrieval(agentId);
-  if (conversation) {
-    const grep = await retrieval.grep({
-      query,
-      mode: "full_text",
-      scope: "both",
-      conversationId: conversation.conversationId,
-      limit: options?.maxResults,
-    });
-    const structured = [
-      ...grep.messages.map((message) => ({
-        handle: `message:${message.messageId}`,
-        type: "message" as const,
-        id: String(message.messageId),
-        path: `message:${message.messageId}`,
-        startLine: 1,
-        endLine: 1,
-        snippet: message.snippet,
-        score: message.rank ?? 0,
-        createdAt: message.createdAt.toISOString(),
-      })),
-      ...grep.summaries.map((summary) => ({
-        handle: `summary:${summary.summaryId}`,
-        type: "summary" as const,
-        id: summary.summaryId,
-        path: `summary:${summary.summaryId}`,
-        startLine: 1,
-        endLine: 1,
-        snippet: summary.snippet,
-        score: summary.rank ?? 0,
-        createdAt: summary.createdAt.toISOString(),
-      })),
-    ].slice(0, options?.maxResults ?? 8);
-    if (structured.length > 0) {
-      return structured;
-    }
+  if (!conversation) {
+    return [];
   }
 
-  const resolved = await getResolvedBackend(agentId, options?.backendId);
-  return resolved.backend.search(agentId, query, options);
+  const limit = options?.maxResults ?? 8;
+  const queryTerms = extractSearchTerms(query);
+
+  const mapGrepResult = (grep: Awaited<ReturnType<typeof retrieval.grep>>, matchedTerms: string[]): MemorySearchResult[] => [
+    ...grep.messages.map((message) => ({
+      handle: `message:${message.messageId}`,
+      type: "message" as const,
+      id: String(message.messageId),
+      path: `message:${message.messageId}`,
+      startLine: 1,
+      endLine: 1,
+      snippet: message.snippet,
+      score: Math.max(1, matchedTerms.filter((term) => message.snippet.toLowerCase().includes(term)).length),
+      createdAt: message.createdAt.toISOString(),
+    })),
+    ...grep.summaries.map((summary) => ({
+      handle: `summary:${summary.summaryId}`,
+      type: "summary" as const,
+      id: summary.summaryId,
+      path: `summary:${summary.summaryId}`,
+      startLine: 1,
+      endLine: 1,
+      snippet: summary.snippet,
+      score: Math.max(1, matchedTerms.filter((term) => summary.snippet.toLowerCase().includes(term)).length),
+      createdAt: summary.createdAt.toISOString(),
+    })),
+  ];
+
+  const grep = await retrieval.grep({
+    query,
+    mode: "full_text",
+    scope: "both",
+    conversationId: conversation.conversationId,
+    limit,
+  });
+
+  let results = mapGrepResult(grep, queryTerms.length > 0 ? queryTerms : [query.toLowerCase()]);
+
+  if (results.length === 0 && queryTerms.length > 1) {
+    const merged = new Map<string, MemorySearchResult & { matchedTerms: Set<string> }>();
+    for (const term of queryTerms.slice(0, 6)) {
+      const termGrep = await retrieval.grep({
+        query: term,
+        mode: "full_text",
+        scope: "both",
+        conversationId: conversation.conversationId,
+        limit,
+      });
+
+      for (const result of mapGrepResult(termGrep, [term])) {
+        const key = result.handle ?? result.path;
+        const existing = merged.get(key);
+        if (!existing) {
+          merged.set(key, {
+            ...result,
+            matchedTerms: new Set([term]),
+          });
+          continue;
+        }
+
+        existing.matchedTerms.add(term);
+        existing.score = existing.matchedTerms.size;
+        if (Date.parse(result.createdAt ?? "") > Date.parse(existing.createdAt ?? "")) {
+          existing.createdAt = result.createdAt;
+        }
+        if ((result.snippet?.length ?? 0) > (existing.snippet?.length ?? 0)) {
+          existing.snippet = result.snippet;
+        }
+      }
+    }
+
+    results = [...merged.values()]
+      .sort((left, right) => {
+        if (right.score !== left.score) {
+          return right.score - left.score;
+        }
+        return Date.parse(right.createdAt ?? "") - Date.parse(left.createdAt ?? "");
+      })
+      .map((result) => ({
+        handle: result.handle,
+        type: result.type,
+        id: result.id,
+        path: result.path,
+        startLine: result.startLine,
+        endLine: result.endLine,
+        snippet: result.snippet,
+        score: result.score,
+        createdAt: result.createdAt,
+      }));
+  }
+
+  const minScore = options?.minScore ?? 0;
+  return results.filter((result) => result.score >= minScore).slice(0, limit);
 }
 
-export async function readAgentMemoryFile(args: ReadAgentMemoryFileArgs, options?: { backendId?: MemoryBackendId }): Promise<MemoryFileSlice> {
-  const resolved = await getResolvedBackend(args.agentId, options?.backendId);
-  return resolved.backend.readFile(args);
+export async function readAgentMemoryFile(
+  args: ReadAgentMemoryFileArgs,
+  options?: { backendId?: MemoryBackendId },
+): Promise<MemoryFileSlice> {
+  void args;
+  void options;
+  throw new Error("Legacy markdown memory files are no longer available. Use memory_search and memory_get with structured handles.");
 }
 
 export async function describeAgentMemory(agentId: RoomAgentId, handle: string): Promise<MemoryDescribeResult | null> {
@@ -166,7 +210,7 @@ export async function describeAgentMemory(agentId: RoomAgentId, handle: string):
       handle,
       type: "summary",
       summary: {
-        summaryId: described.summary.kind ? described.id : described.id,
+        summaryId: described.id,
         kind: described.summary.kind,
         depth: described.summary.depth,
         content: described.summary.content,
@@ -187,6 +231,7 @@ export async function describeAgentMemory(agentId: RoomAgentId, handle: string):
       },
     };
   }
+
   if (handle.startsWith("file:")) {
     const { retrieval } = await getAgentLcmRetrieval(agentId);
     const described = await retrieval.describe(handle.slice("file:".length));
@@ -210,14 +255,15 @@ export async function describeAgentMemory(agentId: RoomAgentId, handle: string):
       },
     };
   }
+
   if (handle.startsWith("message:")) {
-    const { conversation } = await getAgentLcmRetrieval(agentId);
-    if (!conversation) return null;
     const messageId = Number(handle.slice("message:".length));
-    const { getLcmStores } = await import("../lcm/facade");
+    if (!Number.isFinite(messageId)) {
+      return null;
+    }
     const { conversationStore } = await getLcmStores();
-    const match = await conversationStore.getMessageById(messageId);
-    if (!match) {
+    const message = await conversationStore.getMessageById(messageId);
+    if (!message) {
       return null;
     }
     return {
@@ -225,15 +271,14 @@ export async function describeAgentMemory(agentId: RoomAgentId, handle: string):
       type: "message",
       message: {
         messageId,
-        role: match.role,
-        content: match.content,
-        createdAt: match.createdAt.toISOString(),
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt.toISOString(),
       },
     };
   }
-  const slice = await readAgentMemoryFile({ agentId, relPath: handle.startsWith("file:") ? handle.slice("file:".length) : handle, lines: 40 }).catch(() => null);
-  if (!slice) return null;
-  return { handle: handle.startsWith("file:") ? handle : `file:${slice.path}`, type: "file", file: slice };
+
+  return null;
 }
 
 export async function expandAgentMemory(
@@ -257,9 +302,12 @@ export async function expandAgentMemory(
       truncated: expanded.truncated,
     };
   }
+
   if (args.handle.startsWith("message:")) {
     const description = await describeAgentMemory(agentId, args.handle);
-    if (!description?.message) return null;
+    if (!description?.message) {
+      return null;
+    }
     return {
       handle: args.handle,
       type: "message",
@@ -269,39 +317,90 @@ export async function expandAgentMemory(
       truncated: false,
     };
   }
-  const file = await readAgentMemoryFile({ agentId, relPath: args.handle.startsWith("file:") ? args.handle.slice("file:".length) : args.handle, lines: 60 }).catch(() => null);
-  if (!file) return null;
-  return {
-    handle: args.handle.startsWith("file:") ? args.handle : `file:${file.path}`,
-    type: "file",
-    summaries: [],
-    messages: [{ messageId: file.path, role: "file", content: file.text, tokenCount: estimateTokens(file.text) }],
-    estimatedTokens: estimateTokens(file.text),
-    truncated: false,
-  };
+
+  if (args.handle.startsWith("file:")) {
+    const description = await describeAgentMemory(agentId, args.handle);
+    if (!description?.file) {
+      return null;
+    }
+    return {
+      handle: args.handle,
+      type: "file",
+      summaries: [],
+      messages: [{
+        messageId: description.file.fileId ?? description.file.path,
+        role: "file",
+        content: description.file.text,
+        tokenCount: estimateTokens(description.file.text),
+        createdAt: description.file.createdAt,
+      }],
+      estimatedTokens: estimateTokens(description.file.text),
+      truncated: false,
+    };
+  }
+
+  return null;
 }
 
-export async function clearAgentMemory(agentId: RoomAgentId, options?: { backendId?: MemoryBackendId }): Promise<void> {
-  const resolved = await getResolvedBackend(agentId, options?.backendId);
-  await resolved.backend.clear(agentId);
+export async function clearAgentMemory(
+  agentId: RoomAgentId,
+  options?: { backendId?: MemoryBackendId },
+): Promise<void> {
+  void options;
+  await Promise.all([
+    rm(path.join(process.cwd(), ".oceanking", "memory", agentId), { recursive: true, force: true }),
+    rm(path.join(process.cwd(), ".oceanking", "memory-index", `${agentId}.sqlite`), { force: true }),
+  ]);
 }
 
 export async function getAgentMemorySummary(agentId: RoomAgentId, options?: { backendId?: MemoryBackendId }) {
-  const resolved = await getResolvedBackend(agentId, options?.backendId);
-  return resolved.backend.getSummary(agentId);
+  const stats = await getStructuredMemoryStats(agentId);
+  return withFallbackReason(
+    {
+      fileCount: stats.largeFileCount,
+      hasTimeline: stats.messageCount > 0,
+      hasCompactions: stats.summaryCount > 0,
+    },
+    options?.backendId,
+  );
 }
 
-export async function getAgentMemoryStatus(agentId: RoomAgentId, options?: { backendId?: MemoryBackendId }): Promise<AgentMemoryStatus> {
-  const resolved = await getResolvedBackend(agentId, options?.backendId);
-  const status = await resolved.backend.getStatus(agentId);
-  return withFallbackReason(status, resolved.fallbackReason);
+export async function getAgentMemoryStatus(
+  agentId: RoomAgentId,
+  options?: { backendId?: MemoryBackendId },
+): Promise<AgentMemoryStatus> {
+  const stats = await getStructuredMemoryStats(agentId);
+  return withFallbackReason(
+    {
+      backend: "sqlite-fts",
+      fileCount: stats.largeFileCount,
+      hasTimeline: stats.messageCount > 0,
+      hasCompactions: stats.summaryCount > 0,
+      documentCount: stats.messageCount + stats.summaryCount + stats.largeFileCount,
+      chunkCount: stats.contextItemCount,
+      lastIndexedAt: stats.conversation?.updatedAt.toISOString(),
+      dirty: false,
+      missingIndex: false,
+    },
+    options?.backendId,
+  );
 }
 
 export async function reindexAgentMemory(
   agentId: RoomAgentId,
   options?: { force?: boolean; backendId?: MemoryBackendId },
 ): Promise<AgentMemoryIndexResult> {
-  const resolved = await getResolvedBackend(agentId, options?.backendId);
-  const result = await resolved.backend.reindex(agentId, options);
-  return withFallbackReason(result, resolved.fallbackReason);
+  const startedAt = performance.now();
+  const stats = await getStructuredMemoryStats(agentId);
+  return withFallbackReason(
+    {
+      backend: "sqlite-fts",
+      mode: options?.force ? "full" : "incremental",
+      indexedDocuments: stats.messageCount + stats.summaryCount + stats.largeFileCount,
+      removedDocuments: 0,
+      chunkCount: stats.contextItemCount,
+      durationMs: Math.max(1, Math.round(performance.now() - startedAt)),
+    },
+    options?.backendId,
+  );
 }

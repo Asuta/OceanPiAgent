@@ -21,7 +21,7 @@ function escapeLike(term: string): string {
   return term.replace(/([\\%_])/g, "\\$1");
 }
 
-export function buildLikeSearchPlan(column: string, query: string): LikeSearchPlan {
+export function extractSearchTerms(query: string): string[] {
   const terms: string[] = [];
   for (const match of query.matchAll(RAW_TERM_RE)) {
     const raw = match[1] ?? match[2] ?? "";
@@ -37,6 +37,12 @@ export function buildLikeSearchPlan(column: string, query: string): LikeSearchPl
       terms.push(fallback);
     }
   }
+
+  return terms;
+}
+
+export function buildLikeSearchPlan(column: string, query: string): LikeSearchPlan {
+  const terms = extractSearchTerms(query);
 
   return {
     terms,

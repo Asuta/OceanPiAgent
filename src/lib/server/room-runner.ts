@@ -33,9 +33,9 @@ import {
   isCurrentAgentRun,
   recordAgentTextDelta,
   recordAgentToolEvent,
+  type AgentRunStartupTiming,
   startAgentRoomRun,
 } from "@/lib/server/agent-room-sessions";
-import { assembleAgentLcmContext } from "@/lib/server/lcm/facade";
 import {
   createAttachedRoomDefinition,
   createKnownAgentCards,
@@ -52,6 +52,52 @@ function createAgentSender(agent: AgentRoomTurn["agent"]): RoomSender {
     name: agent.label,
     role: "participant",
   };
+}
+
+function shouldLogFirstTokenTiming(): boolean {
+  const value = process.env.OCEANKING_LOG_FIRST_TOKEN_TIMING?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function roundTimingMs(value: number): number {
+  return Math.max(0, Math.round(value * 10) / 10);
+}
+
+function toRoundedStartupTiming(timing: AgentRunStartupTiming) {
+  return {
+    hydrateMs: roundTimingMs(timing.hydrateMs),
+    continuationMs: roundTimingMs(timing.continuationMs),
+    persistAndIngestMs: roundTimingMs(timing.persistAndIngestMs),
+    assembleMs: roundTimingMs(timing.assembleMs),
+    totalStartupMs: roundTimingMs(timing.totalStartupMs),
+    hadContinuationSnapshot: timing.hadContinuationSnapshot,
+  };
+}
+
+function logFirstTokenTiming(params: {
+  stage: "first_tool" | "first_room_preview" | "first_delta" | "completed_without_delta";
+  agentId: RoomAgentId;
+  roomId: string;
+  requestId: string;
+  startupTiming: AgentRunStartupTiming;
+  elapsedMs: number;
+  resolvedModel?: string;
+  toolName?: string;
+  roomMessageKind?: string;
+}) {
+  console.info(
+    `[first-token-timing] ${JSON.stringify({
+      stage: params.stage,
+      agentId: params.agentId,
+      roomId: params.roomId,
+      requestId: params.requestId,
+      elapsedMs: roundTimingMs(params.elapsedMs),
+      ...(params.resolvedModel ? { resolvedModel: params.resolvedModel } : {}),
+      ...(params.toolName ? { toolName: params.toolName } : {}),
+      ...(params.roomMessageKind ? { roomMessageKind: params.roomMessageKind } : {}),
+      startup: toRoundedStartupTiming(params.startupTiming),
+    })}`,
+  );
 }
 
 function sortReceipts(receipts: RoomMessageReceipt[]): RoomMessageReceipt[] {
@@ -614,18 +660,6 @@ export async function runPreparedRoomTurn(
     roomHistoryById: args.roomHistoryById,
   });
 
-  const promptOverride = buildRoomBridgePrompt({
-    operatorPrompt: [
-      args.settings.systemPrompt,
-      (await assembleAgentLcmContext(args.agent.id, 20_000))?.systemPromptAddition,
-    ].filter(Boolean).join("\n\n"),
-    roomId: args.room.id,
-    roomTitle: args.room.title,
-    agentLabel: args.agent.label,
-    agentInstruction: args.agent.instruction,
-    attachedRooms: args.attachedRooms,
-  });
-
   const requestController = new AbortController();
   const runContext = await startAgentRoomRun({
     agentId: args.agent.id,
@@ -642,11 +676,26 @@ export async function runPreparedRoomTurn(
     userAttachments: args.message.attachments,
     requestSignal: args.signal ?? requestController.signal,
   });
+  const promptOverride = buildRoomBridgePrompt({
+    operatorPrompt: [
+      args.settings.systemPrompt,
+      runContext.systemPromptAddition,
+    ].filter(Boolean).join("\n\n"),
+    roomId: args.room.id,
+    roomTitle: args.room.title,
+    agentLabel: args.agent.label,
+    agentInstruction: args.agent.instruction,
+    attachedRooms: args.attachedRooms,
+  });
 
   const toolEvents: ToolExecution[] = [];
   const emittedMessages: RoomMessage[] = [];
   const receiptUpdates: RoomMessageReceiptUpdate[] = [];
   const timeline: TurnTimelineEvent[] = [];
+  const firstTokenTimingEnabled = shouldLogFirstTokenTiming();
+  let firstToolLogged = false;
+  let firstRoomPreviewLogged = false;
+  let firstTokenLogged = false;
   let draftSegments: DraftTextSegment[] = [];
   const resolveRoomMessageId = createRoomMessageIdResolver(runContext.requestId);
   let currentUserReceiptStatus: RoomMessageReceiptStatus = "none";
@@ -672,6 +721,17 @@ export async function runPreparedRoomTurn(
         onTextDelta: (delta) => {
           if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
             return;
+          }
+          if (firstTokenTimingEnabled && !firstTokenLogged) {
+            firstTokenLogged = true;
+            logFirstTokenTiming({
+              stage: "first_delta",
+              agentId: args.agent.id,
+              roomId: args.room.id,
+              requestId: runContext.requestId,
+              startupTiming: runContext.startupTiming,
+              elapsedMs: performance.now() - runContext.startupTiming.startedAt,
+            });
           }
           recordAgentTextDelta(args.agent.id, runContext.requestId, delta);
           if (activeRoomMessageStream) {
@@ -702,6 +762,18 @@ export async function runPreparedRoomTurn(
           if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
             return;
           }
+          if (firstTokenTimingEnabled && !firstRoomPreviewLogged) {
+            firstRoomPreviewLogged = true;
+            logFirstTokenTiming({
+              stage: "first_room_preview",
+              agentId: args.agent.id,
+              roomId: args.room.id,
+              requestId: runContext.requestId,
+              startupTiming: runContext.startupTiming,
+              elapsedMs: performance.now() - runContext.startupTiming.startedAt,
+              roomMessageKind: preview.kind,
+            });
+          }
 
           const previewMessage = createEmittedRoomMessage(
             {
@@ -721,6 +793,18 @@ export async function runPreparedRoomTurn(
         onTool: (tool) => {
           if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
             return;
+          }
+          if (firstTokenTimingEnabled && !firstToolLogged) {
+            firstToolLogged = true;
+            logFirstTokenTiming({
+              stage: "first_tool",
+              agentId: args.agent.id,
+              roomId: args.room.id,
+              requestId: runContext.requestId,
+              startupTiming: runContext.startupTiming,
+              elapsedMs: performance.now() - runContext.startupTiming.startedAt,
+              toolName: tool.toolName,
+            });
           }
 
           draftSegments = finalizeLatestDraftSegment(draftSegments);
@@ -795,6 +879,19 @@ export async function runPreparedRoomTurn(
         modelConfigOverrides: args.modelConfigOverrides,
       },
     );
+
+    if (firstTokenTimingEnabled && !firstTokenLogged) {
+      firstTokenLogged = true;
+      logFirstTokenTiming({
+        stage: "completed_without_delta",
+        agentId: args.agent.id,
+        roomId: args.room.id,
+        requestId: runContext.requestId,
+        startupTiming: runContext.startupTiming,
+        elapsedMs: performance.now() - runContext.startupTiming.startedAt,
+        resolvedModel: result.resolvedModel,
+      });
+    }
 
     await completeAgentRoomRun({
       agentId: args.agent.id,

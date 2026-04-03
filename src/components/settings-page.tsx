@@ -70,8 +70,7 @@ const NEW_MODEL_CONFIG_ID = "__new_model_config__";
 const DEFAULT_PI_NATIVE_PROVIDER_ID: PiProviderId = "openai";
 const PI_NATIVE_PROVIDER_OPTIONS = getPiProviderOptions().filter((option) => !option.usesCustomEndpoint);
 const MEMORY_BACKEND_OPTIONS: Array<{ value: MemoryBackendId; label: string; description: string }> = [
-  { value: "sqlite-fts", label: "SQLite FTS", description: "默认方案。保留 Markdown 记忆文件，并维护一个 SQLite 全文索引。" },
-  { value: "markdown", label: "Markdown Scan", description: "兼容模式。直接扫描 Markdown 文件，不维护额外索引。" },
+  { value: "sqlite-fts", label: "Structured LCM", description: "唯一在线方案。所有记忆、压缩摘要和可展开回溯都直接来自 LCM 结构化存储。" },
 ];
 
 interface WorkspaceSkillSummary {
@@ -1010,7 +1009,7 @@ export function SettingsPage() {
             </label>
 
             <label className="field-block" htmlFor={`${agent.id}-memory-backend`}>
-              <span>Memory Backend</span>
+              <span>Memory Store</span>
               <select
                 id={`${agent.id}-memory-backend`}
                 className="text-input"
@@ -1024,7 +1023,7 @@ export function SettingsPage() {
                   </option>
                 ))}
               </select>
-              <p className="muted-copy">{MEMORY_BACKEND_OPTIONS.find((option) => option.value === state.settings.memoryBackend)?.description}</p>
+              <p className="muted-copy">{MEMORY_BACKEND_OPTIONS[0]?.description}</p>
             </label>
           </div>
 
@@ -1137,11 +1136,11 @@ export function SettingsPage() {
           <strong className="panel-lead">{memoryStatus ? memoryStatus.backend : state.settings.memoryBackend}</strong>
           <div className="info-list top-gap">
             <div>
-              <span>Configured backend</span>
+              <span>Configured store</span>
               <strong>{state.settings.memoryBackend}</strong>
             </div>
             <div>
-              <span>Active backend</span>
+              <span>Active store</span>
               <strong>{memoryStatus?.backend || (isLoadingMemory ? "读取中" : "未知")}</strong>
             </div>
             <div>

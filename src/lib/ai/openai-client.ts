@@ -40,7 +40,7 @@ type ResponsesContinuationStrategy = "replay" | "previous_response_id";
 type PayloadRecord = Record<string, unknown>;
 
 function toPiAgentThinkingLevel(level: ThinkingLevel): PiAgentThinkingLevel {
-  return level === "none" ? "minimal" : level;
+  return level === "none" ? "off" : level;
 }
 
 interface RunConversationResult {
