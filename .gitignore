@@ -16,6 +16,7 @@ yarn-error.log*
 pnpm-debug.log*
 devserver.log
 opencode-dev.log
+next-env.d.ts
 
 .DS_Store
 Thumbs.db
