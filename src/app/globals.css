@@ -1436,6 +1436,31 @@ html[data-theme="dark"] .thread-list::before {
   line-height: 1.6;
 }
 
+.room-log-page,
+.room-log-hero,
+.room-log-hero-copy,
+.room-log-card {
+  display: grid;
+  gap: 12px;
+}
+
+.room-log-hero {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.room-log-hero-actions,
+.room-log-filter-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.room-log-placeholder pre {
+  max-height: none;
+  min-height: 160px;
+}
+
 .thread-list {
   flex: 1 1 auto;
   position: relative;
@@ -2683,7 +2708,8 @@ html[data-theme="dark"] .thread-list::before {
 
   .room-chat-topbar,
   .room-chat-toolbar,
-  .room-chat-titleline {
+  .room-chat-titleline,
+  .room-log-hero {
     flex-direction: column;
     align-items: flex-start;
   }

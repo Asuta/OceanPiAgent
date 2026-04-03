@@ -80,6 +80,13 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   }, []);
 
   const shellTitle = useMemo(() => getShellTitle(pathname), [pathname]);
+  const activeTopbarRoomId = useMemo(() => {
+    if (!pathname.startsWith("/rooms/")) {
+      return "";
+    }
+
+    return pathname.split("/")[2] ?? "";
+  }, [pathname]);
   const globalModelConfigValue = useMemo(() => {
     if (agents.length === 0) {
       return EMPTY_MODEL_CONFIG_VALUE;
@@ -279,6 +286,11 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
             <p>{shellTitle.subtitle}</p>
           </div>
           <div className="topbar-actions">
+            {activeTopbarRoomId ? (
+              <Link href={`/rooms/${activeTopbarRoomId}/logs`} className="secondary-button">
+                Log
+              </Link>
+            ) : null}
             <label className="topbar-model-switcher" aria-label="切换所有 agent 的模型配置">
               <span className="eyebrow-label">Agent 模型</span>
               <select
