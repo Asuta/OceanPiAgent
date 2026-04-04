@@ -19,6 +19,7 @@ import {
   getToolStats,
   useWorkspace,
 } from "@/components/workspace-provider";
+import { MarkdownMessage } from "@/components/markdown-message";
 import { RoomCronPanel } from "@/components/room-cron-panel";
 import { DraftHistoryInline } from "@/components/workspace/draft-history-inline";
 import { buildRoomThreadDraftEntries, buildRoomThreadToolEntries, type RoomThreadDraftEntry, type RoomThreadToolEntry } from "@/components/workspace/room-thread";
@@ -872,6 +873,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
             ) : (
               room.roomMessages.map((message, index) => {
                 const shouldShowState = message.role === "assistant" && (message.kind !== "answer" || message.status !== "completed");
+                const shouldRenderMarkdown = message.role === "assistant" || message.source === "agent_emit";
                 const isLatestMessage = index === room.roomMessages.length - 1;
                 const inlineToolEntries = roomThreadToolEntries.get(message.id) ?? [];
                 const inlineDraftEntries = roomThreadDraftEntries.get(message.id) ?? [];
@@ -906,7 +908,13 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                           </div>
                         )}
 
-                        {message.content ? <div className="thread-message-body">{message.content}</div> : null}
+                        {message.content ? (
+                          shouldRenderMarkdown ? (
+                            <MarkdownMessage className="thread-message-body markdown-body" content={message.content} />
+                          ) : (
+                            <div className="thread-message-body">{message.content}</div>
+                          )
+                        ) : null}
 
                         {message.attachments.length > 0 ? (
                           <div className="message-image-grid">
