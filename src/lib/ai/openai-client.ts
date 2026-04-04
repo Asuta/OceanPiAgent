@@ -39,6 +39,8 @@ type ResponsesContinuationStrategy = "replay" | "previous_response_id";
 
 type PayloadRecord = Record<string, unknown>;
 
+const FINAL_ROOM_DELIVERY_SHORT_CIRCUIT_MS = 750;
+
 function toPiAgentThinkingLevel(level: ThinkingLevel): PiAgentThinkingLevel {
   // pi-agent-core types lag OpenAI's current `none` effort value, but the
   // runtime forwards any non-`off` string as provider reasoning effort.
@@ -635,6 +637,20 @@ function getGeneratedAssistantMessages(messages: Message[]): AssistantMessage[] 
   return messages.filter(isAssistantMessage);
 }
 
+function shouldShortCircuitAfterFinalRoomDelivery(tool: ToolExecution, currentRoomId: string | undefined): boolean {
+  const roomId = currentRoomId?.trim();
+  if (!roomId) {
+    return false;
+  }
+
+  return tool.toolName === "send_message_to_room"
+    && tool.status === "success"
+    && tool.roomMessage?.roomId === roomId
+    && tool.roomMessage.status === "completed"
+    && tool.roomMessage.final === true
+    && tool.roomMessage.content.trim().length > 0;
+}
+
 async function runConversationAttempt(args: {
   messages: VisibleMessage[];
   resolvedModel: ReturnType<typeof resolvePiModel>;
@@ -686,15 +702,35 @@ async function runConversationAttempt(args: {
   let toolTurnCount = 0;
   let toolLoopErrorMessage = "";
   const lastRoomMessagePreviewByToolCallId = new Map<string, string>();
+  const currentRoomId = args.resolvedOptions.toolContext?.currentRoomId?.trim();
+  let finalRoomDeliveryShortCircuitTimer: ReturnType<typeof setTimeout> | null = null;
+  let shortCircuitedAfterFinalRoomDelivery = false;
+
+  const clearFinalRoomDeliveryShortCircuit = () => {
+    if (finalRoomDeliveryShortCircuitTimer !== null) {
+      clearTimeout(finalRoomDeliveryShortCircuitTimer);
+      finalRoomDeliveryShortCircuitTimer = null;
+    }
+  };
+
+  const armFinalRoomDeliveryShortCircuit = () => {
+    clearFinalRoomDeliveryShortCircuit();
+    finalRoomDeliveryShortCircuitTimer = setTimeout(() => {
+      shortCircuitedAfterFinalRoomDelivery = true;
+      agent.abort();
+    }, FINAL_ROOM_DELIVERY_SHORT_CIRCUIT_MS);
+  };
 
   const unsubscribe = agent.subscribe((event) => {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      clearFinalRoomDeliveryShortCircuit();
       assistantText += event.assistantMessageEvent.delta;
       args.callbacks?.onTextDelta?.(event.assistantMessageEvent.delta);
       return;
     }
 
     if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_delta") {
+      clearFinalRoomDeliveryShortCircuit();
       const contentBlock = event.assistantMessageEvent.partial.content[event.assistantMessageEvent.contentIndex];
       if (contentBlock?.type !== "toolCall") {
         return;
@@ -735,12 +771,18 @@ async function runConversationAttempt(args: {
       } satisfies ToolExecution;
       toolEvents.push(numberedToolEvent);
       args.callbacks?.onTool?.(numberedToolEvent);
+      if (shouldShortCircuitAfterFinalRoomDelivery(numberedToolEvent, currentRoomId)) {
+        armFinalRoomDeliveryShortCircuit();
+      } else {
+        clearFinalRoomDeliveryShortCircuit();
+      }
       return;
     }
 
     if (event.type === "turn_end" && isAssistantMessage(event.message)) {
       const hasToolCalls = event.message.content.some((item) => item.type === "toolCall");
       if (!hasToolCalls) {
+        clearFinalRoomDeliveryShortCircuit();
         return;
       }
 
@@ -758,6 +800,7 @@ async function runConversationAttempt(args: {
   try {
     await agent.continue();
   } finally {
+    clearFinalRoomDeliveryShortCircuit();
     unsubscribe();
     args.resolvedOptions.signal?.removeEventListener("abort", abortListener);
   }
@@ -772,7 +815,7 @@ async function runConversationAttempt(args: {
     throw new Error(toolLoopErrorMessage);
   }
 
-  if (finalAssistantMessage?.stopReason === "error" || finalAssistantMessage?.stopReason === "aborted") {
+  if (finalAssistantMessage?.stopReason === "error" || (finalAssistantMessage?.stopReason === "aborted" && !shortCircuitedAfterFinalRoomDelivery)) {
     throw new Error(finalAssistantMessage.errorMessage || "The model request failed.");
   }
 
@@ -784,7 +827,7 @@ async function runConversationAttempt(args: {
       .trim();
 
   return {
-    assistantText: derivedAssistantText || "The model returned no text.",
+    assistantText: shortCircuitedAfterFinalRoomDelivery ? derivedAssistantText : (derivedAssistantText || "The model returned no text."),
     toolEvents,
     resolvedModel: args.resolvedModel.resolvedModelRef,
     compatibility: args.resolvedModel.compatibility,

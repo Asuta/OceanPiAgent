@@ -93,10 +93,16 @@ function upsertEmittedRoomMessage(
 
 declare global {
   var __oceankingAgentRoomSessions: Map<RoomAgentId, AgentRuntimeSession> | undefined;
+  var __oceankingAgentCompactionQueues: Map<RoomAgentId, Promise<void>> | undefined;
+  var __oceankingPendingAutomaticCompactions: Set<RoomAgentId> | undefined;
 }
 
 const agentSessions = globalThis.__oceankingAgentRoomSessions ?? new Map<RoomAgentId, AgentRuntimeSession>();
 globalThis.__oceankingAgentRoomSessions = agentSessions;
+const agentCompactionQueues = globalThis.__oceankingAgentCompactionQueues ?? new Map<RoomAgentId, Promise<void>>();
+globalThis.__oceankingAgentCompactionQueues = agentCompactionQueues;
+const pendingAutomaticCompactions = globalThis.__oceankingPendingAutomaticCompactions ?? new Set<RoomAgentId>();
+globalThis.__oceankingPendingAutomaticCompactions = pendingAutomaticCompactions;
 
 const ROOM_KIND_LABELS: Record<RoomMessageEmission["kind"], string> = {
   answer: "answer",
@@ -125,6 +131,51 @@ function getOrCreateSession(agentId: RoomAgentId): AgentRuntimeSession {
   };
   agentSessions.set(agentId, created);
   return created;
+}
+
+function runAgentCompactionTask<T>(agentId: RoomAgentId, task: () => Promise<T>): Promise<T> {
+  const previous = agentCompactionQueues.get(agentId) ?? Promise.resolve();
+  const result = previous.catch(() => undefined).then(task);
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  agentCompactionQueues.set(agentId, tail);
+  return result.finally(() => {
+    if (agentCompactionQueues.get(agentId) === tail) {
+      agentCompactionQueues.delete(agentId);
+    }
+  });
+}
+
+async function syncCompactedHistoryToIdleSession(agentId: RoomAgentId, history: PersistedVisibleMessage[]): Promise<void> {
+  const session = getOrCreateSession(agentId);
+  if (session.activeRun) {
+    return;
+  }
+  session.history = history;
+  session.updatedAt = createTimestamp();
+}
+
+function scheduleAutomaticAgentCompaction(agentId: RoomAgentId): void {
+  if (pendingAutomaticCompactions.has(agentId)) {
+    return;
+  }
+  pendingAutomaticCompactions.add(agentId);
+
+  void runAgentCompactionTask(agentId, async () => {
+    try {
+      const compactResult = await compactPersistedAgentRuntime({
+        agentId,
+        reason: "automatic",
+      }).catch(() => null);
+      if (compactResult?.compacted) {
+        await syncCompactedHistoryToIdleSession(agentId, compactResult.history);
+      }
+    } finally {
+      pendingAutomaticCompactions.delete(agentId);
+    }
+  });
 }
 
 async function hydrateSession(agentId: RoomAgentId): Promise<AgentRuntimeSession> {
@@ -576,14 +627,7 @@ export async function completeAgentRoomRun(args: {
     createdAt: assistantMessage.createdAt,
   }).catch(() => undefined);
 
-  const compactResult = await compactPersistedAgentRuntime({
-    agentId: args.agentId,
-    reason: "automatic",
-  }).catch(() => null);
-  if (compactResult?.compacted) {
-    session.history = compactResult.history;
-    session.updatedAt = createTimestamp();
-  }
+  scheduleAutomaticAgentCompaction(args.agentId);
 }
 
 export function clearAgentRoomRun(agentId: RoomAgentId, requestId: string): void {
@@ -598,21 +642,22 @@ export function clearAgentRoomRun(agentId: RoomAgentId, requestId: string): void
 }
 
 export async function compactAgentRoomSession(agentId: RoomAgentId, reason: "automatic" | "manual" = "manual") {
-  const session = await hydrateSession(agentId);
-  const result = await compactPersistedAgentRuntime({
+  await hydrateSession(agentId);
+  const result = await runAgentCompactionTask(agentId, () => compactPersistedAgentRuntime({
     agentId,
     reason,
     force: reason === "manual",
-  });
+  }));
   if (result.compacted) {
-    session.history = result.history;
-    session.updatedAt = createTimestamp();
+    await syncCompactedHistoryToIdleSession(agentId, result.history);
   }
 
   return result;
 }
 
 export async function resetAgentRoomSession(agentId: RoomAgentId): Promise<void> {
+  await (agentCompactionQueues.get(agentId) ?? Promise.resolve());
+  pendingAutomaticCompactions.delete(agentId);
   const session = getOrCreateSession(agentId);
   session.activeRun?.abortController.abort(new Error("Agent context reset by operator."));
   session.history = [];
