@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { resolveActualThinkingLevel } from "@/lib/ai/pi-model-catalog";
 import { parseRoomWorkspaceState } from "@/lib/chat/schemas";
 import { coerceThinkingLevel } from "@/lib/chat/types";
 
@@ -33,4 +34,12 @@ test("parseRoomWorkspaceState normalizes legacy minimal thinking level", () => {
   });
 
   assert.equal(workspace.agentStates.concierge.settings.thinkingLevel, "none");
+});
+
+test("resolveActualThinkingLevel preserves distinct off and none levels for reasoning models", () => {
+  const capability = { reasoning: true, supportsXhigh: true, knownModel: true };
+
+  assert.equal(resolveActualThinkingLevel("off", capability), "off");
+  assert.equal(resolveActualThinkingLevel("none", capability), "none");
+  assert.equal(resolveActualThinkingLevel("low", capability), "low");
 });

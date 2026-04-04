@@ -48,7 +48,7 @@ const PROVIDER_MODE_OPTIONS: Array<{ value: ProviderMode; label: string }> = [
 ];
 
 const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
-  off: "默认",
+  off: "Off",
   none: "none",
   low: "Low",
   medium: "Medium",
@@ -57,7 +57,7 @@ const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = {
 };
 
 const THINKING_LEVEL_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
-  { value: "off", label: "默认" },
+  { value: "off", label: "Off" },
   { value: "none", label: "none" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
@@ -173,7 +173,7 @@ function getThinkingNote(args: {
 }) {
   const capability = getPiThinkingCapability(args.modelRef);
   if (!args.modelRef.trim()) {
-    return "Model config can leave the model empty and follow the environment default. Thinking only applies when the final model supports reasoning.";
+    return "Model config can leave the model empty and follow the environment default. Thinking stays at the selected level when the final model supports reasoning.";
   }
 
   if (!capability.reasoning) {

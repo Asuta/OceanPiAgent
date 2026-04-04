@@ -40,7 +40,9 @@ type ResponsesContinuationStrategy = "replay" | "previous_response_id";
 type PayloadRecord = Record<string, unknown>;
 
 function toPiAgentThinkingLevel(level: ThinkingLevel): PiAgentThinkingLevel {
-  return level === "none" ? "off" : level;
+  // pi-agent-core types lag OpenAI's current `none` effort value, but the
+  // runtime forwards any non-`off` string as provider reasoning effort.
+  return level as PiAgentThinkingLevel;
 }
 
 interface RunConversationResult {
