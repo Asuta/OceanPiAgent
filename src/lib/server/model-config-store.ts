@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type {
@@ -47,8 +47,8 @@ const storedModelConfigSchema = z.object({
   updatedAt: z.string(),
 }).strict();
 
-const MODEL_CONFIG_ROOT = path.join(process.cwd(), ".oceanking", "model-configs");
-const MODEL_CONFIG_FILE = path.join(MODEL_CONFIG_ROOT, "configs.json");
+const MODEL_CONFIG_FILE = path.join(process.cwd(), "model-configs.local.json");
+const LEGACY_MODEL_CONFIG_FILE = path.join(process.cwd(), ".oceanking", "model-configs", "configs.json");
 
 declare global {
   var __oceankingModelConfigWriteQueue: Promise<void> | undefined;
@@ -119,10 +119,6 @@ function normalizeInput(args: ModelConfigMutationInput, existing?: StoredModelCo
   };
 }
 
-async function ensureModelConfigDir(): Promise<void> {
-  await mkdir(MODEL_CONFIG_ROOT, { recursive: true });
-}
-
 async function withModelConfigWriteLock<T>(fn: () => Promise<T>): Promise<T> {
   const previous = globalThis.__oceankingModelConfigWriteQueue ?? Promise.resolve();
   let release!: () => void;
@@ -138,9 +134,7 @@ async function withModelConfigWriteLock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function readStoredModelConfigs(): Promise<StoredModelConfigRecord[]> {
-  await ensureModelConfigDir();
-  const raw = await readFile(MODEL_CONFIG_FILE, "utf8").catch(() => "[]");
+function parseStoredModelConfigs(raw: string): StoredModelConfigRecord[] {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) {
@@ -153,8 +147,25 @@ async function readStoredModelConfigs(): Promise<StoredModelConfigRecord[]> {
   }
 }
 
+async function readStoredModelConfigs(): Promise<StoredModelConfigRecord[]> {
+  const rootRaw = await readFile(MODEL_CONFIG_FILE, "utf8").catch(() => null);
+  if (typeof rootRaw === "string") {
+    return parseStoredModelConfigs(rootRaw);
+  }
+
+  const legacyRaw = await readFile(LEGACY_MODEL_CONFIG_FILE, "utf8").catch(() => null);
+  if (typeof legacyRaw !== "string") {
+    return [];
+  }
+
+  const legacyConfigs = parseStoredModelConfigs(legacyRaw);
+  if (legacyConfigs.length > 0) {
+    await writeStoredModelConfigs(legacyConfigs);
+  }
+  return legacyConfigs;
+}
+
 async function writeStoredModelConfigs(modelConfigs: StoredModelConfigRecord[]): Promise<void> {
-  await ensureModelConfigDir();
   await writeFile(MODEL_CONFIG_FILE, JSON.stringify(modelConfigs, null, 2), "utf8");
 }
 

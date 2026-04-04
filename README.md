@@ -35,6 +35,7 @@
 - Layered UI: `Chat Room` + `Agent Console`
 - Multi-agent room scheduler with per-room turn orchestration
 - Workspace state sync with local persistence and server-side versioned snapshots
+- Reusable model configs stored in project-root `model-configs.local.json`
 - Per-agent shared workspace directories under `.oceanking/workspaces/<agentId>/`
 - Built-in tools:
   - `web_fetch`

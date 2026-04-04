@@ -1361,7 +1361,7 @@ export function SettingsPage() {
             <div>
               <p className="section-label">Model Configs</p>
               <h2>独立模型配置</h2>
-              <p>在这里保存可复用的模型连接。API key 只保存在服务端，不进入 workspace state 和浏览器本地缓存。</p>
+              <p>在这里保存可复用的模型连接。API key 只保存在服务端的项目根目录 `model-configs.local.json`，不进入 workspace state 和浏览器本地缓存。</p>
             </div>
             <div className="meta-chip-row compact align-end">
               <span className="meta-chip">{loadingModelConfigs ? "Loading" : `${modelConfigs.length} configs`}</span>
