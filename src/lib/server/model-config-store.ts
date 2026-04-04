@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type {
@@ -47,8 +47,13 @@ const storedModelConfigSchema = z.object({
   updatedAt: z.string(),
 }).strict();
 
-const MODEL_CONFIG_FILE = path.join(process.cwd(), "model-configs.local.json");
-const LEGACY_MODEL_CONFIG_FILE = path.join(process.cwd(), ".oceanking", "model-configs", "configs.json");
+function getModelConfigFilePath(): string {
+  return path.join(process.cwd(), "model-configs.local.json");
+}
+
+function getLegacyModelConfigFilePath(): string {
+  return path.join(process.cwd(), ".oceanking", "model-configs", "configs.json");
+}
 
 declare global {
   var __oceankingModelConfigWriteQueue: Promise<void> | undefined;
@@ -148,12 +153,14 @@ function parseStoredModelConfigs(raw: string): StoredModelConfigRecord[] {
 }
 
 async function readStoredModelConfigs(): Promise<StoredModelConfigRecord[]> {
-  const rootRaw = await readFile(MODEL_CONFIG_FILE, "utf8").catch(() => null);
+  const modelConfigFile = getModelConfigFilePath();
+  const legacyModelConfigFile = getLegacyModelConfigFilePath();
+  const rootRaw = await readFile(modelConfigFile, "utf8").catch(() => null);
   if (typeof rootRaw === "string") {
     return parseStoredModelConfigs(rootRaw);
   }
 
-  const legacyRaw = await readFile(LEGACY_MODEL_CONFIG_FILE, "utf8").catch(() => null);
+  const legacyRaw = await readFile(legacyModelConfigFile, "utf8").catch(() => null);
   if (typeof legacyRaw !== "string") {
     return [];
   }
@@ -166,7 +173,9 @@ async function readStoredModelConfigs(): Promise<StoredModelConfigRecord[]> {
 }
 
 async function writeStoredModelConfigs(modelConfigs: StoredModelConfigRecord[]): Promise<void> {
-  await writeFile(MODEL_CONFIG_FILE, JSON.stringify(modelConfigs, null, 2), "utf8");
+  const modelConfigFile = getModelConfigFilePath();
+  await mkdir(path.dirname(modelConfigFile), { recursive: true });
+  await writeFile(modelConfigFile, JSON.stringify(modelConfigs, null, 2), "utf8");
 }
 
 export async function listModelConfigs(): Promise<ModelConfig[]> {

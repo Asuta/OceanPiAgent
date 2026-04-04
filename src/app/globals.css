@@ -1847,10 +1847,128 @@ html[data-theme="dark"] .thread-list::before {
 }
 
 .thread-message-body {
-  white-space: pre-wrap;
   word-break: break-word;
   color: var(--ink);
   line-height: 1.72;
+}
+
+.thread-message-body:not(.markdown-body) {
+  white-space: pre-wrap;
+}
+
+.thread-message-body.markdown-body {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.thread-message-body.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.thread-message-body.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.thread-message-body.markdown-body > * + * {
+  margin-top: 0.92rem;
+}
+
+.thread-message-body.markdown-body :is(h1, h2, h3, h4, h5, h6) {
+  color: var(--ink);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.thread-message-body.markdown-body h1 {
+  font-size: 1.2rem;
+}
+
+.thread-message-body.markdown-body h2 {
+  font-size: 1.08rem;
+}
+
+.thread-message-body.markdown-body h3 {
+  font-size: 1rem;
+}
+
+.thread-message-body.markdown-body :is(ul, ol) {
+  margin: 0;
+  padding-left: 1.35rem;
+}
+
+.thread-message-body.markdown-body li + li {
+  margin-top: 0.32rem;
+}
+
+.thread-message-body.markdown-body blockquote {
+  margin: 0;
+  padding: 0.2rem 0 0.2rem 1rem;
+  border-left: 3px solid var(--accent);
+  color: var(--ink-soft);
+  background: linear-gradient(90deg, var(--accent-soft), transparent 72%);
+}
+
+.thread-message-body.markdown-body a {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.16em;
+}
+
+.thread-message-body.markdown-body pre {
+  margin: 0;
+  overflow-x: auto;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(24, 53, 49, 0.06);
+}
+
+html[data-theme="dark"] .thread-message-body.markdown-body pre {
+  background: rgba(237, 244, 240, 0.08);
+}
+
+.thread-message-body.markdown-body pre code {
+  display: block;
+  min-width: max-content;
+  color: inherit;
+  white-space: pre;
+}
+
+.thread-message-body.markdown-body :not(pre) > code {
+  padding: 0.14rem 0.4rem;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.94em;
+}
+
+.thread-message-body.markdown-body hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.thread-message-body.markdown-body table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.thread-message-body.markdown-body :is(th, td) {
+  padding: 0.62rem 0.78rem;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.thread-message-body.markdown-body th {
+  color: var(--ink);
+  background: rgba(24, 53, 49, 0.05);
+}
+
+html[data-theme="dark"] .thread-message-body.markdown-body th {
+  background: rgba(237, 244, 240, 0.06);
 }
 
 .message-image-grid {
