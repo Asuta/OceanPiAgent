@@ -1436,6 +1436,79 @@ html[data-theme="dark"] .thread-list::before {
   line-height: 1.6;
 }
 
+.room-log-page,
+.room-log-hero,
+.room-log-hero-copy,
+.room-log-card {
+  display: grid;
+  gap: 12px;
+}
+
+.room-log-hero {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.room-log-hero-actions,
+.room-log-filter-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.room-log-placeholder pre {
+  max-height: none;
+  min-height: 160px;
+}
+
+.room-log-payload-block pre {
+  max-height: 520px;
+}
+
+.room-log-entry {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 252, 247, 0.55);
+}
+
+.room-log-entry-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.room-log-footnote,
+.room-log-pair-label {
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+}
+
+.room-log-pair-label {
+  margin-bottom: 4px;
+  font-weight: 700;
+}
+
+.room-log-pair-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.room-log-entry.system.level-error {
+  border-color: rgba(171, 73, 55, 0.26);
+  background: rgba(171, 73, 55, 0.06);
+}
+
+.room-log-entry.system.level-warn {
+  border-color: rgba(194, 118, 54, 0.2);
+  background: rgba(194, 118, 54, 0.06);
+}
+
 .thread-list {
   flex: 1 1 auto;
   position: relative;
@@ -2683,7 +2756,8 @@ html[data-theme="dark"] .thread-list::before {
 
   .room-chat-topbar,
   .room-chat-toolbar,
-  .room-chat-titleline {
+  .room-chat-titleline,
+  .room-log-hero {
     flex-direction: column;
     align-items: flex-start;
   }
@@ -2787,5 +2861,9 @@ html[data-theme="dark"] .thread-list::before {
 
   .text-area {
     min-height: 130px;
+  }
+
+  .room-log-pair-grid {
+    grid-template-columns: 1fr;
   }
 }
