@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CronDeliveryPolicy, RoomAgentId, RoomCronJob, RoomCronRunRecord, RoomCronSchedule, RoomSession } from "@/lib/chat/types";
-import { DEFAULT_AGENT_ID, useWorkspace } from "@/components/workspace-provider";
+import { DEFAULT_AGENT_ID, useWorkspaceAgents } from "@/components/workspace-provider";
 
 type Props = {
   room: RoomSession;
@@ -64,7 +64,7 @@ function defaultOnceValue(): string {
 }
 
 export function RoomCronPanel({ room, className }: Props) {
-  const { agents } = useWorkspace();
+  const agents = useWorkspaceAgents();
   const roomAgentIds = useMemo<RoomAgentId[]>(
     () =>
       room.participants

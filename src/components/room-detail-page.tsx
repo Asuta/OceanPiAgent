@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import {
   ALLOWED_MESSAGE_IMAGE_MIME_TYPES,
   MAX_MESSAGE_IMAGE_ATTACHMENTS,
@@ -11,31 +11,22 @@ import {
   formatMessageForTranscript,
 } from "@/lib/chat/message-attachments";
 import {
-  DEFAULT_AGENT_ID,
   formatTimestamp,
-  getHumanParticipants,
-  getPrimaryRoomAgentId,
   getReceiptInlineNote,
   getToolStats,
-  useWorkspace,
+  useWorkspaceActions,
+  useWorkspaceAgentsState,
+  useWorkspaceRoomsState,
 } from "@/components/workspace-provider";
 import { MarkdownMessage } from "@/components/markdown-message";
 import { RoomCronPanel } from "@/components/room-cron-panel";
+import { useRoomDetailState } from "@/components/room/use-room-detail-state";
 import { DraftHistoryInline } from "@/components/workspace/draft-history-inline";
-import { buildRoomThreadDraftEntries, buildRoomThreadToolEntries, type RoomThreadDraftEntry, type RoomThreadToolEntry } from "@/components/workspace/room-thread";
 import { ToolHistoryInline } from "@/components/workspace/tool-history-inline";
-import type { AgentRoomTurn, MessageImageAttachment, RoomAgentId, RoomMessage, RoomParticipant } from "@/lib/chat/types";
-
-const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
-const LOCAL_PARTICIPANT_NAME = "You";
+import type { AgentRoomTurn, MessageImageAttachment, RoomAgentId, RoomMessage } from "@/lib/chat/types";
 
 function getTurnRoomId(turn: { userMessage: { roomId: string }; emittedMessages: Array<{ roomId: string }> }) {
   return turn.userMessage.roomId || turn.emittedMessages[0]?.roomId || "";
-}
-
-function getSortableTime(value: string) {
-  const timestamp = Date.parse(value || "");
-  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function formatRawTurnLog(turn: AgentRoomTurn, roomTitle: string) {
@@ -224,26 +215,12 @@ function getMessageCardClass(message: RoomMessage) {
   return parts.join(" ");
 }
 
-function dedupeTurnsById<T extends { id: string }>(turns: T[]): T[] {
-  const turnsById = new Map<string, T>();
-  for (const turn of turns) {
-    turnsById.set(turn.id, turn);
-  }
-  return [...turnsById.values()];
-}
-
 export function RoomDetailPage({ roomId }: { roomId: string }) {
   const router = useRouter();
+  const { rooms, activeRooms, hydrated, draftsByRoomId, selectedSenderByRoomId } = useWorkspaceRoomsState();
+  const { agents, agentStates, selectedConsoleAgentId } = useWorkspaceAgentsState();
   const {
-    agents,
-    rooms,
-    activeRooms,
-    agentStates,
-    draftsByRoomId,
     getRoomById,
-    hydrated,
-    selectedConsoleAgentId,
-    selectedSenderByRoomId,
     setActiveRoomId,
     setDraft,
     setSelectedConsoleAgentId,
@@ -264,7 +241,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     clearAgentConsole,
     resetAgentContext,
     getAgentDefinition,
-  } = useWorkspace();
+  } = useWorkspaceActions();
 
   const [inspectorTab, setInspectorTab] = useState<"console" | "room">("console");
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
@@ -348,36 +325,39 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     return () => threadList.removeEventListener("scroll", updateStickState);
   }, [room?.id]);
 
-  const latestMessage = room?.roomMessages.at(-1) ?? null;
-  const roomThreadToolEntries = useMemo<Map<string, RoomThreadToolEntry[]>>(
-    () =>
-      room
-        ? buildRoomThreadToolEntries({
-            roomId: room.id,
-            roomMessages: room.roomMessages,
-            agentStates,
-          })
-        : new Map<string, RoomThreadToolEntry[]>(),
-    [agentStates, room],
-  );
-  const roomThreadDraftEntries = useMemo<Map<string, RoomThreadDraftEntry[]>>(
-    () =>
-      room
-        ? buildRoomThreadDraftEntries({
-            roomId: room.id,
-            roomMessages: room.roomMessages,
-            agentStates,
-          })
-        : new Map<string, RoomThreadDraftEntry[]>(),
-    [agentStates, room],
-  );
-  const visibleInlineTools = useMemo(() => Array.from(roomThreadToolEntries.values()).flat(), [roomThreadToolEntries]);
-  const visibleInlineDrafts = useMemo(() => Array.from(roomThreadDraftEntries.values()).flat(), [roomThreadDraftEntries]);
-  const latestInlineTool = visibleInlineTools.at(-1) ?? null;
-  const latestInlineDraft = visibleInlineDrafts.at(-1) ?? null;
-  const threadScrollKey = room
-    ? `${room.roomMessages.length}:${latestMessage?.id ?? ""}:${latestMessage?.status ?? ""}:${latestMessage?.content.length ?? 0}:${latestMessage?.attachments.length ?? 0}:${visibleInlineTools.length}:${latestInlineTool?.turn.id ?? ""}:${latestInlineTool?.tool.id ?? ""}:${latestInlineTool?.event.sequence ?? 0}:${visibleInlineDrafts.length}:${latestInlineDraft?.turn.id ?? ""}:${latestInlineDraft?.turn.status ?? ""}:${latestInlineDraft?.turn.assistantContent.length ?? 0}`
-    : "";
+  const {
+    roomThreadToolEntries,
+    roomThreadDraftEntries,
+    threadScrollKey,
+    roomDraft,
+    availableSenders,
+    selectedSender,
+    primaryAgentId,
+    consoleAgentId,
+    titleDraft,
+    activeParticipant,
+    ownerParticipant,
+    localParticipantMissing,
+    canSend,
+    currentRoomId,
+    currentRoomTitle,
+    roomTitleById,
+    roomTurnStats,
+    visibleConsoleTurns,
+    consoleTurnGroups,
+  } = useRoomDetailState({
+    roomId,
+    room,
+    rooms,
+    agentStates,
+    draftsByRoomId,
+    selectedConsoleAgentId,
+    selectedSenderByRoomId,
+    pendingAttachments,
+    isUploadingImages,
+    titleDraftByRoomId,
+    consoleScope,
+  });
 
   useLayoutEffect(() => {
     if (!room) {
@@ -428,70 +408,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     };
   }, [inspectorTab, room?.id, scrollWorkbenchToBottom, workbenchOpen]);
 
-  const roomDraft = room ? draftsByRoomId[room.id] ?? "" : "";
   const isRunning = room ? isRoomRunning(room.id) : false;
-  const humanParticipants = useMemo(() => (room ? getHumanParticipants(room) : []), [room]);
-  const availableSenders = useMemo<RoomParticipant[]>(() => {
-    if (!room) {
-      return [];
-    }
-
-    const hasLocalParticipant = humanParticipants.some((participant) => participant.id === DEFAULT_LOCAL_PARTICIPANT_ID);
-    if (hasLocalParticipant) {
-      return humanParticipants;
-    }
-
-    return [
-      {
-        id: DEFAULT_LOCAL_PARTICIPANT_ID,
-        name: LOCAL_PARTICIPANT_NAME,
-        senderRole: "participant",
-        runtimeKind: "human",
-        enabled: true,
-        order: 0,
-        createdAt: room.createdAt,
-        updatedAt: room.updatedAt,
-      },
-      ...humanParticipants,
-    ];
-  }, [humanParticipants, room]);
-  const selectedSenderId = room ? selectedSenderByRoomId[room.id] : undefined;
-  const selectedSender = availableSenders.find((participant) => participant.id === selectedSenderId) ?? availableSenders[0] ?? null;
-  const primaryAgentId = room ? getPrimaryRoomAgentId(room) : DEFAULT_AGENT_ID;
-  const consoleAgentId = (selectedConsoleAgentId ?? primaryAgentId) as RoomAgentId;
-  const consoleAgentState = agentStates[consoleAgentId];
-  const titleDraft = room ? titleDraftByRoomId[room.id] ?? room.title : "";
-  const activeParticipant = room?.participants.find((participant) => participant.id === room.scheduler.activeParticipantId) ?? null;
-  const ownerParticipant = room?.participants.find((participant) => participant.id === room.ownerParticipantId) ?? null;
-  const localParticipantMissing = room ? !room.participants.some((participant) => participant.id === DEFAULT_LOCAL_PARTICIPANT_ID) : false;
-  const canSend = Boolean((roomDraft.trim() || pendingAttachments.length > 0) && selectedSender && !isUploadingImages);
-  const currentRoomId = room?.id ?? roomId;
-  const currentRoomTitle = room?.title ?? "Unknown room";
-  const roomTitleById = useMemo(() => new Map(rooms.map((entry) => [entry.id, entry.title])), [rooms]);
-  const roomTurns = useMemo(
-    () =>
-      room
-        ? (consoleAgentState?.agentTurns ?? []).filter(
-            (turn) => turn.userMessage.roomId === room.id || turn.emittedMessages.some((message) => message.roomId === room.id),
-          )
-        : [],
-    [consoleAgentState?.agentTurns, room],
-  );
-  const roomTurnStats = useMemo(() => {
-    return roomTurns.reduce(
-      (stats, turn) => {
-        stats.turns += 1;
-        stats.tools += turn.tools.length;
-        stats.emissions += turn.emittedMessages.length;
-        return stats;
-      },
-      { turns: 0, tools: 0, emissions: 0 },
-    );
-  }, [roomTurns]);
-  const visibleConsoleTurns = useMemo(() => {
-    const turns = consoleScope === "room" ? roomTurns : (consoleAgentState?.agentTurns ?? []);
-    return [...dedupeTurnsById(turns)].sort((left, right) => getSortableTime(left.userMessage.createdAt) - getSortableTime(right.userMessage.createdAt));
-  }, [consoleAgentState?.agentTurns, consoleScope, roomTurns]);
 
   useLayoutEffect(() => {
     const textarea = composerTextareaRef.current;
@@ -502,43 +419,6 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
     textarea.style.height = "0px";
     textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
   }, [room?.id, roomDraft]);
-  const consoleTurnGroups = useMemo(() => {
-    if (!room) {
-      return [] as Array<{ roomId: string; roomTitle: string; turns: typeof visibleConsoleTurns }>;
-    }
-
-    if (consoleScope === "timeline") {
-      return [
-        {
-          roomId: "timeline",
-          roomTitle: "执行顺序",
-          turns: visibleConsoleTurns,
-        },
-      ];
-    }
-
-    const groups = new Map<string, { roomId: string; roomTitle: string; turns: typeof visibleConsoleTurns }>();
-    for (const turn of visibleConsoleTurns) {
-      const turnRoomId = getTurnRoomId(turn) || room.id;
-      const existing = groups.get(turnRoomId);
-      if (existing) {
-        existing.turns.push(turn);
-        continue;
-      }
-
-      groups.set(turnRoomId, {
-        roomId: turnRoomId,
-        roomTitle: roomTitleById.get(turnRoomId) ?? (turnRoomId === room.id ? room.title : "Unknown room"),
-        turns: [turn],
-      });
-    }
-
-    return Array.from(groups.values()).sort((left, right) => {
-      const leftTime = getSortableTime(left.turns[left.turns.length - 1]?.userMessage.createdAt ?? "");
-      const rightTime = getSortableTime(right.turns[right.turns.length - 1]?.userMessage.createdAt ?? "");
-      return rightTime - leftTime;
-    });
-  }, [consoleScope, room, roomTitleById, visibleConsoleTurns]);
 
   const removePendingAttachment = useCallback((attachmentId: string) => {
     setPendingAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));

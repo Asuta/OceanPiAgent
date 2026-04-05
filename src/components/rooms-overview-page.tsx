@@ -3,11 +3,21 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { formatTimestamp, getRoomAgentSummary, getRoomHumanSummary, getRoomPreview, useWorkspace } from "@/components/workspace-provider";
+import {
+  formatTimestamp,
+  getRoomAgentSummary,
+  getRoomHumanSummary,
+  getRoomPreview,
+  useWorkspaceActions,
+  useWorkspaceAgentsState,
+  useWorkspaceRoomsState,
+} from "@/components/workspace-provider";
 
 export function RoomsOverviewPage() {
   const router = useRouter();
-  const { agents, activeRooms, archivedRooms, agentStates, createRoom, archiveRoom, restoreRoom, deleteRoom, clearAllWorkspace, hydrated } = useWorkspace();
+  const { activeRooms, archivedRooms, hydrated } = useWorkspaceRoomsState();
+  const { agents, agentStates } = useWorkspaceAgentsState();
+  const { createRoom, archiveRoom, restoreRoom, deleteRoom, clearAllWorkspace } = useWorkspaceActions();
   const [isClearingAll, setIsClearingAll] = useState(false);
 
   const runningCount = Object.values(agentStates).filter((state) => state.agentTurns.some((turn) => turn.status === "running")).length;

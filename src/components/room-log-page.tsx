@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { formatTimestamp, getPrimaryRoomAgentId, getToolStats, useWorkspace } from "@/components/workspace-provider";
+import {
+  formatTimestamp,
+  getPrimaryRoomAgentId,
+  getToolStats,
+  useWorkspaceActions,
+  useWorkspaceAgentsState,
+  useWorkspaceRoomsState,
+} from "@/components/workspace-provider";
 import type { AgentRoomTurn, RoomAgentId, ToolExecution } from "@/lib/chat/types";
 
 type LogFilter = "all" | "request" | "full-request" | "tool" | "system";
@@ -169,7 +176,9 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
   const router = useRouter();
   const [filter, setFilter] = useState<LogFilter>("all");
   const [logCache, setLogCache] = useState<RoomLogCacheSnapshot>(() => loadRoomLogCache(roomId));
-  const { activeRooms, agentStates, getRoomById, getAgentDefinition, hydrated, isRoomRunning } = useWorkspace();
+  const { activeRooms, hydrated } = useWorkspaceRoomsState();
+  const { agentStates } = useWorkspaceAgentsState();
+  const { getRoomById, getAgentDefinition, isRoomRunning } = useWorkspaceActions();
   const room = getRoomById(roomId);
 
   useEffect(() => {

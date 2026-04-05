@@ -7,8 +7,8 @@ import type {
   RoomWorkspaceState,
   ToolExecution,
 } from "@/lib/chat/types";
-import { createSchedulerPacket, getNextAgentParticipant, getSchedulerVisibleTargetMessages } from "@/lib/chat/room-scheduler";
-import { createAgentSharedState, createTimestamp, getEnabledAgentParticipants, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
+import { createSchedulerPacket } from "@/lib/chat/room-scheduler";
+import { createAgentSharedState, createTimestamp, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
 import { deliverBoundRoomMessages } from "@/lib/server/channel-outbound-service";
 import { abortRoomStream, combineAbortSignals } from "@/lib/server/room-stream-control";
 import {
@@ -21,6 +21,7 @@ import {
 import { applyRoomTurnToWorkspace } from "@/lib/server/workspace-state";
 import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store";
 import { loadWorkspaceEnvelope, mutateWorkspace } from "@/lib/server/workspace-store";
+import { hasSupersedingVisibleActivity, planSchedulerRound } from "@/lib/server/room-scheduler-planner";
 import { createUuid } from "@/lib/utils/uuid";
 
 export const DEFAULT_ROOM_SCHEDULER_MAX_ROUNDS = 20;
@@ -58,6 +59,7 @@ type RoomQueueState = {
   running: boolean;
   rerun: boolean;
   waiters: QueueWaiter[];
+  activeOverrides?: RoomSchedulerOverrides;
   queuedOverrides?: RoomSchedulerOverrides;
   currentRunController?: AbortController;
 };
@@ -69,21 +71,51 @@ declare global {
 const roomQueues = globalThis.__oceankingRoomSchedulerQueues ?? new Map<string, RoomQueueState>();
 globalThis.__oceankingRoomSchedulerQueues = roomQueues;
 
+function createQueueState(): RoomQueueState {
+  return {
+    running: false,
+    rerun: false,
+    waiters: [],
+    activeOverrides: undefined,
+    queuedOverrides: undefined,
+    currentRunController: undefined,
+  };
+}
+
 function getQueueState(roomId: string): RoomQueueState {
   const existing = roomQueues.get(roomId);
   if (existing) {
     return existing;
   }
 
-  const created: RoomQueueState = {
-    running: false,
-    rerun: false,
-      waiters: [],
-      queuedOverrides: undefined,
-      currentRunController: undefined,
-  };
+  const created = createQueueState();
   roomQueues.set(roomId, created);
   return created;
+}
+
+function mergeSchedulerOverrides(
+  previous: RoomSchedulerOverrides | undefined,
+  next: RoomSchedulerOverrides,
+): RoomSchedulerOverrides {
+  return {
+    ...(previous ?? {}),
+    ...next,
+  };
+}
+
+function queueSchedulerRun(queueState: RoomQueueState, overrides: RoomSchedulerOverrides): void {
+  queueState.rerun = true;
+  queueState.queuedOverrides = mergeSchedulerOverrides(queueState.queuedOverrides ?? queueState.activeOverrides, overrides);
+}
+
+function settleQueueWaiters(queueState: RoomQueueState, error?: unknown): void {
+  const waiters = queueState.waiters.splice(0, queueState.waiters.length);
+  if (error === undefined) {
+    waiters.forEach((waiter) => waiter.resolve());
+    return;
+  }
+
+  waiters.forEach((waiter) => waiter.reject(error));
 }
 
 function updateRoom(workspace: RoomWorkspaceState, roomId: string, updater: (room: RoomSession) => RoomSession): RoomWorkspaceState {
@@ -190,10 +222,6 @@ function isAbortLike(error: unknown, signal?: AbortSignal): boolean {
     return true;
   }
   return false;
-}
-
-function hasNewerVisibleActivity(room: RoomSession, participantId: string, cutoffSeq: number): boolean {
-  return room.roomMessages.some((message) => message.seq > cutoffSeq && message.sender.id !== participantId);
 }
 
 function getSchedulerSettings(workspace: RoomWorkspaceState, agentId: string): ChatSettings {
@@ -368,20 +396,11 @@ export async function runRoomSchedulerNow(
       return;
     }
 
-    const nextParticipant = getNextAgentParticipant(room);
-    const enabledAgents = getEnabledAgentParticipants(room);
-    if (!nextParticipant || enabledAgents.length === 0 || room.archivedAt) {
+    const roundPlan = planSchedulerRound(room);
+    if (roundPlan.type === "idle") {
       await deps.mutateWorkspace((workspace) => updateRoom(workspace, roomId, withIdleScheduler));
       return;
     }
-
-    const nextAfterParticipant = getNextAgentParticipant(room, nextParticipant.id);
-    const cutoffSeq = room.roomMessages[room.roomMessages.length - 1]?.seq ?? 0;
-    const lastCursor = room.scheduler.agentCursorByParticipantId[nextParticipant.id] ?? 0;
-    const unseenMessages = room.roomMessages.filter(
-      (message) => message.seq > lastCursor && message.seq <= cutoffSeq && message.sender.id !== nextParticipant.id,
-    );
-    const visibleTargetMessages = getSchedulerVisibleTargetMessages(unseenMessages, nextParticipant);
 
     await deps.mutateWorkspace((workspace) =>
       updateRoom(workspace, roomId, (currentRoom) => ({
@@ -389,8 +408,8 @@ export async function runRoomSchedulerNow(
         scheduler: {
           ...currentRoom.scheduler,
           status: "running",
-          activeParticipantId: visibleTargetMessages.length > 0 ? nextParticipant.id : null,
-          nextAgentParticipantId: nextAfterParticipant?.id ?? nextParticipant.id,
+          activeParticipantId: roundPlan.visibleTargetMessages.length > 0 ? roundPlan.participant.id : null,
+          nextAgentParticipantId: roundPlan.nextAfterParticipantId,
           roundCount: dispatchedRounds,
         },
         error: "",
@@ -398,21 +417,21 @@ export async function runRoomSchedulerNow(
       })),
     );
 
-    if (visibleTargetMessages.length === 0) {
+    if (roundPlan.visibleTargetMessages.length === 0) {
       await deps.mutateWorkspace((workspace) =>
         updateRoom(workspace, roomId, (currentRoom) => ({
           ...currentRoom,
           scheduler: {
             ...currentRoom.scheduler,
             activeParticipantId: null,
-            nextAgentParticipantId: nextAfterParticipant?.id ?? nextParticipant.id,
+            nextAgentParticipantId: roundPlan.nextAfterParticipantId,
             agentCursorByParticipantId: {
               ...currentRoom.scheduler.agentCursorByParticipantId,
-              [nextParticipant.id]: cutoffSeq,
+              [roundPlan.participant.id]: roundPlan.cutoffSeq,
             },
             agentReceiptRevisionByParticipantId: {
               ...currentRoom.scheduler.agentReceiptRevisionByParticipantId,
-              [nextParticipant.id]: currentRoom.receiptRevision,
+              [roundPlan.participant.id]: currentRoom.receiptRevision,
             },
           },
           updatedAt: createTimestamp(),
@@ -420,7 +439,7 @@ export async function runRoomSchedulerNow(
       );
 
       idlePassCount += 1;
-      if (idlePassCount >= enabledAgents.length) {
+      if (idlePassCount >= roundPlan.enabledAgentCount) {
         await deps.mutateWorkspace((workspace) => updateRoom(workspace, roomId, withIdleScheduler));
         return;
       }
@@ -440,16 +459,16 @@ export async function runRoomSchedulerNow(
       return;
     }
 
-    const targetAgentId = nextParticipant.agentId ?? room.agentId;
+    const targetAgentId = roundPlan.participant.agentId ?? room.agentId;
     let result: RunRoomTurnResult;
     try {
       result = await executeScheduledTurn({
         workspace: workspaceEnvelope.state,
         room,
         targetAgentId,
-        participant: nextParticipant,
-        unseenMessages,
-        anchorMessageId: visibleTargetMessages[visibleTargetMessages.length - 1]?.id,
+        participant: roundPlan.participant,
+        unseenMessages: roundPlan.unseenMessages,
+        anchorMessageId: roundPlan.anchorMessageId,
         hooks,
         deps,
       });
@@ -472,7 +491,7 @@ export async function runRoomSchedulerNow(
       return;
     }
 
-    const wasSuperseded = hasNewerVisibleActivity(latestRoom, nextParticipant.id, cutoffSeq);
+    const wasSuperseded = hasSupersedingVisibleActivity(latestRoom, roundPlan.participant.id, roundPlan.cutoffSeq);
     if (!wasSuperseded) {
       await deps.mutateWorkspace((workspace) => {
         const appliedWorkspace = applyRoomTurnToWorkspace({
@@ -489,22 +508,25 @@ export async function runRoomSchedulerNow(
 
         return updateRoom(appliedWorkspace, roomId, (currentRoom) => ({
           ...currentRoom,
-          scheduler: {
-            ...currentRoom.scheduler,
-            status: result.turn.status === "completed" ? "running" : "idle",
-            activeParticipantId: null,
-            nextAgentParticipantId: nextAfterParticipant?.id ?? nextParticipant.id,
-            roundCount: result.turn.status === "completed" ? dispatchedRounds : 0,
-            agentCursorByParticipantId: {
-              ...currentRoom.scheduler.agentCursorByParticipantId,
-              [nextParticipant.id]: Math.max(currentRoom.scheduler.agentCursorByParticipantId[nextParticipant.id] ?? 0, cutoffSeq),
+            scheduler: {
+              ...currentRoom.scheduler,
+              status: result.turn.status === "completed" ? "running" : "idle",
+              activeParticipantId: null,
+              nextAgentParticipantId: roundPlan.nextAfterParticipantId,
+              roundCount: result.turn.status === "completed" ? dispatchedRounds : 0,
+              agentCursorByParticipantId: {
+                ...currentRoom.scheduler.agentCursorByParticipantId,
+                [roundPlan.participant.id]: Math.max(
+                  currentRoom.scheduler.agentCursorByParticipantId[roundPlan.participant.id] ?? 0,
+                  roundPlan.cutoffSeq,
+                ),
+              },
+              agentReceiptRevisionByParticipantId: {
+                ...currentRoom.scheduler.agentReceiptRevisionByParticipantId,
+                [roundPlan.participant.id]: currentRoom.receiptRevision,
+              },
             },
-            agentReceiptRevisionByParticipantId: {
-              ...currentRoom.scheduler.agentReceiptRevisionByParticipantId,
-              [nextParticipant.id]: currentRoom.receiptRevision,
-            },
-          },
-          updatedAt: createTimestamp(),
+            updatedAt: createTimestamp(),
         }));
       });
 
@@ -529,8 +551,7 @@ export function enqueueRoomScheduler(
   overrides: RoomSchedulerOverrides = {},
 ): Promise<void> {
   const queueState = getQueueState(roomId);
-  queueState.rerun = true;
-  queueState.queuedOverrides = overrides;
+  queueSchedulerRun(queueState, overrides);
 
   const completion = new Promise<void>((resolve, reject) => {
     queueState.waiters.push({ resolve, reject });
@@ -548,16 +569,16 @@ export function enqueueRoomScheduler(
         const nextOverrides = queueState.queuedOverrides ?? overrides;
         queueState.rerun = false;
         queueState.queuedOverrides = undefined;
+        queueState.activeOverrides = nextOverrides;
         await runRoomSchedulerNow(roomId, nextOverrides);
       }
 
-      const waiters = queueState.waiters.splice(0, queueState.waiters.length);
-      waiters.forEach((waiter) => waiter.resolve());
+      settleQueueWaiters(queueState);
     } catch (error) {
-      const waiters = queueState.waiters.splice(0, queueState.waiters.length);
-      waiters.forEach((waiter) => waiter.reject(error));
+      settleQueueWaiters(queueState, error);
     } finally {
       queueState.running = false;
+      queueState.activeOverrides = undefined;
       queueState.currentRunController = undefined;
       if (queueState.rerun) {
         void enqueueRoomScheduler(roomId, overrides);
@@ -580,4 +601,25 @@ export async function stopRoomScheduler(
   abortRoomStream(roomId, new Error(reason));
   const applyMutation = overrides.mutateWorkspace ?? mutateWorkspace;
   await applyMutation((workspace) => applyStoppedStateToWorkspace(workspace, roomId, reason));
+}
+
+export async function resetRoomSchedulerStateForTest(): Promise<void> {
+  for (const queueState of roomQueues.values()) {
+    queueState.currentRunController?.abort(new Error("Reset room scheduler test state."));
+  }
+  roomQueues.clear();
+}
+
+export function getRoomSchedulerQueueSnapshotForTest(roomId: string) {
+  const queueState = roomQueues.get(roomId);
+  if (!queueState) {
+    return null;
+  }
+
+  return {
+    running: queueState.running,
+    rerun: queueState.rerun,
+    activeOverrides: queueState.activeOverrides,
+    queuedOverrides: queueState.queuedOverrides,
+  };
 }

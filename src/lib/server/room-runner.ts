@@ -45,6 +45,7 @@ import {
   getRoomAgent,
 } from "@/lib/server/workspace-state";
 import { listAgentDefinitions } from "@/lib/server/agent-registry";
+import { createRoomTurnAccumulator } from "@/lib/server/room-turn-accumulator";
 
 function createAgentSender(agent: AgentRoomTurn["agent"]): RoomSender {
   return {
@@ -166,27 +167,6 @@ function createRoomMessageIdResolver(requestId: string) {
   };
 }
 
-function mergeEmittedMessages(messages: RoomMessage[], message: RoomMessage): RoomMessage[] {
-  const existingIndex = messages.findIndex((entry) => entry.id === message.id);
-  if (existingIndex < 0) {
-    return [...messages, message];
-  }
-
-  const nextMessages = [...messages];
-  nextMessages[existingIndex] = {
-    ...nextMessages[existingIndex],
-    ...message,
-    id: nextMessages[existingIndex].id,
-    roomId: nextMessages[existingIndex].roomId,
-    seq: nextMessages[existingIndex].seq,
-    role: nextMessages[existingIndex].role,
-    sender: nextMessages[existingIndex].sender,
-    source: nextMessages[existingIndex].source,
-    createdAt: nextMessages[existingIndex].createdAt,
-  };
-  return nextMessages;
-}
-
 function createEmittedRoomMessage(
   message: RoomMessageEmission,
   agent: AgentRoomTurn["agent"],
@@ -261,42 +241,6 @@ function createMessageReceiptUpdate(
   };
 }
 
-function createToolTimelineEvent(tool: ToolExecution, sequence: number): TurnTimelineEvent {
-  return {
-    id: `tool:${tool.id}`,
-    sequence,
-    type: "tool",
-    toolId: tool.id,
-  };
-}
-
-function createDraftSegmentTimelineEvent(segment: DraftTextSegment): TurnTimelineEvent {
-  return {
-    id: `draft-segment:${segment.id}`,
-    sequence: segment.sequence,
-    type: "draft-segment",
-    segmentId: segment.id,
-  };
-}
-
-interface ActiveRoomMessageStream {
-  roomId: string;
-  messageKey: string;
-  message: RoomMessage;
-}
-
-function upsertEmittedRoomMessageState(
-  emittedMessages: RoomMessage[],
-  timeline: TurnTimelineEvent[],
-  roomMessage: RoomMessage,
-): void {
-  const alreadySeenMessage = emittedMessages.some((entry) => entry.id === roomMessage.id);
-  emittedMessages.splice(0, emittedMessages.length, ...mergeEmittedMessages(emittedMessages, roomMessage));
-  if (!alreadySeenMessage) {
-    timeline.push(createRoomMessageTimelineEvent(roomMessage, timeline.length + 1));
-  }
-}
-
 function createStreamControlRoomMessage(
   control: Extract<RoomMessageStreamAction, { type: "begin_room_message_stream" | "finalize_room_message_stream" }>,
   agent: AgentRoomTurn["agent"],
@@ -315,60 +259,6 @@ function createStreamControlRoomMessage(
     agent,
     resolveRoomMessageId,
   );
-}
-
-function createRoomMessageTimelineEvent(message: RoomMessage, sequence: number): TurnTimelineEvent {
-  return {
-    id: `room-message:${message.id}`,
-    sequence,
-    type: "room-message",
-    messageId: message.id,
-    roomId: message.roomId,
-  };
-}
-
-function appendDraftDelta(args: {
-  draftSegments: DraftTextSegment[];
-  timeline: TurnTimelineEvent[];
-  delta: string;
-}): { draftSegments: DraftTextSegment[]; timeline: TurnTimelineEvent[] } {
-  const lastSegment = args.draftSegments[args.draftSegments.length - 1];
-  if (lastSegment && lastSegment.status === "streaming") {
-    const nextDraftSegments = [...args.draftSegments];
-    nextDraftSegments[nextDraftSegments.length - 1] = {
-      ...lastSegment,
-      content: `${lastSegment.content}${args.delta}`,
-    };
-    return {
-      draftSegments: nextDraftSegments,
-      timeline: args.timeline,
-    };
-  }
-
-  const segment: DraftTextSegment = {
-    id: createUuid(),
-    sequence: args.timeline.length + 1,
-    content: args.delta,
-    status: "streaming",
-  };
-  return {
-    draftSegments: [...args.draftSegments, segment],
-    timeline: [...args.timeline, createDraftSegmentTimelineEvent(segment)],
-  };
-}
-
-function finalizeLatestDraftSegment(draftSegments: DraftTextSegment[]): DraftTextSegment[] {
-  const lastSegment = draftSegments[draftSegments.length - 1];
-  if (!lastSegment || lastSegment.status !== "streaming") {
-    return draftSegments;
-  }
-
-  const nextDraftSegments = [...draftSegments];
-  nextDraftSegments[nextDraftSegments.length - 1] = {
-    ...lastSegment,
-    status: "completed",
-  };
-  return nextDraftSegments;
 }
 
 function createTurn(
@@ -523,6 +413,32 @@ async function resolveConversationDependencies(conversationRunner?: RoomConversa
   return {
     conversationRunner: conversationModule.streamConversation as RoomConversationRunner,
     extractConversationErrorMeta: conversationModule.extractAssistantMetaFromConversationError,
+  };
+}
+
+function buildAssistantTurnMeta(result: Awaited<ReturnType<RoomConversationRunner>>): NonNullable<AgentRoomTurn["meta"]> {
+  return {
+    apiFormat: result.actualApiFormat,
+    compatibility: result.compatibility,
+    ...(result.responseId ? { responseId: result.responseId } : {}),
+    ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+    ...(result.continuation ? { continuation: result.continuation } : {}),
+    ...(result.usage ? { usage: result.usage } : {}),
+    ...(result.historyDelta ? { historyDelta: result.historyDelta } : {}),
+    ...(result.recovery ? { recovery: result.recovery } : {}),
+    ...(result.emptyCompletion ? { emptyCompletion: result.emptyCompletion } : {}),
+  };
+}
+
+function getFallbackCompatibility(assistantMeta?: AssistantMessageMeta) {
+  return assistantMeta?.compatibility ?? {
+    providerKey: "openai" as const,
+    providerLabel: "Unknown",
+    baseUrl: "",
+    chatCompletionsToolStyle: "tools" as const,
+    responsesContinuation: "replay" as const,
+    responsesPayloadMode: "json" as const,
+    notes: [],
   };
 }
 
@@ -688,20 +604,29 @@ export async function runPreparedRoomTurn(
     attachedRooms: args.attachedRooms,
   });
 
-  const toolEvents: ToolExecution[] = [];
-  const emittedMessages: RoomMessage[] = [];
-  const receiptUpdates: RoomMessageReceiptUpdate[] = [];
-  const timeline: TurnTimelineEvent[] = [];
   const firstTokenTimingEnabled = shouldLogFirstTokenTiming();
   let firstToolLogged = false;
   let firstRoomPreviewLogged = false;
   let firstTokenLogged = false;
-  let draftSegments: DraftTextSegment[] = [];
   const resolveRoomMessageId = createRoomMessageIdResolver(runContext.requestId);
-  let currentUserReceiptStatus: RoomMessageReceiptStatus = "none";
-  let currentUserReceiptUpdatedAt: string | null = null;
-  let currentUserReceipts: RoomMessageReceipt[] = [];
-  let activeRoomMessageStream: ActiveRoomMessageStream | null = null;
+  const accumulator = createRoomTurnAccumulator({
+    agent,
+    roomId: args.room.id,
+    userMessageId: args.message.id,
+    userSender: args.message.sender,
+    userContent: args.message.content,
+    userAttachments: args.message.attachments,
+    anchorMessageId: args.anchorMessageId,
+    resolvedModel: runContext.resolvedModel,
+    continuationSnapshot: runContext.continuationSnapshot,
+    callbacks,
+    createEmittedRoomMessage: (message, toolCallId) => createEmittedRoomMessage(message, agent, resolveRoomMessageId, toolCallId),
+    createStreamControlRoomMessage: (control) => createStreamControlRoomMessage(control, agent, resolveRoomMessageId, control.content),
+    createReadNoReplyReceipt: (createdAt) => createReadNoReplyReceipt(agent, createdAt),
+    createMessageReceiptUpdate,
+    upsertReceipt,
+    createTimestamp,
+  });
 
   try {
     const conversationHistory =
@@ -734,29 +659,7 @@ export async function runPreparedRoomTurn(
             });
           }
           recordAgentTextDelta(args.agent.id, runContext.requestId, delta);
-          if (activeRoomMessageStream) {
-            const nextRoomMessage = {
-              ...activeRoomMessageStream.message,
-              content: `${activeRoomMessageStream.message.content}${delta}`,
-              status: "streaming",
-              final: false,
-            } satisfies RoomMessage;
-            activeRoomMessageStream = {
-              ...activeRoomMessageStream,
-              message: nextRoomMessage,
-            };
-            upsertEmittedRoomMessageState(emittedMessages, timeline, nextRoomMessage);
-            callbacks?.onRoomMessagePreview?.(nextRoomMessage);
-            return;
-          }
-          const nextDraftState = appendDraftDelta({
-            draftSegments,
-            timeline,
-            delta,
-          });
-          draftSegments = nextDraftState.draftSegments;
-          timeline.splice(0, timeline.length, ...nextDraftState.timeline);
-          callbacks?.onTextDelta?.(delta);
+          accumulator.handleTextDelta(delta);
         },
         onRoomMessagePreview: (preview: RoomMessagePreviewEmission) => {
           if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
@@ -774,21 +677,7 @@ export async function runPreparedRoomTurn(
               roomMessageKind: preview.kind,
             });
           }
-
-          const previewMessage = createEmittedRoomMessage(
-            {
-              roomId: preview.roomId,
-              ...(preview.messageKey ? { messageKey: preview.messageKey } : {}),
-              content: preview.content,
-              kind: preview.kind,
-              status: "streaming",
-              final: false,
-            },
-            agent,
-            resolveRoomMessageId,
-            preview.toolCallId,
-          );
-          callbacks?.onRoomMessagePreview?.(previewMessage);
+          accumulator.handlePreview(preview);
         },
         onTool: (tool) => {
           if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
@@ -806,69 +695,8 @@ export async function runPreparedRoomTurn(
               toolName: tool.toolName,
             });
           }
-
-          draftSegments = finalizeLatestDraftSegment(draftSegments);
-          toolEvents.push(tool);
-          timeline.push(createToolTimelineEvent(tool, timeline.length + 1));
           recordAgentToolEvent(args.agent.id, runContext.requestId, tool);
-          callbacks?.onTool?.(tool);
-
-          if (tool.roomMessageStream?.type === "begin_room_message_stream") {
-            const roomMessage = createStreamControlRoomMessage(
-              tool.roomMessageStream,
-              agent,
-              resolveRoomMessageId,
-              tool.roomMessageStream.initialContent,
-            );
-            activeRoomMessageStream = {
-              roomId: tool.roomMessageStream.roomId,
-              messageKey: tool.roomMessageStream.messageKey,
-              message: roomMessage,
-            };
-            if (roomMessage.content) {
-              upsertEmittedRoomMessageState(emittedMessages, timeline, roomMessage);
-              callbacks?.onRoomMessage?.(roomMessage);
-            }
-          }
-
-          if (tool.roomMessageStream?.type === "finalize_room_message_stream") {
-            const activeStream = activeRoomMessageStream;
-            const activeStreamMatches = activeStream
-              && activeStream.roomId === tool.roomMessageStream.roomId
-              && activeStream.messageKey === tool.roomMessageStream.messageKey;
-
-            if (activeStreamMatches) {
-              const roomMessage = createStreamControlRoomMessage(
-                tool.roomMessageStream,
-                agent,
-                resolveRoomMessageId,
-                activeStream.message.content,
-              );
-              activeRoomMessageStream = null;
-              upsertEmittedRoomMessageState(emittedMessages, timeline, roomMessage);
-              callbacks?.onRoomMessage?.(roomMessage);
-            }
-          }
-
-          if (tool.roomMessage) {
-            const roomMessage = createEmittedRoomMessage(tool.roomMessage, agent, resolveRoomMessageId, tool.id);
-            upsertEmittedRoomMessageState(emittedMessages, timeline, roomMessage);
-            callbacks?.onRoomMessage?.(roomMessage);
-          }
-
-          if (tool.roomAction?.type === "read_no_reply" && tool.roomAction.roomId && tool.roomAction.messageId) {
-            const receiptUpdatedAt = createTimestamp();
-            const receipt = createReadNoReplyReceipt(agent, receiptUpdatedAt);
-            const receiptUpdate = createMessageReceiptUpdate(tool.roomAction.roomId, tool.roomAction.messageId, receipt);
-            receiptUpdates.push(receiptUpdate);
-            callbacks?.onReceiptUpdate?.(receiptUpdate);
-
-            if (tool.roomAction.roomId === args.room.id && tool.roomAction.messageId === args.message.id) {
-              currentUserReceiptStatus = "read_no_reply";
-              currentUserReceiptUpdatedAt = receiptUpdatedAt;
-              currentUserReceipts = upsertReceipt(currentUserReceipts, receipt);
-            }
-          }
+          accumulator.handleTool(tool);
         },
       },
       {
@@ -893,36 +721,18 @@ export async function runPreparedRoomTurn(
       });
     }
 
+    const assistantMeta = buildAssistantTurnMeta(result);
+
     await completeAgentRoomRun({
       agentId: args.agent.id,
       requestId: runContext.requestId,
       assistantText: result.assistantText,
       resolvedModel: result.resolvedModel,
       compatibility: result.compatibility,
-      meta: {
-        apiFormat: result.actualApiFormat,
-        compatibility: result.compatibility,
-        ...(result.responseId ? { responseId: result.responseId } : {}),
-        ...(result.sessionId ? { sessionId: result.sessionId } : {}),
-        ...(result.continuation ? { continuation: result.continuation } : {}),
-        ...(result.usage ? { usage: result.usage } : {}),
-        ...(result.historyDelta ? { historyDelta: result.historyDelta } : {}),
-        ...(result.recovery ? { recovery: result.recovery } : {}),
-        ...(result.emptyCompletion ? { emptyCompletion: result.emptyCompletion } : {}),
-      },
+      meta: assistantMeta,
     });
 
-    const remainingStream = activeRoomMessageStream as ActiveRoomMessageStream | null;
-    if (remainingStream !== null) {
-      const roomMessage = {
-        ...remainingStream.message,
-        status: "completed",
-        final: true,
-      } satisfies RoomMessage;
-      activeRoomMessageStream = null;
-      upsertEmittedRoomMessageState(emittedMessages, timeline, roomMessage);
-      callbacks?.onRoomMessage?.(roomMessage);
-    }
+    const completedState = accumulator.getCompletedState(result.toolEvents);
 
     const turn = createTurn(
       args.turnId,
@@ -933,25 +743,15 @@ export async function runPreparedRoomTurn(
       args.message.content,
       args.message.attachments,
       args.anchorMessageId,
-      currentUserReceipts,
-      currentUserReceiptStatus,
-      currentUserReceiptUpdatedAt,
+      completedState.currentUserReceipts,
+      completedState.currentUserReceiptStatus,
+      completedState.currentUserReceiptUpdatedAt,
       result.assistantText,
-      finalizeLatestDraftSegment(draftSegments),
-      timeline,
-      toolEvents.length > 0 ? toolEvents : result.toolEvents,
-      emittedMessages,
-      {
-        apiFormat: result.actualApiFormat,
-        compatibility: result.compatibility,
-        ...(result.responseId ? { responseId: result.responseId } : {}),
-        ...(result.sessionId ? { sessionId: result.sessionId } : {}),
-        ...(result.continuation ? { continuation: result.continuation } : {}),
-        ...(result.usage ? { usage: result.usage } : {}),
-        ...(result.historyDelta ? { historyDelta: result.historyDelta } : {}),
-        ...(result.recovery ? { recovery: result.recovery } : {}),
-        ...(result.emptyCompletion ? { emptyCompletion: result.emptyCompletion } : {}),
-      },
+      completedState.draftSegments,
+      completedState.timeline,
+      completedState.toolEvents,
+      completedState.emittedMessages,
+      assistantMeta,
       result.resolvedModel,
       "completed",
       runContext.continuationSnapshot,
@@ -961,45 +761,17 @@ export async function runPreparedRoomTurn(
       turn,
       resolvedModel: result.resolvedModel,
       compatibility: result.compatibility,
-      emittedMessages,
-      receiptUpdates,
-      roomActions: turn.tools.flatMap((tool) => (tool.roomAction ? [tool.roomAction] : [])),
+      emittedMessages: completedState.emittedMessages,
+      receiptUpdates: completedState.receiptUpdates,
+      roomActions: completedState.roomActions,
     };
   } catch (error) {
     clearAgentRoomRun(args.agent.id, runContext.requestId);
     const message = error instanceof Error ? error.message : "Unknown server error.";
-    const remainingStream = activeRoomMessageStream as ActiveRoomMessageStream | null;
-    if (remainingStream !== null) {
-      const failedRoomMessage = {
-        ...remainingStream.message,
-        status: "failed",
-        final: true,
-      } satisfies RoomMessage;
-      activeRoomMessageStream = null;
-      upsertEmittedRoomMessageState(emittedMessages, timeline, failedRoomMessage);
-      callbacks?.onRoomMessage?.(failedRoomMessage);
-    }
+    const errorPartial = accumulator.getErrorPartial();
     throw new RoomTurnExecutionError(
       message,
-      {
-        agent,
-        roomId: args.room.id,
-        userMessageId: args.message.id,
-        userSender: args.message.sender,
-        userContent: args.message.content,
-        userAttachments: args.message.attachments,
-        anchorMessageId: args.anchorMessageId,
-        toolEvents,
-        emittedMessages,
-        receiptUpdates,
-        draftSegments: finalizeLatestDraftSegment(draftSegments),
-        timeline,
-        currentUserReceipts,
-        currentUserReceiptStatus,
-        currentUserReceiptUpdatedAt,
-        resolvedModel: runContext.resolvedModel,
-        continuationSnapshot: runContext.continuationSnapshot,
-      },
+      errorPartial,
       extractConversationErrorMeta(error),
     );
   }
@@ -1038,15 +810,7 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
         error.message,
       ),
       resolvedModel: error.partial.resolvedModel,
-      compatibility: error.assistantMeta?.compatibility ?? {
-        providerKey: "openai",
-        providerLabel: "Unknown",
-        baseUrl: "",
-        chatCompletionsToolStyle: "tools",
-        responsesContinuation: "replay",
-        responsesPayloadMode: "json",
-        notes: [],
-      },
+      compatibility: getFallbackCompatibility(error.assistantMeta),
       emittedMessages: error.partial.emittedMessages,
       receiptUpdates: error.partial.receiptUpdates,
       roomActions: error.partial.toolEvents.flatMap((tool) => (tool.roomAction ? [tool.roomAction] : [])),

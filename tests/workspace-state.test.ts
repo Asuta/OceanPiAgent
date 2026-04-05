@@ -3,7 +3,17 @@ import test from "node:test";
 import { canApplyConflictWorkspaceSnapshot } from "@/components/workspace/workspace-state";
 import type { AgentRoomTurn, ProviderCompatibility } from "@/lib/chat/types";
 import { createDefaultWorkspaceState, createRoomMessage, createRoomSession, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
-import { applyRoomTurnToWorkspace } from "@/lib/server/workspace-state";
+import { applyCronTurnToWorkspace, applyRoomTurnToWorkspace } from "@/lib/server/workspace-state";
+
+const TEST_COMPATIBILITY: ProviderCompatibility = {
+  providerKey: "generic",
+  providerLabel: "Generic",
+  baseUrl: "",
+  chatCompletionsToolStyle: "tools",
+  responsesContinuation: "replay",
+  responsesPayloadMode: "json",
+  notes: [],
+};
 
 test("canApplyConflictWorkspaceSnapshot rejects conflict snapshots that drop a local room", () => {
   const localState = createDefaultWorkspaceState();
@@ -91,23 +101,13 @@ test("applyRoomTurnToWorkspace upserts repeated turn ids instead of duplicating 
     status: "completed",
     resolvedModel: "generic/test-model",
   };
-  const compatibility: ProviderCompatibility = {
-    providerKey: "generic",
-    providerLabel: "Generic",
-    baseUrl: "",
-    chatCompletionsToolStyle: "tools",
-    responsesContinuation: "replay",
-    responsesPayloadMode: "json",
-    notes: [],
-  };
-
   const once = applyRoomTurnToWorkspace({
     workspace: workspaceWithMessage,
     agentId: "concierge",
     targetRoomId: room.id,
     turn,
     resolvedModel: "generic/test-model",
-    compatibility,
+    compatibility: TEST_COMPATIBILITY,
     emittedMessages: [],
     receiptUpdates: [],
     roomActions: [],
@@ -121,7 +121,7 @@ test("applyRoomTurnToWorkspace upserts repeated turn ids instead of duplicating 
       assistantContent: "Updated pass",
     },
     resolvedModel: "generic/test-model",
-    compatibility,
+    compatibility: TEST_COMPATIBILITY,
     emittedMessages: [],
     receiptUpdates: [],
     roomActions: [],
@@ -130,4 +130,91 @@ test("applyRoomTurnToWorkspace upserts repeated turn ids instead of duplicating 
   assert.equal(twice.rooms[0]?.agentTurns.length, 1);
   assert.equal(twice.agentStates.concierge?.agentTurns.length, 1);
   assert.equal(twice.rooms[0]?.agentTurns[0]?.assistantContent, "Updated pass");
+});
+
+test("applyCronTurnToWorkspace keeps the original target-room message while applying receipts and cross-room emissions", () => {
+  const workspace = createDefaultWorkspaceState();
+  const primaryRoom = workspace.rooms[0]!;
+  const secondaryRoom = createRoomSession(2);
+  const originalMessage = createRoomMessage(primaryRoom.id, "system", "Original scheduler packet", "system", {
+    sender: {
+      id: "room-scheduler",
+      name: "Room Scheduler",
+      role: "system",
+    },
+    kind: "system",
+  });
+  const primaryRoomWithMessage = upsertMessageToRoom(primaryRoom, originalMessage);
+  const workspaceWithRooms = {
+    ...workspace,
+    rooms: [primaryRoomWithMessage, secondaryRoom],
+  };
+
+  const turn: AgentRoomTurn = {
+    id: "cron-turn-1",
+    agent: {
+      id: "concierge",
+      label: "Harbor Concierge",
+    },
+    userMessage: {
+      ...originalMessage,
+      content: "Replacement text that cron turns should not write into the room transcript",
+    },
+    assistantContent: "Cron summary complete.",
+    tools: [],
+    emittedMessages: [],
+    status: "completed",
+    resolvedModel: "generic/test-model",
+  };
+
+  const receiptCreatedAt = "2026-04-04T10:00:00.000Z";
+  const applied = applyCronTurnToWorkspace({
+    workspace: workspaceWithRooms,
+    agentId: "concierge",
+    targetRoomId: primaryRoom.id,
+    turn,
+    resolvedModel: "generic/test-model",
+    compatibility: TEST_COMPATIBILITY,
+    emittedMessages: [
+      createRoomMessage(secondaryRoom.id, "assistant", "Cross-room follow-up", "agent_emit", {
+        sender: {
+          id: "concierge",
+          name: "Harbor Concierge",
+          role: "participant",
+        },
+      }),
+    ],
+    receiptUpdates: [
+      {
+        roomId: primaryRoom.id,
+        messageId: originalMessage.id,
+        receipt: {
+          participantId: "concierge",
+          participantName: "Harbor Concierge",
+          agentId: "concierge",
+          type: "read_no_reply",
+          createdAt: receiptCreatedAt,
+        },
+        receiptStatus: "read_no_reply",
+        receiptUpdatedAt: receiptCreatedAt,
+      },
+    ],
+    roomActions: [],
+  });
+
+  const updatedPrimaryRoom = applied.rooms.find((room) => room.id === primaryRoom.id);
+  const updatedSecondaryRoom = applied.rooms.find((room) => room.id === secondaryRoom.id);
+  const updatedOriginalMessage = updatedPrimaryRoom?.roomMessages.find((message) => message.id === originalMessage.id);
+
+  assert.ok(updatedPrimaryRoom);
+  assert.ok(updatedSecondaryRoom);
+  assert.ok(updatedOriginalMessage);
+  assert.equal(updatedOriginalMessage?.content, "Original scheduler packet");
+  assert.equal(updatedOriginalMessage?.receiptStatus, "read_no_reply");
+  assert.equal(updatedOriginalMessage?.receipts.length, 1);
+  assert.equal(updatedPrimaryRoom?.receiptRevision, 1);
+  assert.equal(updatedPrimaryRoom?.agentTurns.length, 1);
+  assert.equal(updatedSecondaryRoom?.roomMessages.some((message) => message.content === "Cross-room follow-up"), true);
+  assert.equal(applied.agentStates.concierge?.agentTurns.length, 1);
+  assert.equal(applied.agentStates.concierge?.resolvedModel, "generic/test-model");
 });

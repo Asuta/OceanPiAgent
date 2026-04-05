@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { applyModelConfigToSettings } from "@/lib/ai/model-configs";
 import { useTheme } from "@/components/theme-provider";
-import { formatTimestamp, getRoomPreview, useWorkspace } from "@/components/workspace-provider";
+import { formatTimestamp, getRoomPreview, useWorkspaceActions, useWorkspaceAgentsState, useWorkspaceRoomsState } from "@/components/workspace-provider";
 import type { ModelConfig } from "@/lib/chat/types";
 import { RESOLVED_THEME_LABELS, THEME_OPTION_LABELS, THEME_PREFERENCES } from "@/lib/theme";
 
@@ -52,7 +52,9 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
   const { mounted: themeMounted, resolvedTheme, setThemePreference, systemTheme, themePreference } = useTheme();
-  const { activeRooms, agents, agentStates, archivedRooms, activeRoomId, archiveRoom, createRoom, hydrated, isRoomRunning, setActiveRoomId, updateAgentSettings } = useWorkspace();
+  const { activeRooms, archivedRooms, activeRoomId, hydrated } = useWorkspaceRoomsState();
+  const { agents, agentStates } = useWorkspaceAgentsState();
+  const { archiveRoom, createRoom, isRoomRunning, setActiveRoomId, updateAgentSettings } = useWorkspaceActions();
 
   useEffect(() => {
     let cancelled = false;

@@ -1,6 +1,7 @@
 import type { MessageImageAttachment, RoomAgentDefinition, RoomAgentId, RoomSession, RoomWorkspaceState } from "@/lib/chat/types";
 import {
   createAgentSharedState,
+  createTimestamp,
   createRoomSession,
   DEFAULT_AGENT_ID,
   DEFAULT_LOCAL_PARTICIPANT_ID as DEFAULT_LOCAL_PARTICIPANT_KEY,
@@ -93,6 +94,31 @@ function ensureAgentStates(
   return changed ? nextAgentStates : workspace.agentStates;
 }
 
+function updateWorkspaceRooms(workspace: RoomWorkspaceState, rooms: RoomSession[]): RoomWorkspaceState {
+  return {
+    ...workspace,
+    rooms: sortRoomsByUpdatedAt(rooms),
+  };
+}
+
+function updateRoomById(
+  workspace: RoomWorkspaceState,
+  roomId: string,
+  updateRoom: (room: RoomSession) => RoomSession,
+): RoomWorkspaceState {
+  return updateWorkspaceRooms(
+    workspace,
+    workspace.rooms.map((entry) => (entry.id === roomId ? updateRoom(entry) : entry)),
+  );
+}
+
+function getRoomResult(envelope: WorkspaceEnvelope, roomId: string): RoomCommandResult {
+  return {
+    envelope,
+    room: envelope.state.rooms.find((entry) => entry.id === roomId) ?? null,
+  };
+}
+
 async function applyMutation(
   mutator: (workspace: RoomWorkspaceState, agentDefinitions: RoomAgentDefinition[]) => RoomWorkspaceState,
   deps: RoomServiceDependencies,
@@ -136,22 +162,15 @@ export async function appendUserRoomMessage(
     }
 
     const nextTitle = shouldAutoTitleRoom(room) ? getSuggestedRoomTitle(normalizedContent) || room.title : room.title;
-    return {
-      ...workspace,
-      rooms: sortRoomsByUpdatedAt(
-        workspace.rooms.map((entry) =>
-          entry.id === args.roomId
-            ? applyOutgoingUserMessage({
-                room: entry,
-                content: normalizedContent,
-                attachments: args.attachments ?? [],
-                sender,
-                nextTitle,
-              })
-            : entry,
-        ),
-      ),
-    };
+    return updateRoomById(workspace, args.roomId, (entry) =>
+      applyOutgoingUserMessage({
+        room: entry,
+        content: normalizedContent,
+        attachments: args.attachments ?? [],
+        sender,
+        nextTitle,
+      }),
+    );
   }, deps);
 
   const room = envelope.state.rooms.find((entry) => entry.id === args.roomId);
@@ -205,19 +224,13 @@ export async function runRoomCommand(
 
     await deps.enqueueRoomScheduler(input.roomId);
     const envelope = await deps.loadWorkspaceEnvelope();
-    return {
-      envelope,
-      room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null,
-    };
+    return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "stop_room") {
     await deps.stopRoomScheduler(input.roomId);
     const envelope = await deps.loadWorkspaceEnvelope();
-    return {
-      envelope,
-      room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null,
-    };
+    return getRoomResult(envelope, input.roomId);
   }
 
   const workspaceEnvelope = await deps.loadWorkspaceEnvelope();
@@ -229,57 +242,35 @@ export async function runRoomCommand(
     if (!title) {
       throw new Error("Room title cannot be empty.");
     }
-    const envelope = await applyMutation((workspace) => ({
-      ...workspace,
-      rooms: sortRoomsByUpdatedAt(
-        workspace.rooms.map((entry) =>
-          entry.id === input.roomId
-            ? {
-                ...entry,
-                title,
-                updatedAt: new Date().toISOString(),
-              }
-            : entry,
-        ),
-      ),
-    }), deps);
-    return { envelope, room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null };
+    const envelope = await applyMutation((workspace) =>
+      updateRoomById(workspace, input.roomId, (entry) => ({
+        ...entry,
+        title,
+        updatedAt: createTimestamp(),
+      })), deps);
+    return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "archive_room") {
-    const envelope = await applyMutation((workspace) => ({
-      ...workspace,
-      rooms: sortRoomsByUpdatedAt(
-        workspace.rooms.map((entry) =>
-          entry.id === input.roomId
-            ? {
-                ...entry,
-                archivedAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              }
-            : entry,
-        ),
-      ),
-    }), deps);
-    return { envelope, room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null };
+    const envelope = await applyMutation((workspace) => {
+      const timestamp = createTimestamp();
+      return updateRoomById(workspace, input.roomId, (entry) => ({
+        ...entry,
+        archivedAt: timestamp,
+        updatedAt: timestamp,
+      }));
+    }, deps);
+    return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "restore_room") {
-    const envelope = await applyMutation((workspace) => ({
-      ...workspace,
-      rooms: sortRoomsByUpdatedAt(
-        workspace.rooms.map((entry) =>
-          entry.id === input.roomId
-            ? {
-                ...entry,
-                archivedAt: null,
-                updatedAt: new Date().toISOString(),
-              }
-            : entry,
-        ),
-      ),
-    }), deps);
-    return { envelope, room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null };
+    const envelope = await applyMutation((workspace) =>
+      updateRoomById(workspace, input.roomId, (entry) => ({
+        ...entry,
+        archivedAt: null,
+        updatedAt: createTimestamp(),
+      })), deps);
+    return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "delete_room") {
@@ -291,31 +282,23 @@ export async function runRoomCommand(
   }
 
   if (input.type === "clear_room") {
-    const envelope = await applyMutation((workspace) => ({
-      ...workspace,
-      rooms: sortRoomsByUpdatedAt(
-        workspace.rooms.map((entry) =>
-          entry.id === input.roomId
-            ? {
-                ...entry,
-                roomMessages: [],
-                receiptRevision: 0,
-                scheduler: {
-                  ...entry.scheduler,
-                  status: "idle",
-                  activeParticipantId: null,
-                  roundCount: 0,
-                  agentCursorByParticipantId: {},
-                  agentReceiptRevisionByParticipantId: {},
-                },
-                error: "",
-                updatedAt: new Date().toISOString(),
-              }
-            : entry,
-        ),
-      ),
-    }), deps);
-    return { envelope, room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null };
+    const envelope = await applyMutation((workspace) =>
+      updateRoomById(workspace, input.roomId, (entry) => ({
+        ...entry,
+        roomMessages: [],
+        receiptRevision: 0,
+        scheduler: {
+          ...entry.scheduler,
+          status: "idle",
+          activeParticipantId: null,
+          roundCount: 0,
+          agentCursorByParticipantId: {},
+          agentReceiptRevisionByParticipantId: {},
+        },
+        error: "",
+        updatedAt: createTimestamp(),
+      })), deps);
+    return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "add_human_participant") {
@@ -323,69 +306,42 @@ export async function runRoomCommand(
     if (!name) {
       throw new Error("Participant name cannot be empty.");
     }
-    const envelope = await applyMutation((workspace) => ({
-      ...workspace,
-      rooms: sortRoomsByUpdatedAt(
-        workspace.rooms.map((entry) =>
-          entry.id === input.roomId
-            ? addHumanParticipantToRoom({
-                room: entry,
-                name,
-                 createParticipantId: (prefix) => `${prefix}-${createUuid().slice(0, 8)}`,
-              })
-            : entry,
-        ),
-      ),
-    }), deps);
-    return { envelope, room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null };
+    const envelope = await applyMutation((workspace) =>
+      updateRoomById(workspace, input.roomId, (entry) =>
+        addHumanParticipantToRoom({
+          room: entry,
+          name,
+          createParticipantId: (prefix) => `${prefix}-${createUuid().slice(0, 8)}`,
+        })), deps);
+    return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "add_agent_participant") {
     const envelope = await applyMutation((workspace, agentDefinitions) => ({
-      ...workspace,
-      rooms: sortRoomsByUpdatedAt(
-        workspace.rooms.map((entry) =>
-          entry.id === input.roomId ? addAgentParticipantToRoom({ room: entry, agentId: input.agentId, agentDefinitions }) : entry,
-        ),
-      ),
+      ...updateRoomById(workspace, input.roomId, (entry) =>
+        addAgentParticipantToRoom({ room: entry, agentId: input.agentId, agentDefinitions })),
       agentStates: ensureAgentStates(workspace, [input.agentId]),
     }), deps);
-    return { envelope, room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null };
+    return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "remove_participant") {
-    const envelope = await applyMutation((workspace) => ({
-      ...workspace,
-      rooms: sortRoomsByUpdatedAt(
-        workspace.rooms.map((entry) =>
-          entry.id === input.roomId ? removeParticipantFromRoom({ room: entry, participantId: input.participantId }) : entry,
-        ),
-      ),
-    }), deps);
-    return { envelope, room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null };
+    const envelope = await applyMutation((workspace) =>
+      updateRoomById(workspace, input.roomId, (entry) => removeParticipantFromRoom({ room: entry, participantId: input.participantId })), deps);
+    return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "toggle_agent_participant") {
-    const envelope = await applyMutation((workspace) => ({
-      ...workspace,
-      rooms: sortRoomsByUpdatedAt(
-        workspace.rooms.map((entry) =>
-          entry.id === input.roomId ? toggleAgentParticipantInRoom({ room: entry, participantId: input.participantId }) : entry,
-        ),
-      ),
-    }), deps);
-    return { envelope, room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null };
+    const envelope = await applyMutation((workspace) =>
+      updateRoomById(workspace, input.roomId, (entry) => toggleAgentParticipantInRoom({ room: entry, participantId: input.participantId })), deps);
+    return getRoomResult(envelope, input.roomId);
   }
 
-  const envelope = await applyMutation((workspace) => ({
-    ...workspace,
-    rooms: sortRoomsByUpdatedAt(
-      workspace.rooms.map((entry) =>
-        entry.id === input.roomId
-          ? moveAgentParticipantInRoom({ room: entry, participantId: input.participantId, direction: input.direction })
-          : entry,
-      ),
-    ),
-  }), deps);
-  return { envelope, room: envelope.state.rooms.find((entry) => entry.id === input.roomId) ?? null };
+  const envelope = await applyMutation((workspace) =>
+    updateRoomById(
+      workspace,
+      input.roomId,
+      (entry) => moveAgentParticipantInRoom({ room: entry, participantId: input.participantId, direction: input.direction }),
+    ), deps);
+  return getRoomResult(envelope, input.roomId);
 }

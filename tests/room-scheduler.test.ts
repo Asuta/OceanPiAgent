@@ -4,7 +4,23 @@ import { createSchedulerPacket } from "@/lib/chat/room-scheduler";
 import { addAgentParticipantToRoom } from "@/lib/chat/room-actions";
 import { appendMessageToRoom, createAgentOwnedRoomSession, createAgentSharedState, createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
 import type { RunRoomTurnResult } from "@/lib/server/room-runner";
-import { runRoomSchedulerNow, stopRoomScheduler } from "@/lib/server/room-scheduler";
+import {
+  enqueueRoomScheduler,
+  getRoomSchedulerQueueSnapshotForTest,
+  resetRoomSchedulerStateForTest,
+  runRoomSchedulerNow,
+  stopRoomScheduler,
+} from "@/lib/server/room-scheduler";
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 test("createSchedulerPacket includes a compact unseen visible delta for the target participant", () => {
   const state = createDefaultWorkspaceState();
@@ -571,4 +587,126 @@ test("stopRoomScheduler forces a running room back to idle and marks running tur
   assert.equal(nextRoom.scheduler.activeParticipantId, null);
   assert.equal(nextRoom.agentTurns[0]?.status, "error");
   assert.equal(state.agentStates.concierge.agentTurns[0]?.error, "Stopped for testing.");
+});
+
+test("enqueueRoomScheduler merges queued overrides with the active run overrides", async () => {
+  await resetRoomSchedulerStateForTest();
+
+  let state = createDefaultWorkspaceState();
+  const room = appendMessageToRoom(
+    state.rooms[0]!,
+    createRoomMessage(state.rooms[0]!.id, "user", "Please handle the first message.", "user", {
+      sender: {
+        id: "local-operator",
+        name: "You",
+        role: "participant",
+      },
+    }),
+  );
+  state = {
+    ...state,
+    rooms: [room],
+  };
+
+  const firstTurnEntered = createDeferred<void>();
+  const releaseFirstTurn = createDeferred<void>();
+  let runCount = 0;
+  const roomId = room.id;
+
+  const loadWorkspaceEnvelope = async () => ({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    state,
+  });
+  const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+    state = await mutator(state);
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+  };
+
+  const runRoomTurnNonStreamingOverride = async ({ roomId: targetRoomId, message, agentId }: {
+    roomId: string;
+    message: { id: string; content: string; sender: { id: string; name: string; role: "participant" | "system" } };
+    agentId: string;
+  }) => {
+    runCount += 1;
+    if (runCount === 1) {
+      firstTurnEntered.resolve();
+      await releaseFirstTurn.promise;
+    }
+    const result: RunRoomTurnResult = {
+      turn: {
+        id: "turn-1",
+        agent: {
+          id: agentId,
+          label: agentId,
+        },
+        userMessage: {
+          ...createRoomMessage(targetRoomId, "system", message.content, "system", {
+            sender: message.sender,
+            kind: "system",
+          }),
+          id: message.id,
+        },
+        assistantContent: `${agentId}-done`,
+        tools: [],
+        emittedMessages: [],
+        status: "completed",
+        resolvedModel: "generic/fake-model",
+      },
+      resolvedModel: "generic/fake-model",
+      compatibility: {
+        providerKey: "generic",
+        providerLabel: "Generic",
+        baseUrl: "",
+        chatCompletionsToolStyle: "tools",
+        responsesContinuation: "replay",
+        responsesPayloadMode: "json",
+        notes: [],
+      },
+      emittedMessages: [],
+      receiptUpdates: [],
+      roomActions: [],
+    };
+
+    return result;
+  };
+
+  const schedulerPromise = enqueueRoomScheduler(roomId, {
+    loadWorkspaceEnvelope,
+    mutateWorkspace,
+    runRoomTurnNonStreaming: runRoomTurnNonStreamingOverride,
+  });
+
+  await firstTurnEntered.promise;
+
+  const deliverBoundRoomMessages = async (messages: Awaited<RunRoomTurnResult>["emittedMessages"]) => messages.length;
+  const queuedPromise = enqueueRoomScheduler(roomId, {
+    deliverBoundRoomMessages,
+  });
+
+  const queueSnapshot = getRoomSchedulerQueueSnapshotForTest(roomId);
+  assert.ok(queueSnapshot);
+  assert.equal(queueSnapshot?.running, true);
+  assert.equal(queueSnapshot?.rerun, true);
+
+  const activeOverrides = queueSnapshot?.activeOverrides;
+  const queuedOverrides = queueSnapshot?.queuedOverrides;
+  assert.ok(activeOverrides);
+  assert.ok(queuedOverrides);
+  assert.equal(queuedOverrides?.loadWorkspaceEnvelope, activeOverrides?.loadWorkspaceEnvelope);
+  assert.equal(queuedOverrides?.mutateWorkspace, activeOverrides?.mutateWorkspace);
+  assert.equal(activeOverrides?.runRoomTurnNonStreaming, runRoomTurnNonStreamingOverride);
+  assert.equal(queuedOverrides?.runRoomTurnNonStreaming, runRoomTurnNonStreamingOverride);
+  assert.equal(queuedOverrides?.deliverBoundRoomMessages, deliverBoundRoomMessages);
+
+  releaseFirstTurn.resolve();
+  await Promise.all([schedulerPromise, queuedPromise]);
+
+  assert.equal(runCount, 1);
+
+  await resetRoomSchedulerStateForTest();
 });

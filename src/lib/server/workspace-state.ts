@@ -23,6 +23,8 @@ export type ApplyRoomTurnToWorkspaceArgs = {
   roomActions: import("@/lib/chat/types").RoomToolActionUnion[];
 };
 
+type ApplyAgentTurnToWorkspaceArgs = ApplyRoomTurnToWorkspaceArgs;
+
 function upsertAgentTurn(turns: ApplyRoomTurnToWorkspaceArgs["turn"][], turn: ApplyRoomTurnToWorkspaceArgs["turn"]) {
   const existingIndex = turns.findIndex((entry) => entry.id === turn.id);
   if (existingIndex < 0) {
@@ -45,7 +47,66 @@ function replaceUserMessageInRoom(room: import("@/lib/chat/types").RoomSession, 
   ));
 }
 
-export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
+function applyReceiptUpdatesToRoom(
+  room: import("@/lib/chat/types").RoomSession,
+  receiptUpdates: ApplyAgentTurnToWorkspaceArgs["receiptUpdates"],
+) {
+  let nextRoom = room;
+
+  for (const receiptUpdate of receiptUpdates) {
+    const nextMessages = applyMessageReceiptUpdate(nextRoom.roomMessages, receiptUpdate);
+    if (nextMessages !== nextRoom.roomMessages) {
+      nextRoom = {
+        ...nextRoom,
+        roomMessages: nextMessages,
+        receiptRevision: nextRoom.receiptRevision + 1,
+      };
+    }
+  }
+
+  return nextRoom;
+}
+
+function applyEmittedMessagesToRoom(
+  room: import("@/lib/chat/types").RoomSession,
+  emittedMessages: ApplyAgentTurnToWorkspaceArgs["emittedMessages"],
+) {
+  let nextRoom = room;
+
+  for (const emittedMessage of emittedMessages) {
+    if (emittedMessage.roomId === nextRoom.id) {
+      nextRoom = upsertMessageToRoom(nextRoom, emittedMessage);
+    }
+  }
+
+  return nextRoom;
+}
+
+function applyCrossRoomEmittedMessages(
+  rooms: import("@/lib/chat/types").RoomSession[],
+  targetRoomId: string,
+  emittedMessages: ApplyAgentTurnToWorkspaceArgs["emittedMessages"],
+) {
+  let nextRooms = rooms;
+
+  for (const emittedMessage of emittedMessages) {
+    if (emittedMessage.roomId === targetRoomId) {
+      continue;
+    }
+
+    nextRooms = nextRooms.map((room) => (room.id === emittedMessage.roomId ? upsertMessageToRoom(room, emittedMessage) : room));
+  }
+
+  return nextRooms;
+}
+
+function applyAgentTurnLikeUpdate(
+  args: ApplyAgentTurnToWorkspaceArgs,
+  options: {
+    replaceUserMessage: boolean;
+    error: string;
+  },
+) {
   let rooms = reduceRoomManagementActions(args.workspace.rooms, args.roomActions, args.agentId);
 
   rooms = rooms.map((room) => {
@@ -55,38 +116,18 @@ export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
 
     let nextRoom = {
       ...room,
-      roomMessages: replaceUserMessageInRoom(room, args.turn),
+      roomMessages: options.replaceUserMessage ? replaceUserMessageInRoom(room, args.turn) : room.roomMessages,
       agentTurns: upsertAgentTurn(room.agentTurns, args.turn),
-      error: args.turn.status === "error" ? args.turn.error || "Unknown room error." : "",
+      error: options.error,
       updatedAt: createTimestamp(),
     };
 
-    for (const receiptUpdate of args.receiptUpdates) {
-      const nextMessages = applyMessageReceiptUpdate(nextRoom.roomMessages, receiptUpdate);
-      if (nextMessages !== nextRoom.roomMessages) {
-        nextRoom = {
-          ...nextRoom,
-          roomMessages: nextMessages,
-          receiptRevision: nextRoom.receiptRevision + 1,
-        };
-      }
-    }
-
-    for (const emittedMessage of args.emittedMessages) {
-      if (emittedMessage.roomId === nextRoom.id) {
-        nextRoom = upsertMessageToRoom(nextRoom, emittedMessage);
-      }
-    }
-
+    nextRoom = applyReceiptUpdatesToRoom(nextRoom, args.receiptUpdates);
+    nextRoom = applyEmittedMessagesToRoom(nextRoom, args.emittedMessages);
     return nextRoom;
   });
 
-  for (const emittedMessage of args.emittedMessages) {
-    if (emittedMessage.roomId === args.targetRoomId) {
-      continue;
-    }
-    rooms = rooms.map((room) => (room.id === emittedMessage.roomId ? upsertMessageToRoom(room, emittedMessage) : room));
-  }
+  rooms = applyCrossRoomEmittedMessages(rooms, args.targetRoomId, args.emittedMessages);
 
   const nextAgentStates: Record<RoomAgentId, AgentSharedState> = {
     ...args.workspace.agentStates,
@@ -106,62 +147,16 @@ export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
   };
 }
 
-export function applyCronTurnToWorkspace(args: ApplyCronTurnToWorkspaceArgs) {
-  let rooms = reduceRoomManagementActions(args.workspace.rooms, args.roomActions, args.agentId);
-
-  rooms = rooms.map((room) => {
-    if (room.id !== args.targetRoomId) {
-      return room;
-    }
-
-    let nextRoom = {
-      ...room,
-      agentTurns: upsertAgentTurn(room.agentTurns, args.turn),
-      error: "",
-      updatedAt: createTimestamp(),
-    };
-
-    for (const receiptUpdate of args.receiptUpdates) {
-      const nextMessages = applyMessageReceiptUpdate(nextRoom.roomMessages, receiptUpdate);
-      if (nextMessages !== nextRoom.roomMessages) {
-        nextRoom = {
-          ...nextRoom,
-          roomMessages: nextMessages,
-          receiptRevision: nextRoom.receiptRevision + 1,
-        };
-      }
-    }
-
-    for (const emittedMessage of args.emittedMessages) {
-      if (emittedMessage.roomId === nextRoom.id) {
-        nextRoom = upsertMessageToRoom(nextRoom, emittedMessage);
-      }
-    }
-
-    return nextRoom;
+export function applyRoomTurnToWorkspace(args: ApplyRoomTurnToWorkspaceArgs) {
+  return applyAgentTurnLikeUpdate(args, {
+    replaceUserMessage: true,
+    error: args.turn.status === "error" ? args.turn.error || "Unknown room error." : "",
   });
+}
 
-  for (const emittedMessage of args.emittedMessages) {
-    if (emittedMessage.roomId === args.targetRoomId) {
-      continue;
-    }
-    rooms = rooms.map((room) => (room.id === emittedMessage.roomId ? upsertMessageToRoom(room, emittedMessage) : room));
-  }
-
-  const nextAgentStates: Record<RoomAgentId, AgentSharedState> = {
-    ...args.workspace.agentStates,
-    [args.agentId]: {
-      ...(args.workspace.agentStates[args.agentId] ?? createAgentSharedState()),
-      agentTurns: upsertAgentTurn(args.workspace.agentStates[args.agentId]?.agentTurns ?? [], args.turn),
-      resolvedModel: args.resolvedModel,
-      compatibility: args.compatibility,
-      updatedAt: createTimestamp(),
-    },
-  };
-
-  return {
-    ...args.workspace,
-    rooms: sortRoomsByUpdatedAt(rooms),
-    agentStates: nextAgentStates,
-  };
+export function applyCronTurnToWorkspace(args: ApplyCronTurnToWorkspaceArgs) {
+  return applyAgentTurnLikeUpdate(args, {
+    replaceUserMessage: false,
+    error: "",
+  });
 }
