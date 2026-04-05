@@ -6,10 +6,44 @@ type MermaidDiagramProps = {
   chart: string;
 };
 
+type MermaidTheme = "default" | "dark";
+
+function readMermaidTheme(): MermaidTheme {
+  if (typeof document === "undefined") {
+    return "default";
+  }
+
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "default";
+}
+
 export function MermaidDiagram({ chart }: MermaidDiagramProps) {
   const id = useId();
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<MermaidTheme>("default");
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    const root = document.documentElement;
+    const syncTheme = () => {
+      setTheme(readMermaidTheme());
+    };
+    const observer = new MutationObserver((mutations) => {
+      if (mutations.some((mutation) => mutation.type === "attributes" && mutation.attributeName === "data-theme")) {
+        syncTheme();
+      }
+    });
+
+    syncTheme();
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -20,6 +54,7 @@ export function MermaidDiagram({ chart }: MermaidDiagramProps) {
         mermaid.initialize({
           startOnLoad: false,
           securityLevel: "strict",
+          theme,
         });
         const { svg: renderedSvg } = await mermaid.render(`mermaid-${id.replace(/:/g, "-")}`, chart);
         if (!cancelled) {
@@ -41,11 +76,11 @@ export function MermaidDiagram({ chart }: MermaidDiagramProps) {
     return () => {
       cancelled = true;
     };
-  }, [chart, id]);
+  }, [chart, id, theme]);
 
   if (error) {
     return (
-      <div className="mermaid-block" data-mermaid-error="true">
+      <div className="mermaid-block" data-mermaid-error="true" data-mermaid-theme={theme}>
         <div className="mermaid-error">Mermaid render failed: {error}</div>
         <pre>
           <code>{chart}</code>
@@ -56,7 +91,7 @@ export function MermaidDiagram({ chart }: MermaidDiagramProps) {
 
   if (!svg) {
     return (
-      <div className="mermaid-block" data-mermaid-pending="true">
+      <div className="mermaid-block" data-mermaid-pending="true" data-mermaid-theme={theme}>
         <pre>
           <code>{chart}</code>
         </pre>
@@ -64,5 +99,5 @@ export function MermaidDiagram({ chart }: MermaidDiagramProps) {
     );
   }
 
-  return <div className="mermaid-block" data-mermaid-rendered="true" dangerouslySetInnerHTML={{ __html: svg }} />;
+  return <div className="mermaid-block" data-mermaid-rendered="true" data-mermaid-theme={theme} dangerouslySetInnerHTML={{ __html: svg }} />;
 }
