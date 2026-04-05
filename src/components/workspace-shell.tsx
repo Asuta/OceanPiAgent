@@ -6,11 +6,20 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { applyModelConfigToSettings } from "@/lib/ai/model-configs";
 import { useTheme } from "@/components/theme-provider";
 import { formatTimestamp, getRoomPreview, useWorkspaceActions, useWorkspaceAgentsState, useWorkspaceRoomsState } from "@/components/workspace-provider";
-import type { ModelConfig } from "@/lib/chat/types";
+import type { ModelConfig, ThinkingLevel } from "@/lib/chat/types";
 import { RESOLVED_THEME_LABELS, THEME_OPTION_LABELS, THEME_PREFERENCES } from "@/lib/theme";
 
 const MIXED_MODEL_CONFIG_VALUE = "__mixed_model_config__";
+const MIXED_THINKING_LEVEL_VALUE = "__mixed_thinking_level__";
 const EMPTY_MODEL_CONFIG_VALUE = "";
+const THINKING_LEVEL_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "none", label: "none" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "XHigh" },
+];
 
 async function fetchModelConfigs(): Promise<ModelConfig[]> {
   const response = await fetch("/api/model-configs", { cache: "no-store" });
@@ -114,6 +123,18 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
 
     return modelConfigs.find((modelConfig) => modelConfig.id === globalModelConfigValue) ?? null;
   }, [globalModelConfigValue, modelConfigs]);
+  const globalThinkingLevelValue = useMemo(() => {
+    if (agents.length === 0) {
+      return "";
+    }
+
+    const configuredThinkingLevels = new Set(agents.map((agent) => agentStates[agent.id]?.settings.thinkingLevel ?? "off"));
+    if (configuredThinkingLevels.size !== 1) {
+      return MIXED_THINKING_LEVEL_VALUE;
+    }
+
+    return [...configuredThinkingLevels][0] ?? "off";
+  }, [agentStates, agents]);
   const sidebarRooms = useMemo(() => {
     if (!hydrated || activeRooms.length === 0) {
       return [];
@@ -152,6 +173,19 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
       }
     },
     [agentStates, agents, modelConfigs, updateAgentSettings],
+  );
+  const handleGlobalThinkingLevelChange = useCallback(
+    (nextThinkingLevel: ThinkingLevel) => {
+      for (const agent of agents) {
+        const state = agentStates[agent.id];
+        if (!state) {
+          continue;
+        }
+
+        updateAgentSettings(agent.id, { thinkingLevel: nextThinkingLevel });
+      }
+    },
+    [agentStates, agents, updateAgentSettings],
   );
 
   return (
@@ -310,6 +344,23 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
                 {modelConfigs.map((modelConfig) => (
                   <option key={modelConfig.id} value={modelConfig.id}>
                     {modelConfig.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="topbar-model-switcher" aria-label="切换所有 agent 的思考强度">
+              <span className="eyebrow-label">Thinking Level</span>
+              <select
+                className="text-input topbar-model-select"
+                value={globalThinkingLevelValue}
+                disabled={agents.length === 0}
+                onChange={(event) => handleGlobalThinkingLevelChange(event.target.value as ThinkingLevel)}
+              >
+                {agents.length === 0 ? <option value="">暂无 agent</option> : null}
+                {globalThinkingLevelValue === MIXED_THINKING_LEVEL_VALUE ? <option value={MIXED_THINKING_LEVEL_VALUE}>当前 agent 使用不同思考强度</option> : null}
+                {THINKING_LEVEL_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
                   </option>
                 ))}
               </select>
