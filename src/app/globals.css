@@ -1935,6 +1935,42 @@ html[data-theme="dark"] .thread-message-body.markdown-body pre {
   white-space: pre;
 }
 
+.thread-message-body.markdown-body .mermaid-block {
+  overflow-x: auto;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(24, 53, 49, 0.04);
+}
+
+html[data-theme="dark"] .thread-message-body.markdown-body .mermaid-block {
+  background: rgba(237, 244, 240, 0.06);
+}
+
+.thread-message-body.markdown-body .mermaid-block svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.thread-message-body.markdown-body .mermaid-block pre {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.thread-message-body.markdown-body .mermaid-error {
+  margin-bottom: 0.75rem;
+  color: #a63d2f;
+  font-size: 0.92rem;
+}
+
+html[data-theme="dark"] .thread-message-body.markdown-body .mermaid-error {
+  color: #ffb2a6;
+}
+
 .thread-message-body.markdown-body :not(pre) > code {
   padding: 0.14rem 0.4rem;
   border-radius: 8px;

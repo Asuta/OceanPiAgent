@@ -30,3 +30,16 @@ test("MarkdownMessage drops raw HTML instead of injecting it", () => {
   assert.doesNotMatch(html, /<script>/);
   assert.doesNotMatch(html, /alert\('xss'\)/);
 });
+
+test("MarkdownMessage routes mermaid code fences to the Mermaid renderer", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(MarkdownMessage, {
+      className: "thread-message-body markdown-body",
+      content: "```mermaid\ngraph TD\n  A[Start] --> B[End]\n```",
+    }),
+  );
+
+  assert.match(html, /class="mermaid-block"/);
+  assert.match(html, /data-mermaid-pending="true"/);
+  assert.doesNotMatch(html, /language-mermaid/);
+});
