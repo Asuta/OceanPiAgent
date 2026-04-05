@@ -362,7 +362,7 @@ function updateRoomMessage(
 }
 
 function mergeRoomMessage(existing: RoomMessage, next: RoomMessage): RoomMessage {
-  return {
+  const merged: RoomMessage = {
     ...existing,
     ...next,
     id: existing.id,
@@ -373,6 +373,70 @@ function mergeRoomMessage(existing: RoomMessage, next: RoomMessage): RoomMessage
     source: existing.source,
     createdAt: existing.createdAt,
   };
+
+  return roomMessagesEqual(existing, merged) ? existing : merged;
+}
+
+function messageImageAttachmentsEqual(left: RoomMessage["attachments"], right: RoomMessage["attachments"]): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((attachment, index) => {
+    const candidate = right[index];
+    return Boolean(candidate)
+      && attachment.id === candidate.id
+      && attachment.kind === candidate.kind
+      && attachment.mimeType === candidate.mimeType
+      && attachment.filename === candidate.filename
+      && attachment.sizeBytes === candidate.sizeBytes
+      && attachment.storagePath === candidate.storagePath
+      && attachment.url === candidate.url;
+  });
+}
+
+function roomMessageReceiptsEqual(left: RoomMessageReceipt[], right: RoomMessageReceipt[]): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((receipt, index) => {
+    const candidate = right[index];
+    return Boolean(candidate)
+      && receipt.participantId === candidate.participantId
+      && receipt.participantName === candidate.participantName
+      && receipt.agentId === candidate.agentId
+      && receipt.type === candidate.type
+      && receipt.createdAt === candidate.createdAt;
+  });
+}
+
+function roomMessagesEqual(left: RoomMessage, right: RoomMessage): boolean {
+  return left.id === right.id
+    && left.roomId === right.roomId
+    && left.seq === right.seq
+    && left.role === right.role
+    && left.sender.id === right.sender.id
+    && left.sender.name === right.sender.name
+    && left.sender.role === right.sender.role
+    && left.content === right.content
+    && left.source === right.source
+    && left.kind === right.kind
+    && left.status === right.status
+    && left.final === right.final
+    && left.createdAt === right.createdAt
+    && left.receiptStatus === right.receiptStatus
+    && left.receiptUpdatedAt === right.receiptUpdatedAt
+    && messageImageAttachmentsEqual(left.attachments, right.attachments)
+    && roomMessageReceiptsEqual(left.receipts, right.receipts);
 }
 
 export function upsertRoomMessages(messages: RoomMessage[], message: RoomMessage): RoomMessage[] {
@@ -381,8 +445,13 @@ export function upsertRoomMessages(messages: RoomMessage[], message: RoomMessage
     return [...messages, message];
   }
 
+  const mergedMessage = mergeRoomMessage(messages[existingIndex], message);
+  if (mergedMessage === messages[existingIndex]) {
+    return messages;
+  }
+
   const nextMessages = [...messages];
-  nextMessages[existingIndex] = mergeRoomMessage(messages[existingIndex], message);
+  nextMessages[existingIndex] = mergedMessage;
   return nextMessages;
 }
 
@@ -400,10 +469,15 @@ export function upsertMessageToRoom(room: RoomSession, message: RoomMessage): Ro
     return appendMessageToRoom(room, message);
   }
 
+  const nextMessage = mergeRoomMessage(existingMessage, { ...message, roomId: room.id, seq: existingMessage.seq });
+  if (nextMessage === existingMessage) {
+    return room;
+  }
+
   return {
     ...room,
     roomMessages: room.roomMessages.map((entry) =>
-      entry.id === message.id ? mergeRoomMessage(entry, { ...message, roomId: room.id, seq: entry.seq }) : entry,
+      entry.id === message.id ? nextMessage : entry,
     ),
     updatedAt: createTimestamp(),
   };
@@ -411,6 +485,7 @@ export function upsertMessageToRoom(room: RoomSession, message: RoomMessage): Ro
 
 export function dedupeRoomMessages(messages: RoomMessage[]): RoomMessage[] {
   const dedupedMessages: RoomMessage[] = [];
+  let changed = false;
 
   for (const message of messages) {
     const existingIndex = dedupedMessages.findIndex((entry) => entry.id === message.id);
@@ -419,10 +494,14 @@ export function dedupeRoomMessages(messages: RoomMessage[]): RoomMessage[] {
       continue;
     }
 
-    dedupedMessages[existingIndex] = mergeRoomMessage(dedupedMessages[existingIndex], message);
+    const mergedMessage = mergeRoomMessage(dedupedMessages[existingIndex], message);
+    if (mergedMessage !== dedupedMessages[existingIndex]) {
+      dedupedMessages[existingIndex] = mergedMessage;
+    }
+    changed = true;
   }
 
-  return dedupedMessages;
+  return changed ? dedupedMessages : messages;
 }
 
 export function syncRoomParticipants(room: RoomSession, participants: RoomParticipant[]): RoomSession {

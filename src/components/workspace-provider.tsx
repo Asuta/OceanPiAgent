@@ -2026,10 +2026,33 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     (roomId: string, updater: (room: RoomSession) => RoomSession) => {
       skipNextServerPersistRef.current = true;
       setRooms((current) => {
-        const nextRooms = current.map((room) => (room.id === roomId ? updater(room) : room)).map((room) => ({
-          ...room,
-          roomMessages: dedupeRoomMessages(room.roomMessages),
-        }));
+        let changed = false;
+        const nextRooms = current.map((room) => {
+          if (room.id !== roomId) {
+            return room;
+          }
+
+          const updatedRoom = updater(room);
+          const dedupedMessages = dedupeRoomMessages(updatedRoom.roomMessages);
+          const nextRoom = dedupedMessages === updatedRoom.roomMessages
+            ? updatedRoom
+            : {
+                ...updatedRoom,
+                roomMessages: dedupedMessages,
+              };
+
+          if (nextRoom === room) {
+            return room;
+          }
+
+          changed = true;
+          return nextRoom;
+        });
+
+        if (!changed) {
+          return current;
+        }
+
         roomsRef.current = nextRooms;
         return nextRooms;
       });

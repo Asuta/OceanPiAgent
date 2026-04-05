@@ -423,6 +423,102 @@ test("runRoomSchedulerNow forwards completed emitted room messages for bound-roo
   assert.deepEqual(deliveredBatches, [["Bound-room final reply"]]);
 });
 
+test("runRoomSchedulerNow resolves model config overrides for non-streaming turns", async () => {
+  let state = createDefaultWorkspaceState();
+  const room = appendMessageToRoom(
+    state.rooms[0]!,
+    createRoomMessage(state.rooms[0]!.id, "user", "Please use the configured endpoint.", "user", {
+      sender: {
+        id: "local-operator",
+        name: "You",
+        role: "participant",
+      },
+    }),
+  );
+  state = {
+    ...state,
+    rooms: [room],
+  };
+
+  const loadWorkspaceEnvelope = async () => ({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    state,
+  });
+  const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+    state = await mutator(state);
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+  };
+
+  let forwardedSettingsModel = "";
+  let forwardedBaseUrl = "";
+  let forwardedApiKey = "";
+
+  await runRoomSchedulerNow(room.id, {
+    loadWorkspaceEnvelope,
+    mutateWorkspace,
+    resolveSettingsWithModelConfig: async (settings) => ({
+      settings: {
+        ...settings,
+        model: "deepseek-chat",
+      },
+      modelConfig: null,
+      modelConfigOverrides: {
+        baseUrl: "https://api.deepseek.com",
+        apiKey: "deepseek-key",
+      },
+    }),
+    runRoomTurnNonStreaming: async ({ roomId, message, agentId, settings, modelConfigOverrides }) => {
+      forwardedSettingsModel = settings.model;
+      forwardedBaseUrl = modelConfigOverrides?.baseUrl ?? "";
+      forwardedApiKey = modelConfigOverrides?.apiKey ?? "";
+
+      return {
+        turn: {
+          id: `turn-${agentId}`,
+          agent: {
+            id: agentId,
+            label: agentId,
+          },
+          userMessage: {
+            ...createRoomMessage(roomId, "system", message.content, "system", {
+              sender: message.sender,
+              kind: "system",
+            }),
+            id: message.id,
+          },
+          assistantContent: "done",
+          tools: [],
+          emittedMessages: [],
+          status: "completed",
+          resolvedModel: "deepseek-chat",
+        },
+        resolvedModel: "deepseek-chat",
+        compatibility: {
+          providerKey: "generic",
+          providerLabel: "Generic",
+          baseUrl: "https://api.deepseek.com",
+          chatCompletionsToolStyle: "tools",
+          responsesContinuation: "replay",
+          responsesPayloadMode: "json",
+          notes: [],
+        },
+        emittedMessages: [],
+        receiptUpdates: [],
+        roomActions: [],
+      };
+    },
+  });
+
+  assert.equal(forwardedSettingsModel, "deepseek-chat");
+  assert.equal(forwardedBaseUrl, "https://api.deepseek.com");
+  assert.equal(forwardedApiKey, "deepseek-key");
+});
+
 test("runRoomSchedulerNow advances past the owner when a new agent-owned room starts with the owner's first message", async () => {
   let state = createDefaultWorkspaceState();
   let room = createAgentOwnedRoomSession(

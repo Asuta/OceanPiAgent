@@ -84,3 +84,27 @@ test("upsertMessageToRoom keeps sequence while updating streamed assistant messa
   assert.equal(updatedRoom.roomMessages[0]?.content, "Working, done.");
   assert.equal(updatedRoom.roomMessages[0]?.status, "completed");
 });
+
+test("upsertMessageToRoom returns the original room when the streamed message is unchanged", () => {
+  const room = createRoomSession(1);
+  const initialMessage = createRoomMessage(room.id, "assistant", "Working", "agent_emit", {
+    sender: {
+      id: "concierge",
+      name: "Harbor Concierge",
+      role: "participant",
+    },
+    status: "streaming",
+    final: false,
+  });
+  initialMessage.id = "stream-same";
+
+  const roomWithStreamingMessage = upsertMessageToRoom(room, initialMessage);
+  const unchangedPreview = {
+    ...initialMessage,
+  };
+
+  const nextRoom = upsertMessageToRoom(roomWithStreamingMessage, unchangedPreview);
+
+  assert.equal(nextRoom, roomWithStreamingMessage);
+  assert.equal(nextRoom.roomMessages[0], roomWithStreamingMessage.roomMessages[0]);
+});

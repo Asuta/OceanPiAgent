@@ -287,6 +287,8 @@ async function executeScheduledTurn(args: {
   hooks: RoomSchedulerRunHooks;
   deps: RoomSchedulerDependencies;
 }): Promise<RunRoomTurnResult> {
+  const resolvedSelection = await args.deps.resolveSettingsWithModelConfig(getSchedulerSettings(args.workspace, args.targetAgentId));
+
   if (!hasStreamingHooks(args.hooks)) {
     const schedulerPacket = createSchedulerPacket({
       room: args.room,
@@ -302,12 +304,12 @@ async function executeScheduledTurn(args: {
       agentId: args.targetAgentId,
       message: schedulerPacket,
       anchorMessageId: args.anchorMessageId,
-      settings: getSchedulerSettings(args.workspace, args.targetAgentId),
+      settings: resolvedSelection.settings,
+      modelConfigOverrides: resolvedSelection.modelConfigOverrides,
       ...(args.hooks.signal ? { signal: args.hooks.signal } : {}),
     });
   }
 
-  const resolvedSelection = await args.deps.resolveSettingsWithModelConfig(getSchedulerSettings(args.workspace, args.targetAgentId));
   const turnId = `stream:${createUuid()}`;
   const schedulerPacket = createSchedulerPacket({
     room: args.room,

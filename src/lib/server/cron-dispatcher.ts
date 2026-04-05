@@ -6,10 +6,20 @@ import {
   loadCronStore,
   mutateCronStore,
 } from "@/lib/server/cron-store";
+import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store";
 import { runRoomTurnNonStreaming } from "@/lib/server/room-runner";
 import { loadWorkspaceEnvelope, mutateWorkspace } from "@/lib/server/workspace-store";
 import { applyCronTurnToWorkspace, createAgentSharedState, createTimestamp } from "@/lib/server/workspace-state";
 import { createUuid } from "@/lib/utils/uuid";
+
+interface CronDispatcherDependencies {
+  loadCronStore: typeof loadCronStore;
+  mutateCronStore: typeof mutateCronStore;
+  loadWorkspaceEnvelope: typeof loadWorkspaceEnvelope;
+  resolveSettingsWithModelConfig: typeof resolveSettingsWithModelConfig;
+  runRoomTurnNonStreaming: typeof runRoomTurnNonStreaming;
+  mutateWorkspace: typeof mutateWorkspace;
+}
 
 type QueuedCronJob = {
   jobId: string;
@@ -120,8 +130,8 @@ async function finalizeRun(args: {
   status: RoomCronRunRecord["status"];
   summary: string;
   error: string | null;
-}): Promise<void> {
-  await mutateCronStore((store) => ({
+}, mutateCronStoreFn: typeof mutateCronStore = mutateCronStore): Promise<void> {
+  await mutateCronStoreFn((store) => ({
     ...store,
     runs: store.runs.map((run) =>
       run.id === args.runId
@@ -180,9 +190,13 @@ async function repairLegacyQueuedOnceJobs(): Promise<void> {
   }));
 }
 
-async function startRunRecord(job: RoomCronJob, scheduledFor: string): Promise<RoomCronRunRecord> {
+async function startRunRecord(
+  job: RoomCronJob,
+  scheduledFor: string,
+  mutateCronStoreFn: typeof mutateCronStore = mutateCronStore,
+): Promise<RoomCronRunRecord> {
   const record = createCronRunRecord(job, scheduledFor);
-  await mutateCronStore((store) => ({
+  await mutateCronStoreFn((store) => ({
     ...store,
     runs: [...store.runs, record],
     jobs: store.jobs.map((entry) =>
@@ -199,17 +213,29 @@ async function startRunRecord(job: RoomCronJob, scheduledFor: string): Promise<R
   return record;
 }
 
-async function runQueuedJob(item: QueuedCronJob): Promise<void> {
-  const store = await loadCronStore();
+function getCronDispatcherDependencies(overrides: Partial<CronDispatcherDependencies> = {}): CronDispatcherDependencies {
+  return {
+    loadCronStore: overrides.loadCronStore ?? loadCronStore,
+    mutateCronStore: overrides.mutateCronStore ?? mutateCronStore,
+    loadWorkspaceEnvelope: overrides.loadWorkspaceEnvelope ?? loadWorkspaceEnvelope,
+    resolveSettingsWithModelConfig: overrides.resolveSettingsWithModelConfig ?? resolveSettingsWithModelConfig,
+    runRoomTurnNonStreaming: overrides.runRoomTurnNonStreaming ?? runRoomTurnNonStreaming,
+    mutateWorkspace: overrides.mutateWorkspace ?? mutateWorkspace,
+  };
+}
+
+async function runQueuedJob(item: QueuedCronJob, overrides: Partial<CronDispatcherDependencies> = {}): Promise<void> {
+  const deps = getCronDispatcherDependencies(overrides);
+  const store = await deps.loadCronStore();
   const job = store.jobs.find((entry) => entry.id === item.jobId && (entry.enabled || item.force));
   if (!job) {
     return;
   }
 
-  const runRecord = await startRunRecord(job, item.scheduledFor);
+  const runRecord = await startRunRecord(job, item.scheduledFor, deps.mutateCronStore);
 
   try {
-    const workspaceEnvelope = await loadWorkspaceEnvelope();
+    const workspaceEnvelope = await deps.loadWorkspaceEnvelope();
     const room = workspaceEnvelope.state.rooms.find((entry) => entry.id === job.targetRoomId);
     if (!room) {
       throw new Error(`Target room ${job.targetRoomId} does not exist.`);
@@ -222,7 +248,8 @@ async function runQueuedJob(item: QueuedCronJob): Promise<void> {
     }
 
     const settings = workspaceEnvelope.state.agentStates[job.agentId]?.settings ?? createAgentSharedState().settings;
-    const result = await runRoomTurnNonStreaming({
+    const resolvedSelection = await deps.resolveSettingsWithModelConfig(settings);
+    const result = await deps.runRoomTurnNonStreaming({
       workspace: workspaceEnvelope.state,
       roomId: job.targetRoomId,
       agentId: job.agentId,
@@ -232,7 +259,8 @@ async function runQueuedJob(item: QueuedCronJob): Promise<void> {
         attachments: [],
         sender: createCronSender(job),
       },
-      settings,
+      settings: resolvedSelection.settings,
+      modelConfigOverrides: resolvedSelection.modelConfigOverrides,
     });
 
     if (result.turn.status === "error") {
@@ -249,7 +277,7 @@ async function runQueuedJob(item: QueuedCronJob): Promise<void> {
       emittedMessages,
     };
 
-    await mutateWorkspace((workspace) =>
+    await deps.mutateWorkspace((workspace) =>
       applyCronTurnToWorkspace({
         workspace,
         agentId: job.agentId,
@@ -272,7 +300,7 @@ async function runQueuedJob(item: QueuedCronJob): Promise<void> {
         emittedMessages,
       }),
       error: null,
-    });
+    }, deps.mutateCronStore);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown cron error.";
     await finalizeRun({
@@ -281,8 +309,15 @@ async function runQueuedJob(item: QueuedCronJob): Promise<void> {
       status: "failed",
       summary: "",
       error: message,
-    });
+    }, deps.mutateCronStore);
   }
+}
+
+export async function runQueuedCronJobForTest(
+  item: QueuedCronJob,
+  overrides: Partial<CronDispatcherDependencies> = {},
+): Promise<void> {
+  await runQueuedJob(item, overrides);
 }
 
 async function processAgentQueue(agentId: string): Promise<void> {

@@ -479,6 +479,7 @@ export interface RunRoomTurnInput {
   message: BaseRoomTurnInput["message"];
   anchorMessageId?: string;
   settings: ChatSettings;
+  modelConfigOverrides?: ModelConfigExecutionOverrides;
   signal?: AbortSignal;
 }
 
@@ -553,6 +554,7 @@ export async function buildPreparedInputFromWorkspace(args: RunRoomTurnInput): P
     knownAgents: createKnownAgentCards(agentDefinitions),
     roomHistoryById: getRoomHistoryByIdForAgent(args.workspace, args.agentId),
     anchorMessageId: args.anchorMessageId,
+    modelConfigOverrides: args.modelConfigOverrides,
     signal: args.signal,
   };
 }
