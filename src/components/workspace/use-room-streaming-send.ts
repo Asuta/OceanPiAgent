@@ -5,6 +5,7 @@ import type {
   AssistantMessageMeta,
   MessageImageAttachment,
   RoomAgentId,
+  RoomMessage,
   RoomMessageReceiptUpdate,
   RoomSession,
   RoomWorkspaceState,
@@ -15,6 +16,8 @@ import { createUuid } from "@/lib/utils/uuid";
 import { readRoomStream } from "@/components/workspace/room-stream";
 import { upsertRoomMessageInTurn } from "@/components/workspace/room-turn-state";
 import { appendDraftDelta, appendTimelineEvent, finalizeLatestDraftSegment, mergeAgentTurns } from "@/components/workspace/agent-turn-state";
+
+const ROOM_MESSAGE_PREVIEW_FLUSH_MS = 75;
 
 type MutableRef<T> = {
   current: T;
@@ -124,6 +127,79 @@ export function useRoomStreamingSend(args: {
       let activeTurnAgentId: RoomAgentId | null = null;
       const previewMessageIds = new Set<string>();
       const previewMessageRoomIdById = new Map<string, string>();
+      const pendingPreviewMessagesById = new Map<string, RoomMessage>();
+      let previewFlushTimer: number | null = null;
+
+      const flushPreviewMessages = () => {
+        if (previewFlushTimer !== null) {
+          window.clearTimeout(previewFlushTimer);
+          previewFlushTimer = null;
+        }
+
+        if (pendingPreviewMessagesById.size === 0) {
+          return;
+        }
+
+        const pendingPreviewMessages = [...pendingPreviewMessagesById.values()];
+        pendingPreviewMessagesById.clear();
+        const pendingPreviewMessagesByRoomId = new Map<string, typeof pendingPreviewMessages>();
+
+        for (const message of pendingPreviewMessages) {
+          const roomMessages = pendingPreviewMessagesByRoomId.get(message.roomId);
+          if (roomMessages) {
+            roomMessages.push(message);
+            continue;
+          }
+
+          pendingPreviewMessagesByRoomId.set(message.roomId, [message]);
+        }
+
+        for (const [previewRoomId, messages] of pendingPreviewMessagesByRoomId) {
+          updateRoomStateEphemeral(previewRoomId, (room) => {
+            let nextRoom = room;
+            for (const message of messages) {
+              nextRoom = upsertMessageToRoom(nextRoom, message);
+            }
+            return nextRoom;
+          });
+        }
+
+        if (!activeTurnId || !activeTurnAgentId) {
+          return;
+        }
+
+        updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
+          turns.map((turn) => {
+            if (turn.id !== activeTurnId) {
+              return turn;
+            }
+
+            let nextTurn = turn;
+            for (const message of pendingPreviewMessages) {
+              nextTurn = upsertRoomMessageInTurn(nextTurn, message);
+            }
+            return nextTurn;
+          }),
+        );
+      };
+
+      const schedulePreviewFlush = () => {
+        if (previewFlushTimer !== null) {
+          return;
+        }
+
+        previewFlushTimer = window.setTimeout(() => {
+          flushPreviewMessages();
+        }, ROOM_MESSAGE_PREVIEW_FLUSH_MS);
+      };
+
+      const clearPreviewMessage = (messageId: string) => {
+        pendingPreviewMessagesById.delete(messageId);
+        if (pendingPreviewMessagesById.size === 0 && previewFlushTimer !== null) {
+          window.clearTimeout(previewFlushTimer);
+          previewFlushTimer = null;
+        }
+      };
 
       try {
         const response = await fetch("/api/rooms/stream", {
@@ -190,18 +266,13 @@ export function useRoomStreamingSend(args: {
           onRoomMessagePreview: (message) => {
             previewMessageIds.add(message.id);
             previewMessageRoomIdById.set(message.id, message.roomId);
-            updateRoomStateEphemeral(message.roomId, (room) => upsertMessageToRoom(room, message));
-            if (!activeTurnId || !activeTurnAgentId) {
-              return;
-            }
-
-            updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
-              turns.map((turn) => (turn.id === activeTurnId ? upsertRoomMessageInTurn(turn, message) : turn)),
-            );
+            pendingPreviewMessagesById.set(message.id, message);
+            schedulePreviewFlush();
           },
           onRoomMessage: (message) => {
             previewMessageIds.delete(message.id);
             previewMessageRoomIdById.delete(message.id);
+            clearPreviewMessage(message.id);
             updateRoomStateEphemeral(message.roomId, (room) => upsertMessageToRoom(room, message));
             if (!activeTurnId || !activeTurnAgentId) {
               return;
@@ -228,6 +299,7 @@ export function useRoomStreamingSend(args: {
             applyReceiptUpdateToAllAgentConsolesEphemeral(update);
           },
           onDone: (event) => {
+            flushPreviewMessages();
             const finalTurn = event.turn;
             activeTurnId = finalTurn.id;
             activeTurnAgentId = finalTurn.agent.id;
@@ -292,6 +364,11 @@ export function useRoomStreamingSend(args: {
 
         throw error;
       } finally {
+        if (previewFlushTimer !== null) {
+          window.clearTimeout(previewFlushTimer);
+          previewFlushTimer = null;
+        }
+        pendingPreviewMessagesById.clear();
         if (activeRoomStreamControllersRef.current[roomId] === requestController) {
           delete activeRoomStreamControllersRef.current[roomId];
         }
