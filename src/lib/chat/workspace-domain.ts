@@ -19,7 +19,7 @@ import type {
   RoomWorkspaceState,
   ToolExecution,
 } from "@/lib/chat/types";
-import { DEFAULT_MAX_TOOL_LOOP_STEPS } from "@/lib/chat/types";
+import { DEFAULT_COMPACTION_TOKEN_THRESHOLD, DEFAULT_MAX_TOOL_LOOP_STEPS } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 
 export const DEFAULT_AGENT_ID: RoomAgentId = "concierge";
@@ -32,6 +32,7 @@ const DEFAULT_SETTINGS: ChatSettings = {
   systemPrompt: "",
   providerMode: "auto",
   memoryBackend: "sqlite-fts",
+  compactionTokenThreshold: DEFAULT_COMPACTION_TOKEN_THRESHOLD,
   maxToolLoopSteps: DEFAULT_MAX_TOOL_LOOP_STEPS,
   thinkingLevel: "off",
   enabledSkillIds: [] as string[],

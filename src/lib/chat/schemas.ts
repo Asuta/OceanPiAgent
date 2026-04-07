@@ -1,7 +1,10 @@
 import { z } from "zod";
 import {
+  DEFAULT_COMPACTION_TOKEN_THRESHOLD,
+  MAX_COMPACTION_TOKEN_THRESHOLD,
   MEMORY_BACKENDS,
   MAX_MAX_TOOL_LOOP_STEPS,
+  MIN_COMPACTION_TOKEN_THRESHOLD,
   MIN_MAX_TOOL_LOOP_STEPS,
   THINKING_LEVELS,
   type RoomWorkspaceState,
@@ -385,6 +388,7 @@ const chatSettingsSchema = z.object({
   systemPrompt: z.string(),
   providerMode: providerModeSchema,
   memoryBackend: z.enum(MEMORY_BACKENDS).optional().default("sqlite-fts"),
+  compactionTokenThreshold: z.number().int().min(MIN_COMPACTION_TOKEN_THRESHOLD).max(MAX_COMPACTION_TOKEN_THRESHOLD).optional().default(DEFAULT_COMPACTION_TOKEN_THRESHOLD),
   maxToolLoopSteps: z.number().int().min(MIN_MAX_TOOL_LOOP_STEPS).max(MAX_MAX_TOOL_LOOP_STEPS),
   thinkingLevel: thinkingLevelSchema,
   enabledSkillIds: z.array(z.string()),
