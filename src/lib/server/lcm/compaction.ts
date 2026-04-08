@@ -19,6 +19,7 @@ export interface CompactionResult {
   createdSummaryId?: string;
   condensed: boolean;
   level?: CompactionLevel;
+  skipReason?: "below_threshold" | "empty_context" | "no_eligible_leaf_chunk" | "leaf_pass_failed" | "no_condensation_candidate";
 }
 
 export interface CompactionConfig {
@@ -34,6 +35,12 @@ export interface CompactionConfig {
   maxRounds: number;
   timezone?: string;
 }
+
+type CompactionThresholdInput = {
+  force?: boolean;
+  storedTokens: number;
+  comparisonExtraTokens?: number;
+};
 
 type CompactionLevel = "normal" | "aggressive" | "fallback";
 type CompactionPass = "leaf" | "condensed";
@@ -119,27 +126,26 @@ export class CompactionEngine {
     return { shouldCompact: false, reason: "none", currentTokens, threshold };
   }
 
-  async compact(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string }): Promise<CompactionResult> {
+  async compact(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string; comparisonExtraTokens?: number }): Promise<CompactionResult> {
     return this.compactFullSweep(input);
   }
 
-  async compactLeaf(input: { conversationId: number; tokenBudget: number; force?: boolean; previousSummaryContent?: string; summaryModel?: string }): Promise<CompactionResult> {
+  async compactLeaf(input: { conversationId: number; tokenBudget: number; force?: boolean; previousSummaryContent?: string; summaryModel?: string; comparisonExtraTokens?: number }): Promise<CompactionResult> {
     const tokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-    const threshold = this.resolveFixedTokenThreshold();
 
-    if (!input.force && tokensBefore <= threshold) {
-      return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false };
+    if (this.isBelowThreshold({ force: input.force, storedTokens: tokensBefore, comparisonExtraTokens: input.comparisonExtraTokens })) {
+      return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false, skipReason: "below_threshold" };
     }
 
     const leafChunk = await this.selectOldestLeafChunk(input.conversationId, input.force);
     if (leafChunk.items.length === 0) {
-      return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false };
+      return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false, skipReason: "no_eligible_leaf_chunk" };
     }
 
     const previousSummaryContent = input.previousSummaryContent ?? await this.resolvePriorLeafSummaryContext(input.conversationId, leafChunk.items);
     const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModel);
     if (!leafResult) {
-      return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false };
+      return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false, skipReason: "leaf_pass_failed" };
     }
 
     const tokensAfterLeaf = await this.summaryStore.getContextTokenCount(input.conversationId);
@@ -203,17 +209,16 @@ export class CompactionEngine {
     };
   }
 
-  async compactFullSweep(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string }): Promise<CompactionResult> {
+  async compactFullSweep(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string; comparisonExtraTokens?: number }): Promise<CompactionResult> {
     const tokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-    const threshold = this.resolveFixedTokenThreshold();
 
-    if (!input.force && tokensBefore <= threshold) {
-      return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false };
+    if (this.isBelowThreshold({ force: input.force, storedTokens: tokensBefore, comparisonExtraTokens: input.comparisonExtraTokens })) {
+      return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false, skipReason: "below_threshold" };
     }
 
     const contextItems = await this.summaryStore.getContextItems(input.conversationId);
     if (contextItems.length === 0) {
-      return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false };
+      return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false, skipReason: "empty_context" };
     }
 
     let actionTaken = false;
@@ -232,7 +237,15 @@ export class CompactionEngine {
       const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
       const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModel);
       if (!leafResult) {
-        break;
+        return {
+          actionTaken,
+          tokensBefore,
+          tokensAfter: previousTokens,
+          createdSummaryId,
+          condensed,
+          level,
+          skipReason: actionTaken ? undefined : "leaf_pass_failed",
+        };
       }
 
       const passTokensAfter = await this.summaryStore.getContextTokenCount(input.conversationId);
@@ -250,7 +263,7 @@ export class CompactionEngine {
       level = leafResult.level;
       previousSummaryContent = leafResult.content;
 
-      if (!input.force && passTokensAfter <= threshold) {
+      if (this.isBelowThreshold({ force: input.force, storedTokens: passTokensAfter, comparisonExtraTokens: input.comparisonExtraTokens })) {
         previousTokens = passTokensAfter;
         break;
       }
@@ -260,14 +273,22 @@ export class CompactionEngine {
       previousTokens = passTokensAfter;
     }
 
-    while (input.force || previousTokens > threshold) {
+    while (!this.isBelowThreshold({ force: input.force, storedTokens: previousTokens, comparisonExtraTokens: input.comparisonExtraTokens })) {
       const candidate = await this.selectShallowestCondensationCandidate({
         conversationId: input.conversationId,
         hardTrigger: input.hardTrigger === true,
         force: input.force,
       });
       if (!candidate) {
-        break;
+        return {
+          actionTaken,
+          tokensBefore,
+          tokensAfter: previousTokens,
+          createdSummaryId,
+          condensed,
+          level,
+          skipReason: actionTaken ? undefined : "no_condensation_candidate",
+        };
       }
 
       const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
@@ -291,7 +312,7 @@ export class CompactionEngine {
       createdSummaryId = condenseResult.summaryId;
       level = condenseResult.level;
 
-      if (!input.force && passTokensAfter <= threshold) {
+      if (this.isBelowThreshold({ force: input.force, storedTokens: passTokensAfter, comparisonExtraTokens: input.comparisonExtraTokens })) {
         previousTokens = passTokensAfter;
         break;
       }
@@ -309,6 +330,7 @@ export class CompactionEngine {
       createdSummaryId,
       condensed,
       level,
+      ...(actionTaken ? {} : { skipReason: "no_eligible_leaf_chunk" as const }),
     };
   }
 
@@ -345,6 +367,18 @@ export class CompactionEngine {
       rounds: this.config.maxRounds,
       finalTokens,
     };
+  }
+
+  private isBelowThreshold(input: CompactionThresholdInput): boolean {
+    if (input.force) {
+      return false;
+    }
+
+    const comparisonExtraTokens =
+      typeof input.comparisonExtraTokens === "number" && Number.isFinite(input.comparisonExtraTokens)
+        ? Math.floor(input.comparisonExtraTokens)
+        : 0;
+    return input.storedTokens + comparisonExtraTokens <= this.resolveFixedTokenThreshold();
   }
 
   private resolveLeafChunkTokens(): number {

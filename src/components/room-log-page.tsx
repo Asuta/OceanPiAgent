@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import {
   formatTimestamp,
+  getAgentParticipants,
   getPrimaryRoomAgentId,
   getToolStats,
   useWorkspaceActions,
@@ -13,7 +14,7 @@ import {
 } from "@/components/workspace-provider";
 import type { AgentRoomTurn, RoomAgentId, ToolExecution } from "@/lib/chat/types";
 
-type LogFilter = "all" | "request" | "full-request" | "tool" | "system";
+type LogFilter = "all" | "request" | "full-request" | "tool" | "system" | "compaction";
 const ROOM_LOG_CACHE_KEY_PREFIX = "room-log-cache:";
 const MAX_LOG_ENTRIES_PER_TYPE = 100;
 
@@ -58,15 +59,46 @@ interface FullRequestLogEntry {
   promptText: string;
 }
 
+interface CompactionLogEntry {
+  id: string;
+  createdAt: string;
+  agentLabel: string;
+  trigger: "automatic" | "manual";
+  success: boolean;
+  actionTaken: boolean;
+  method: "llm" | "rule_fallback" | "unknown";
+  summary: string;
+  error: string;
+  prunedMessages: number;
+  keptMessages: number;
+  details?: {
+    thresholdTokens: number;
+    contextTokens: number;
+    storedContextTokens: number;
+    promptOverheadTokens: number;
+    totalEstimatedTokens: number;
+    systemPromptTokens: number;
+    toolSchemaTokens: number;
+    attachmentTokens: number;
+    result: string;
+    contextTokensAfter?: number;
+    storedContextTokensAfter?: number;
+    tokensAfter?: number;
+    totalEstimatedTokensAfter?: number;
+  };
+}
+
 interface RoomLogCacheSnapshot {
   requestLogs: RequestLogEntry[];
   fullRequestLogs: FullRequestLogEntry[];
   toolLogs: ToolLogEntry[];
   systemLogs: SystemLogEntry[];
+  compactionLogs: CompactionLogEntry[];
   ignoredRequestIds: string[];
   ignoredFullRequestIds: string[];
   ignoredToolIds: string[];
   ignoredSystemIds: string[];
+  ignoredCompactionIds: string[];
 }
 
 const EMPTY_ROOM_LOG_CACHE: RoomLogCacheSnapshot = {
@@ -74,10 +106,12 @@ const EMPTY_ROOM_LOG_CACHE: RoomLogCacheSnapshot = {
   fullRequestLogs: [],
   toolLogs: [],
   systemLogs: [],
+  compactionLogs: [],
   ignoredRequestIds: [],
   ignoredFullRequestIds: [],
   ignoredToolIds: [],
   ignoredSystemIds: [],
+  ignoredCompactionIds: [],
 };
 
 function loadRoomLogCache(roomId: string): RoomLogCacheSnapshot {
@@ -93,15 +127,17 @@ function loadRoomLogCache(roomId: string): RoomLogCacheSnapshot {
 
     const parsed = JSON.parse(rawValue) as Partial<RoomLogCacheSnapshot>;
     return {
-      requestLogs: Array.isArray(parsed.requestLogs) ? parsed.requestLogs : [],
-      fullRequestLogs: Array.isArray(parsed.fullRequestLogs) ? parsed.fullRequestLogs : [],
-      toolLogs: Array.isArray(parsed.toolLogs) ? parsed.toolLogs : [],
-      systemLogs: Array.isArray(parsed.systemLogs) ? parsed.systemLogs : [],
-      ignoredRequestIds: Array.isArray(parsed.ignoredRequestIds) ? parsed.ignoredRequestIds : [],
-      ignoredFullRequestIds: Array.isArray(parsed.ignoredFullRequestIds) ? parsed.ignoredFullRequestIds : [],
-      ignoredToolIds: Array.isArray(parsed.ignoredToolIds) ? parsed.ignoredToolIds : [],
-      ignoredSystemIds: Array.isArray(parsed.ignoredSystemIds) ? parsed.ignoredSystemIds : [],
-    };
+        requestLogs: Array.isArray(parsed.requestLogs) ? parsed.requestLogs : [],
+        fullRequestLogs: Array.isArray(parsed.fullRequestLogs) ? parsed.fullRequestLogs : [],
+        toolLogs: Array.isArray(parsed.toolLogs) ? parsed.toolLogs : [],
+        systemLogs: Array.isArray(parsed.systemLogs) ? parsed.systemLogs : [],
+        compactionLogs: Array.isArray(parsed.compactionLogs) ? parsed.compactionLogs : [],
+        ignoredRequestIds: Array.isArray(parsed.ignoredRequestIds) ? parsed.ignoredRequestIds : [],
+        ignoredFullRequestIds: Array.isArray(parsed.ignoredFullRequestIds) ? parsed.ignoredFullRequestIds : [],
+        ignoredToolIds: Array.isArray(parsed.ignoredToolIds) ? parsed.ignoredToolIds : [],
+        ignoredSystemIds: Array.isArray(parsed.ignoredSystemIds) ? parsed.ignoredSystemIds : [],
+        ignoredCompactionIds: Array.isArray(parsed.ignoredCompactionIds) ? parsed.ignoredCompactionIds : [],
+      };
   } catch {
     return EMPTY_ROOM_LOG_CACHE;
   }
@@ -143,6 +179,35 @@ function truncateText(value: string, maxLength = 160) {
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
 }
 
+function formatTokenK(value: number | undefined) {
+  const safeValue = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  if (safeValue >= 1000) {
+    return `${(safeValue / 1000).toFixed(safeValue >= 10_000 ? 0 : 1)}K`;
+  }
+  return `${safeValue}`;
+}
+
+function getCompactionResultLabel(result: string | undefined) {
+  switch (result) {
+    case "below_threshold":
+      return "未超阈值";
+    case "empty_context":
+      return "无可压上下文";
+    case "no_eligible_leaf_chunk":
+      return "无可压历史块";
+    case "leaf_pass_failed":
+      return "叶子压缩未产出结果";
+    case "no_condensation_candidate":
+      return "无可继续凝缩摘要块";
+    case "compacted":
+      return "已压缩";
+    case "compaction_failed":
+      return "压缩失败";
+    default:
+      return "未知结果";
+  }
+}
+
 function getModelLabel(turn: AgentRoomTurn) {
   return turn.resolvedModel || turn.meta?.emptyCompletion?.resolvedModel || turn.meta?.emptyCompletion?.requestedModel || "未记录模型";
 }
@@ -176,9 +241,10 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
   const router = useRouter();
   const [filter, setFilter] = useState<LogFilter>("all");
   const [logCache, setLogCache] = useState<RoomLogCacheSnapshot>(() => loadRoomLogCache(roomId));
+  const [expandedCompactionLogIds, setExpandedCompactionLogIds] = useState<string[]>([]);
   const { activeRooms, hydrated } = useWorkspaceRoomsState();
   const { agentStates } = useWorkspaceAgentsState();
-  const { getRoomById, getAgentDefinition, isRoomRunning } = useWorkspaceActions();
+  const { getRoomById, getAgentDefinition, isRoomRunning, clearRoomLogs } = useWorkspaceActions();
   const room = getRoomById(roomId);
 
   useEffect(() => {
@@ -207,6 +273,108 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
 
     return fallbackTurns.sort((left, right) => getSortableTime(right.userMessage.createdAt) - getSortableTime(left.userMessage.createdAt));
   }, [agentStates, room]);
+  const [compactionLogs, setCompactionLogs] = useState<CompactionLogEntry[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!room) {
+      setCompactionLogs([]);
+      return;
+    }
+
+    const agentIds = [...new Set(getAgentParticipants(room).map((participant) => participant.agentId).filter((agentId): agentId is RoomAgentId => Boolean(agentId)))];
+    if (agentIds.length === 0) {
+      setCompactionLogs([]);
+      return;
+    }
+
+    const refreshCompactionLogs = () => {
+      void (async () => {
+        const entries = await Promise.all(
+          agentIds.map(async (agentId) => {
+            const response = await fetch(`/api/agent-runtime/compactions?agentId=${encodeURIComponent(agentId)}`, { cache: "no-store" }).catch(() => null);
+            const payload = response ? (await response.json().catch(() => null)) as { compactions?: Array<Record<string, unknown>> } | null : null;
+            if (!response?.ok || !payload?.compactions) {
+              return [] as CompactionLogEntry[];
+            }
+
+            const agentLabel = getAgentDefinition(agentId).label;
+             return payload.compactions.map((record, index) => ({
+              id: typeof record.id === "string" && record.id ? record.id : `${agentId}-${index}`,
+              createdAt: typeof record.createdAt === "string" ? record.createdAt : "",
+              agentLabel,
+              trigger: (record.reason === "automatic" ? "automatic" : "manual") as CompactionLogEntry["trigger"],
+              success: typeof record.success === "boolean" ? record.success : true,
+              actionTaken: typeof record.actionTaken === "boolean" ? record.actionTaken : true,
+              method: (record.method === "llm" || record.method === "rule_fallback" || record.method === "unknown" ? record.method : "unknown") as CompactionLogEntry["method"],
+              summary: typeof record.summary === "string" ? record.summary : "",
+               error: typeof record.error === "string" ? record.error : "",
+               prunedMessages: typeof record.prunedMessages === "number" ? record.prunedMessages : 0,
+               keptMessages: typeof record.keptMessages === "number" ? record.keptMessages : 0,
+               ...(record.details && typeof record.details === "object"
+                 ? {
+                     details: {
+                       thresholdTokens: typeof (record.details as { thresholdTokens?: unknown }).thresholdTokens === "number" ? (record.details as { thresholdTokens: number }).thresholdTokens : 0,
+                       contextTokens: typeof (record.details as { contextTokens?: unknown }).contextTokens === "number" ? (record.details as { contextTokens: number }).contextTokens : 0,
+                       storedContextTokens:
+                         typeof (record.details as { storedContextTokens?: unknown }).storedContextTokens === "number"
+                           ? (record.details as { storedContextTokens: number }).storedContextTokens
+                           : 0,
+                       promptOverheadTokens:
+                         typeof (record.details as { promptOverheadTokens?: unknown }).promptOverheadTokens === "number"
+                           ? (record.details as { promptOverheadTokens: number }).promptOverheadTokens
+                           : 0,
+                       totalEstimatedTokens:
+                         typeof (record.details as { totalEstimatedTokens?: unknown }).totalEstimatedTokens === "number"
+                           ? (record.details as { totalEstimatedTokens: number }).totalEstimatedTokens
+                           : 0,
+                       systemPromptTokens:
+                         typeof (record.details as { systemPromptTokens?: unknown }).systemPromptTokens === "number"
+                           ? (record.details as { systemPromptTokens: number }).systemPromptTokens
+                           : 0,
+                       toolSchemaTokens:
+                         typeof (record.details as { toolSchemaTokens?: unknown }).toolSchemaTokens === "number"
+                           ? (record.details as { toolSchemaTokens: number }).toolSchemaTokens
+                           : 0,
+                       attachmentTokens:
+                         typeof (record.details as { attachmentTokens?: unknown }).attachmentTokens === "number"
+                           ? (record.details as { attachmentTokens: number }).attachmentTokens
+                           : 0,
+                       result: typeof (record.details as { result?: unknown }).result === "string" ? (record.details as { result: string }).result : "unknown",
+                       ...(typeof (record.details as { tokensAfter?: unknown }).tokensAfter === "number"
+                         ? { tokensAfter: (record.details as { tokensAfter: number }).tokensAfter }
+                         : {}),
+                       ...(typeof (record.details as { contextTokensAfter?: unknown }).contextTokensAfter === "number"
+                         ? { contextTokensAfter: (record.details as { contextTokensAfter: number }).contextTokensAfter }
+                         : {}),
+                       ...(typeof (record.details as { storedContextTokensAfter?: unknown }).storedContextTokensAfter === "number"
+                         ? { storedContextTokensAfter: (record.details as { storedContextTokensAfter: number }).storedContextTokensAfter }
+                         : {}),
+                       ...(typeof (record.details as { totalEstimatedTokensAfter?: unknown }).totalEstimatedTokensAfter === "number"
+                         ? { totalEstimatedTokensAfter: (record.details as { totalEstimatedTokensAfter: number }).totalEstimatedTokensAfter }
+                         : {}),
+                     },
+                   }
+                 : {}),
+             }));
+          }),
+        );
+
+        if (!cancelled) {
+          setCompactionLogs(entries.flat().sort((left, right) => getSortableTime(right.createdAt) - getSortableTime(left.createdAt)));
+        }
+      })();
+    };
+
+    refreshCompactionLogs();
+    const intervalId = window.setInterval(refreshCompactionLogs, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [getAgentDefinition, room, roomTurns.length]);
 
   const requestLogs = useMemo<RequestLogEntry[]>(() => {
     return roomTurns.map((turn) => ({
@@ -344,8 +512,9 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
       fullRequestLogs: mergeCachedEntries({ cachedEntries: logCache.fullRequestLogs, nextEntries: fullRequestLogs, ignoredIds: logCache.ignoredFullRequestIds }),
       toolLogs: mergeCachedEntries({ cachedEntries: logCache.toolLogs, nextEntries: toolLogs, ignoredIds: logCache.ignoredToolIds }),
       systemLogs: mergeCachedEntries({ cachedEntries: logCache.systemLogs, nextEntries: systemLogs, ignoredIds: logCache.ignoredSystemIds }),
+      compactionLogs: mergeCachedEntries({ cachedEntries: logCache.compactionLogs, nextEntries: compactionLogs, ignoredIds: logCache.ignoredCompactionIds }),
     };
-  }, [fullRequestLogs, logCache, requestLogs, systemLogs, toolLogs]);
+  }, [compactionLogs, fullRequestLogs, logCache, requestLogs, systemLogs, toolLogs]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -359,20 +528,31 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
   const displayedFullRequestLogs = displayedCache.fullRequestLogs;
   const displayedToolLogs = displayedCache.toolLogs;
   const displayedSystemLogs = displayedCache.systemLogs;
+  const displayedCompactionLogs = displayedCache.compactionLogs;
 
-  function clearAllLogs() {
+  async function clearAllLogs() {
+    if (!window.confirm("确认清空这个房间的所有日志吗？这会清掉当前房间的请求、工具、完整请求、系统日志，以及相关 agent 的压缩日志。")) {
+      return;
+    }
+
+    await clearRoomLogs(roomId).catch(() => null);
+
     const nextCache: RoomLogCacheSnapshot = {
       requestLogs: [],
       fullRequestLogs: [],
       toolLogs: [],
       systemLogs: [],
+      compactionLogs: [],
       ignoredRequestIds: requestLogs.map((entry) => entry.id),
       ignoredFullRequestIds: fullRequestLogs.map((entry) => entry.id),
       ignoredToolIds: toolLogs.map((entry) => entry.id),
       ignoredSystemIds: systemLogs.map((entry) => entry.id),
+      ignoredCompactionIds: compactionLogs.map((entry) => entry.id),
     };
 
     setLogCache(nextCache);
+    setCompactionLogs([]);
+    setExpandedCompactionLogIds([]);
   }
 
   const sectionCounts = {
@@ -380,6 +560,7 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
     fullRequest: displayedFullRequestLogs.length,
     tool: displayedToolLogs.length,
     system: displayedSystemLogs.length,
+    compaction: displayedCompactionLogs.length,
   };
 
   if (!room) {
@@ -400,7 +581,7 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
         </div>
 
         <div className="room-log-hero-actions">
-          <button type="button" className="ghost-button" onClick={clearAllLogs}>
+          <button type="button" className="ghost-button" onClick={() => { void clearAllLogs(); }}>
             清空所有 Log
           </button>
           <Link href={`/rooms/${room.id}`} className="secondary-button">
@@ -420,6 +601,7 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
             <span className="meta-chip subtle">完整请求 {sectionCounts.fullRequest}</span>
             <span className="meta-chip subtle">工具 {sectionCounts.tool}</span>
             <span className="meta-chip subtle">系统 {sectionCounts.system}</span>
+            <span className="meta-chip subtle">压缩 {sectionCounts.compaction}</span>
           </div>
         </div>
 
@@ -438,6 +620,9 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
           </button>
           <button type="button" className={filter === "system" ? "tab-button active" : "tab-button"} onClick={() => setFilter("system")}>
             系统
+          </button>
+          <button type="button" className={filter === "compaction" ? "tab-button active" : "tab-button"} onClick={() => setFilter("compaction")}>
+            压缩
           </button>
         </div>
 
@@ -595,6 +780,95 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
                         <span className="meta-chip subtle">{entry.level}</span>
                       </div>
                       <p>{entry.description}</p>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </article>
+          )}
+
+          {(filter === "all" || filter === "compaction") && (
+            <article className="subtle-panel room-log-card">
+              <div className="section-heading-row compact-align">
+                <div>
+                  <p className="section-label">Section 5</p>
+                  <h3>压缩日志</h3>
+                </div>
+                <span className="meta-chip subtle">{sectionCounts.compaction} 条</span>
+              </div>
+
+              <p className="muted-copy">记录上下文压缩的触发方式、token 判断过程、压缩方法，以及每次判断的具体结论。</p>
+
+              {displayedCompactionLogs.length === 0 ? (
+                <div className="raw-log-block room-log-placeholder top-gap">
+                  <pre>当前房间还没有压缩日志。</pre>
+                </div>
+              ) : (
+                <div className="stacked-list top-gap">
+                  {displayedCompactionLogs.map((entry) => (
+                    <article key={entry.id} className={`room-log-entry system level-${entry.success ? "info" : "error"}`}>
+                      <div className="room-log-entry-topline">
+                        <strong>{entry.agentLabel}</strong>
+                        <span>{formatTimestamp(entry.createdAt)}</span>
+                      </div>
+                      <div className="meta-chip-row compact">
+                        <span className="meta-chip subtle">{entry.trigger}</span>
+                        <span className="meta-chip subtle">{entry.success ? (entry.actionTaken ? "success" : "skipped") : "failed"}</span>
+                        <span className="meta-chip subtle">
+                          {entry.method === "llm" ? "大模型摘要" : entry.method === "rule_fallback" ? "程序回退摘要" : "方式未知"}
+                        </span>
+                        {entry.details ? <span className="meta-chip subtle">结果 {getCompactionResultLabel(entry.details.result)}</span> : null}
+                        <span className="meta-chip subtle">pruned {entry.prunedMessages}</span>
+                        <span className="meta-chip subtle">kept {entry.keptMessages}</span>
+                      </div>
+                      {entry.details ? (
+                        <div className="room-log-pair-grid top-gap">
+                          <div>
+                            <p className="room-log-pair-label">压缩判断</p>
+                            <p>
+                              判定按总估算执行：阈值 {formatTokenK(entry.details.thresholdTokens)}，当前上下文 {formatTokenK(entry.details.contextTokens)}，
+                              固定开销 {formatTokenK(entry.details.promptOverheadTokens)}，总估算 {formatTokenK(entry.details.totalEstimatedTokens)}。
+                            </p>
+                          </div>
+                          <div>
+                            <p className="room-log-pair-label">开销拆分</p>
+                            <p>
+                              system {formatTokenK(entry.details.systemPromptTokens)} / tools {formatTokenK(entry.details.toolSchemaTokens)} / attachments {formatTokenK(entry.details.attachmentTokens)} / stored {formatTokenK(entry.details.storedContextTokens)}
+                              {typeof entry.details.totalEstimatedTokensAfter === "number"
+                                ? ` / 压缩后上下文 ${formatTokenK(entry.details.contextTokensAfter)} / 压缩后总估算 ${formatTokenK(entry.details.totalEstimatedTokensAfter)}`
+                                : ""}
+                            </p>
+                          </div>
+                        </div>
+                      ) : null}
+                      {entry.success ? (
+                        entry.summary.trim() ? (
+                          expandedCompactionLogIds.includes(entry.id) ? (
+                            <div className="raw-log-block room-log-payload-block top-gap">
+                              <pre>{entry.summary}</pre>
+                            </div>
+                          ) : (
+                            <p>{truncateText(entry.summary, 220)}</p>
+                          )
+                        ) : (
+                          <p>压缩完成，但没有可展示的摘要。</p>
+                        )
+                      ) : (
+                        <p>{entry.error || "压缩失败。"}</p>
+                      )}
+                      {entry.success && entry.summary.trim() ? (
+                        <button
+                          type="button"
+                          className="ghost-button top-gap"
+                          onClick={() => {
+                            setExpandedCompactionLogIds((current) =>
+                              current.includes(entry.id) ? current.filter((id) => id !== entry.id) : [...current, entry.id],
+                            );
+                          }}
+                        >
+                          {expandedCompactionLogIds.includes(entry.id) ? "收起完整内容" : "点击显示完整内容"}
+                        </button>
+                      ) : null}
                     </article>
                   ))}
                 </div>

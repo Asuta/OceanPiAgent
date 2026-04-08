@@ -503,7 +503,8 @@ export class ContextAssembler {
   constructor(private conversationStore: ConversationStore, private summaryStore: SummaryStore, private timezone?: string) {}
 
   async assemble(input: AssembleContextInput): Promise<AssembleContextResult> {
-    const freshTailCount = input.freshTailCount ?? 8;
+    void input.tokenBudget;
+    void input.freshTailCount;
     const contextItems = await this.summaryStore.getContextItems(input.conversationId);
 
     if (contextItems.length === 0) {
@@ -530,38 +531,8 @@ export class ContextAssembler {
     }
 
     const systemPromptAddition = buildSystemPromptAddition(summarySignals);
-    const tailStart = Math.max(0, resolved.length - freshTailCount);
-    const freshTail = resolved.slice(tailStart);
-    const evictable = resolved.slice(0, tailStart);
-    const tailTokens = freshTail.reduce((sum, item) => sum + item.tokens, 0);
-    const remainingBudget = Math.max(0, input.tokenBudget - tailTokens);
-
-    const selected: ResolvedItem[] = [];
-    let evictableTokens = 0;
-    const evictableTotalTokens = evictable.reduce((sum, item) => sum + item.tokens, 0);
-    if (evictableTotalTokens <= remainingBudget) {
-      selected.push(...evictable);
-      evictableTokens = evictableTotalTokens;
-    } else {
-      const kept: ResolvedItem[] = [];
-      let accum = 0;
-      for (let i = evictable.length - 1; i >= 0; i -= 1) {
-        const item = evictable[i]!;
-        if (accum + item.tokens <= remainingBudget) {
-          kept.push(item);
-          accum += item.tokens;
-        } else {
-          break;
-        }
-      }
-      kept.reverse();
-      selected.push(...kept);
-      evictableTokens = accum;
-    }
-
-    selected.push(...freshTail);
-    const estimatedTokens = evictableTokens + tailTokens;
-    const rawMessages = selected.map((item) => item.message);
+    const estimatedTokens = resolved.reduce((sum, item) => sum + item.tokens, 0);
+    const rawMessages = resolved.map((item) => item.message);
     for (let i = 0; i < rawMessages.length; i += 1) {
       const message = rawMessages[i];
       if (message.role === "assistant" && typeof message.content === "string") {

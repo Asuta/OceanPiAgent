@@ -135,6 +135,20 @@ export function useRoomCommands(args: {
     [clearDraftForRoom, runRoomCommandRequest],
   );
 
+  const clearRoomLogs = useCallback(
+    async (roomId: string) => {
+      await runRoomCommandRequest(
+        {
+          type: "clear_room_logs",
+          roomId,
+        },
+        { pendingRoomId: roomId },
+      );
+      clearDraftForRoom(roomId);
+    },
+    [clearDraftForRoom, runRoomCommandRequest],
+  );
+
   const addHumanParticipant = useCallback(
     async (roomId: string, name: string) => {
       const normalizedName = name.trim();
@@ -218,6 +232,7 @@ export function useRoomCommands(args: {
     restoreRoom,
     deleteRoom,
     clearRoom,
+    clearRoomLogs,
     addHumanParticipant,
     addAgentParticipant,
     removeParticipant,

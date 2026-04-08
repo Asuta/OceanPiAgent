@@ -31,6 +31,15 @@ function createRoomServiceHarness() {
       loadWorkspaceEnvelope,
       mutateWorkspace,
       listAgentDefinitions: async () => [],
+      clearPersistedAgentCompactions: async () => ({
+        version: 1,
+        agentId: "concierge",
+        history: [],
+        compactions: [],
+        resolvedModel: "",
+        compatibility: null,
+        updatedAt: new Date().toISOString(),
+      }),
     },
   };
 }
@@ -210,6 +219,74 @@ test("runRoomCommand clear_room resets transcript, scheduler state, and room err
   assert.deepEqual(result.room?.scheduler.agentCursorByParticipantId, {});
   assert.deepEqual(result.room?.scheduler.agentReceiptRevisionByParticipantId, {});
   assert.equal(result.room?.error, "");
+});
+
+test("runRoomCommand clear_room_logs clears room turns and matching agent turns", async () => {
+  const harness = createRoomServiceHarness();
+  const initialState = harness.getState();
+  const primaryRoom = addAgentParticipantToRoom({ room: initialState.rooms[0]!, agentId: "researcher" });
+  const otherRoomBase = createDefaultWorkspaceState().rooms[0]!;
+  const otherRoom = {
+    ...otherRoomBase,
+    id: `${otherRoomBase.id}-other`,
+    title: "Other room",
+  };
+  const targetTurn = {
+    id: "turn-room",
+    agent: { id: "concierge", label: "Harbor Concierge" },
+    userMessage: createRoomMessage(primaryRoom.id, "user", "Room log entry", "user"),
+    assistantContent: "handled",
+    tools: [],
+    emittedMessages: [],
+    status: "completed" as const,
+  };
+  const preservedTurn = {
+    id: "turn-other",
+    agent: { id: "concierge", label: "Harbor Concierge" },
+    userMessage: createRoomMessage(otherRoom.id, "user", "Other room entry", "user"),
+    assistantContent: "kept",
+    tools: [],
+    emittedMessages: [],
+    status: "completed" as const,
+  };
+
+  harness.setState({
+    ...initialState,
+    rooms: [
+      {
+        ...primaryRoom,
+        agentTurns: [targetTurn],
+        error: "Needs cleanup",
+      },
+      {
+        ...otherRoom,
+        agentTurns: [preservedTurn],
+      },
+    ],
+    agentStates: {
+      ...initialState.agentStates,
+      concierge: {
+        ...initialState.agentStates.concierge,
+        agentTurns: [targetTurn, preservedTurn],
+      },
+    },
+  });
+
+  const result = await runRoomCommand(
+    {
+      type: "clear_room_logs",
+      roomId: primaryRoom.id,
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+
+  assert.deepEqual(result.room?.agentTurns, []);
+  assert.equal(result.room?.error, "");
+  assert.deepEqual(harness.getState().agentStates.concierge?.agentTurns.map((turn) => turn.id), ["turn-other"]);
 });
 
 test("runRoomCommand add_agent_participant ensures agent state and supports toggle, move, and remove", async () => {

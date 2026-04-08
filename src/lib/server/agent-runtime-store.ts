@@ -1,5 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { estimateAgentPromptTokens } from "./agent-prompt-token-estimate";
 import { clearAgentMemory } from "./agent-memory-store";
 import { loadWorkspaceEnvelope } from "./workspace-store";
 import {
@@ -7,6 +8,7 @@ import {
   assembleAgentLcmContext,
   clearAgentLcmConversation,
   compactAgentLcmContext,
+  getAgentLcmStoredContextTokenCount,
   getAgentLcmRetrieval,
   getOrCreateAgentConversation,
 } from "./lcm/facade";
@@ -14,6 +16,31 @@ import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runt
 import { DEFAULT_COMPACTION_TOKEN_THRESHOLD, coerceCompactionTokenThreshold } from "@/lib/chat/types";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
+
+export type CompactionMethod = "llm" | "rule_fallback" | "unknown";
+
+export interface CompactionRecordDetails {
+  thresholdTokens: number;
+  contextTokens: number;
+  storedContextTokens: number;
+  promptOverheadTokens: number;
+  totalEstimatedTokens: number;
+  systemPromptTokens: number;
+  toolSchemaTokens: number;
+  attachmentTokens: number;
+  result:
+    | "compacted"
+    | "below_threshold"
+    | "empty_context"
+    | "no_eligible_leaf_chunk"
+    | "leaf_pass_failed"
+    | "no_condensation_candidate"
+    | "compaction_failed";
+  contextTokensAfter?: number;
+  storedContextTokensAfter?: number;
+  tokensAfter?: number;
+  totalEstimatedTokensAfter?: number;
+}
 
 export interface PersistedVisibleMessage {
   id: string;
@@ -28,11 +55,16 @@ export interface CompactionRecord {
   id: string;
   createdAt: string;
   reason: "automatic" | "manual";
+  success: boolean;
+  actionTaken: boolean;
+  method: CompactionMethod;
   summary: string;
+  error?: string;
   prunedMessages: number;
   keptMessages: number;
   charsBefore: number;
   charsAfter: number;
+  details?: CompactionRecordDetails;
 }
 
 export interface PersistedAgentRuntime {
@@ -127,7 +159,11 @@ function normalizeCompactionRecord(value: unknown): CompactionRecord | null {
     id: typeof value.id === "string" && value.id ? value.id : createUuid(),
     createdAt: typeof value.createdAt === "string" && value.createdAt ? value.createdAt : createTimestamp(),
     reason: value.reason,
+    success: typeof value.success === "boolean" ? value.success : true,
+    actionTaken: typeof value.actionTaken === "boolean" ? value.actionTaken : true,
+    method: value.method === "llm" || value.method === "rule_fallback" || value.method === "unknown" ? value.method : "unknown",
     summary: typeof value.summary === "string" ? value.summary : "",
+    ...(typeof value.error === "string" && value.error ? { error: value.error } : {}),
     prunedMessages:
       typeof value.prunedMessages === "number" && Number.isFinite(value.prunedMessages)
         ? Math.max(0, Math.round(value.prunedMessages))
@@ -144,7 +180,62 @@ function normalizeCompactionRecord(value: unknown): CompactionRecord | null {
       typeof value.charsAfter === "number" && Number.isFinite(value.charsAfter)
         ? Math.max(0, Math.round(value.charsAfter))
         : 0,
+    ...(isRecord(value.details)
+      ? {
+          details: {
+            thresholdTokens: typeof value.details.thresholdTokens === "number" ? Math.max(0, Math.round(value.details.thresholdTokens)) : 0,
+            contextTokens: typeof value.details.contextTokens === "number" ? Math.max(0, Math.round(value.details.contextTokens)) : 0,
+            storedContextTokens: typeof value.details.storedContextTokens === "number" ? Math.max(0, Math.round(value.details.storedContextTokens)) : 0,
+            promptOverheadTokens: typeof value.details.promptOverheadTokens === "number" ? Math.max(0, Math.round(value.details.promptOverheadTokens)) : 0,
+            totalEstimatedTokens: typeof value.details.totalEstimatedTokens === "number" ? Math.max(0, Math.round(value.details.totalEstimatedTokens)) : 0,
+            systemPromptTokens: typeof value.details.systemPromptTokens === "number" ? Math.max(0, Math.round(value.details.systemPromptTokens)) : 0,
+            toolSchemaTokens: typeof value.details.toolSchemaTokens === "number" ? Math.max(0, Math.round(value.details.toolSchemaTokens)) : 0,
+            attachmentTokens: typeof value.details.attachmentTokens === "number" ? Math.max(0, Math.round(value.details.attachmentTokens)) : 0,
+            result:
+              value.details.result === "compacted"
+              || value.details.result === "below_threshold"
+              || value.details.result === "empty_context"
+              || value.details.result === "no_eligible_leaf_chunk"
+              || value.details.result === "leaf_pass_failed"
+              || value.details.result === "no_condensation_candidate"
+              || value.details.result === "compaction_failed"
+                ? value.details.result
+                : "compaction_failed",
+            ...(typeof value.details.tokensAfter === "number" ? { tokensAfter: Math.max(0, Math.round(value.details.tokensAfter)) } : {}),
+            ...(typeof value.details.contextTokensAfter === "number"
+              ? { contextTokensAfter: Math.max(0, Math.round(value.details.contextTokensAfter)) }
+              : {}),
+            ...(typeof value.details.storedContextTokensAfter === "number"
+              ? { storedContextTokensAfter: Math.max(0, Math.round(value.details.storedContextTokensAfter)) }
+              : {}),
+            ...(typeof value.details.totalEstimatedTokensAfter === "number"
+              ? { totalEstimatedTokensAfter: Math.max(0, Math.round(value.details.totalEstimatedTokensAfter)) }
+              : {}),
+          },
+        }
+      : {}),
   };
+}
+
+function formatCompactionSkipReason(reason: CompactionRecordDetails["result"]): string {
+  switch (reason) {
+    case "below_threshold":
+      return "未超过压缩阈值";
+    case "empty_context":
+      return "当前没有可压缩上下文";
+    case "no_eligible_leaf_chunk":
+      return "已超过阈值，但没有找到可压缩历史块";
+    case "leaf_pass_failed":
+      return "找到了候选历史块，但叶子压缩阶段未生成结果";
+    case "no_condensation_candidate":
+      return "叶子压缩后仍超阈值，但没有可继续凝缩的摘要块";
+    case "compacted":
+      return "已执行压缩";
+    case "compaction_failed":
+      return "压缩执行失败";
+    default:
+      return "压缩检查完成";
+  }
 }
 
 function normalizeRuntime(agentId: RoomAgentId, value: unknown): PersistedAgentRuntime {
@@ -262,6 +353,14 @@ export async function savePersistedAgentRuntime(runtime: PersistedAgentRuntime):
   await saveStoredRuntime(normalizeRuntime(runtime.agentId, runtime));
 }
 
+export async function clearPersistedAgentCompactions(agentId: RoomAgentId): Promise<PersistedAgentRuntime> {
+  const runtime = await readStoredRuntime(agentId);
+  runtime.compactions = [];
+  runtime.updatedAt = createTimestamp();
+  await saveStoredRuntime(runtime);
+  return runtime;
+}
+
 export async function appendPersistedHistoryMessage(args: {
   agentId: RoomAgentId;
   message: Omit<PersistedVisibleMessage, "id" | "createdAt" | "attachments" | "meta"> & Partial<Pick<PersistedVisibleMessage, "id" | "createdAt" | "attachments" | "meta">>;
@@ -326,21 +425,119 @@ export async function compactPersistedAgentRuntime(args: {
   const runtimeBefore = await readStoredRuntime(args.agentId);
   const charsBefore = estimateHistoryChars(runtimeBefore.history);
   const compactionTokenThreshold = await resolveAgentCompactionTokenThreshold(args.agentId);
-  const lcmCompaction = await compactAgentLcmContext(args.agentId, compactionTokenThreshold, args.force).catch(() => null);
+  const summaryModel = runtimeBefore.resolvedModel.trim() || undefined;
+  const assembledPromptContext = await assembleAgentLcmContext(args.agentId, 20_000).catch(() => null);
+  const storedContextTokens = await getAgentLcmStoredContextTokenCount(args.agentId).catch(() => null);
+  const promptTokenEstimate = await estimateAgentPromptTokens({
+    agentId: args.agentId,
+    contextTokens: assembledPromptContext?.estimatedTokens ?? 0,
+    history: runtimeBefore.history,
+    systemPromptAddition: assembledPromptContext?.systemPromptAddition,
+  }).catch(() => ({
+    totalTokens: assembledPromptContext?.estimatedTokens ?? 0,
+    contextTokens: assembledPromptContext?.estimatedTokens ?? 0,
+    promptOverheadTokens: 0,
+    systemPromptTokens: 0,
+    toolSchemaTokens: 0,
+    attachmentTokens: 0,
+  }));
+  const resolvedStoredContextTokens = typeof storedContextTokens === "number" && Number.isFinite(storedContextTokens)
+    ? Math.max(0, Math.round(storedContextTokens))
+    : promptTokenEstimate.contextTokens;
+  const comparisonExtraTokens = promptTokenEstimate.totalTokens - resolvedStoredContextTokens;
+  const lcmCompactionResult = await compactAgentLcmContext(
+    args.agentId,
+    compactionTokenThreshold,
+    args.force,
+    summaryModel,
+    comparisonExtraTokens,
+  ).then(
+    (result) => ({ result, error: null as string | null }),
+    (error) => ({ result: null, error: error instanceof Error ? error.message : "Unknown compaction failure." }),
+  );
+  const lcmCompaction = lcmCompactionResult.result;
+  const baseDetails: CompactionRecordDetails = {
+    thresholdTokens: compactionTokenThreshold,
+    contextTokens: promptTokenEstimate.contextTokens,
+    storedContextTokens: resolvedStoredContextTokens,
+    promptOverheadTokens: promptTokenEstimate.promptOverheadTokens,
+    totalEstimatedTokens: promptTokenEstimate.totalTokens,
+    systemPromptTokens: promptTokenEstimate.systemPromptTokens,
+    toolSchemaTokens: promptTokenEstimate.toolSchemaTokens,
+    attachmentTokens: promptTokenEstimate.attachmentTokens,
+    result: "compaction_failed",
+  };
   if (!lcmCompaction) {
+    const failureRecord: CompactionRecord = {
+      id: createUuid(),
+      createdAt: createTimestamp(),
+      reason: args.reason,
+      success: false,
+      actionTaken: false,
+      method: "unknown",
+      summary: "",
+      ...(lcmCompactionResult.error ? { error: lcmCompactionResult.error } : {}),
+      prunedMessages: 0,
+      keptMessages: runtimeBefore.history.length,
+      charsBefore,
+      charsAfter: charsBefore,
+      details: baseDetails,
+    };
+    const runtime = await readStoredRuntime(args.agentId);
+    runtime.compactions = [...runtime.compactions, failureRecord].slice(-MAX_COMPACTION_RECORDS);
+    runtime.updatedAt = createTimestamp();
+    await saveStoredRuntime(runtime);
     return {
       compacted: false,
+      record: failureRecord,
       history: runtimeBefore.history,
     };
   }
 
   const lcmHistory = (await assembleLcmPersistedHistory(args.agentId)) ?? runtimeBefore.history;
   const charsAfter = estimateHistoryChars(lcmHistory);
+  const assembledPromptContextAfter = await assembleAgentLcmContext(args.agentId, 20_000).catch(() => null);
+  const promptTokenEstimateAfter = await estimateAgentPromptTokens({
+    agentId: args.agentId,
+    contextTokens: assembledPromptContextAfter?.estimatedTokens ?? 0,
+    history: lcmHistory,
+    systemPromptAddition: assembledPromptContextAfter?.systemPromptAddition,
+  }).catch(() => null);
+  const storedContextTokensAfter = lcmCompaction.tokensAfter;
   if (!lcmCompaction.actionTaken) {
     const runtime = await readStoredRuntime(args.agentId);
+    const result = (lcmCompaction.skipReason ?? "no_eligible_leaf_chunk") as CompactionRecordDetails["result"];
+    const skippedRecord: CompactionRecord = {
+      id: createUuid(),
+      createdAt: createTimestamp(),
+      reason: args.reason,
+      success: true,
+      actionTaken: false,
+      method: "unknown",
+      summary: [
+        `压缩检查结果：${formatCompactionSkipReason(result)}。`,
+        `阈值 ${compactionTokenThreshold} tokens。`,
+        `当前上下文 ${promptTokenEstimate.contextTokens} tokens。`,
+        `系统/工具等固定开销 ${promptTokenEstimate.promptOverheadTokens} tokens（system ${promptTokenEstimate.systemPromptTokens} / tools ${promptTokenEstimate.toolSchemaTokens} / attachments ${promptTokenEstimate.attachmentTokens}）。`,
+        `总估算 ${promptTokenEstimate.totalTokens} tokens。`,
+      ].join("\n"),
+      prunedMessages: 0,
+      keptMessages: lcmHistory.length,
+      charsBefore,
+      charsAfter,
+      details: {
+        ...baseDetails,
+        result,
+        tokensAfter: lcmCompaction.tokensAfter,
+        contextTokensAfter: promptTokenEstimateAfter?.contextTokens,
+        storedContextTokensAfter,
+        totalEstimatedTokensAfter: promptTokenEstimateAfter?.totalTokens,
+      },
+    };
+    runtime.compactions = [...runtime.compactions, skippedRecord].slice(-MAX_COMPACTION_RECORDS);
     runtime.updatedAt = createTimestamp();
     await saveStoredRuntime(runtime);
-    return { compacted: false, history: lcmHistory };
+    return { compacted: false, record: skippedRecord, history: lcmHistory };
   }
 
   await runBeforeCompactionHooks({
@@ -358,15 +555,27 @@ export async function compactPersistedAgentRuntime(args: {
   const summary =
     describedSummary?.summary?.content ||
     (lcmCompaction.createdSummaryId ? `LCM summary ${lcmCompaction.createdSummaryId}` : "LCM compaction");
+  const method = summary.includes("[Compacted shared history summary]") || summary.includes("[压缩后的共享历史摘要]") ? "rule_fallback" : "llm";
   const record: CompactionRecord = {
     id: createUuid(),
     createdAt: createTimestamp(),
     reason: args.reason,
+    success: true,
+    actionTaken: true,
+    method,
     summary,
     prunedMessages: Math.max(0, runtimeBefore.history.length - lcmHistory.length),
     keptMessages: lcmHistory.length,
     charsBefore,
     charsAfter,
+    details: {
+      ...baseDetails,
+      result: "compacted",
+      tokensAfter: lcmCompaction.tokensAfter,
+      contextTokensAfter: promptTokenEstimateAfter?.contextTokens,
+      storedContextTokensAfter,
+      totalEstimatedTokensAfter: promptTokenEstimateAfter?.totalTokens,
+    },
   };
 
   const runtime = await readStoredRuntime(args.agentId);

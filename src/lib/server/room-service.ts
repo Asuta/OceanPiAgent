@@ -19,6 +19,7 @@ import {
   toggleAgentParticipantInRoom,
 } from "@/lib/chat/room-actions";
 import { listAgentDefinitions } from "@/lib/server/agent-registry";
+import { clearPersistedAgentCompactions } from "@/lib/server/agent-runtime-store";
 import { enqueueRoomScheduler, stopRoomScheduler } from "@/lib/server/room-scheduler";
 import { loadWorkspaceEnvelope, mutateWorkspace, type WorkspaceEnvelope } from "@/lib/server/workspace-store";
 import { createUuid } from "@/lib/utils/uuid";
@@ -40,6 +41,7 @@ type RoomServiceDependencies = {
   loadWorkspaceEnvelope: typeof loadWorkspaceEnvelope;
   mutateWorkspace: typeof mutateWorkspace;
   listAgentDefinitions: () => Promise<RoomAgentDefinition[]>;
+  clearPersistedAgentCompactions: typeof clearPersistedAgentCompactions;
   enqueueRoomScheduler: typeof enqueueRoomScheduler;
   stopRoomScheduler: typeof stopRoomScheduler;
 };
@@ -51,6 +53,7 @@ export type RoomCommandInput =
   | { type: "restore_room"; roomId: string }
   | { type: "delete_room"; roomId: string }
   | { type: "clear_room"; roomId: string }
+  | { type: "clear_room_logs"; roomId: string }
   | { type: "add_human_participant"; roomId: string; name: string }
   | { type: "add_agent_participant"; roomId: string; agentId: RoomAgentId }
   | { type: "remove_participant"; roomId: string; participantId: string }
@@ -119,6 +122,10 @@ function getRoomResult(envelope: WorkspaceEnvelope, roomId: string): RoomCommand
   };
 }
 
+function getTurnRoomId(turn: RoomWorkspaceState["agentStates"][RoomAgentId]["agentTurns"][number]): string {
+  return turn.userMessage.roomId || turn.emittedMessages[0]?.roomId || "";
+}
+
 async function applyMutation(
   mutator: (workspace: RoomWorkspaceState, agentDefinitions: RoomAgentDefinition[]) => RoomWorkspaceState,
   deps: RoomServiceDependencies,
@@ -140,6 +147,7 @@ export async function appendUserRoomMessage(
     loadWorkspaceEnvelope: overrides.loadWorkspaceEnvelope ?? loadWorkspaceEnvelope,
     mutateWorkspace: overrides.mutateWorkspace ?? mutateWorkspace,
     listAgentDefinitions: overrides.listAgentDefinitions ?? listAgentDefinitions,
+    clearPersistedAgentCompactions: overrides.clearPersistedAgentCompactions ?? clearPersistedAgentCompactions,
     enqueueRoomScheduler: overrides.enqueueRoomScheduler ?? enqueueRoomScheduler,
     stopRoomScheduler: overrides.stopRoomScheduler ?? stopRoomScheduler,
   };
@@ -194,6 +202,7 @@ export async function runRoomCommand(
     loadWorkspaceEnvelope: overrides.loadWorkspaceEnvelope ?? loadWorkspaceEnvelope,
     mutateWorkspace: overrides.mutateWorkspace ?? mutateWorkspace,
     listAgentDefinitions: overrides.listAgentDefinitions ?? listAgentDefinitions,
+    clearPersistedAgentCompactions: overrides.clearPersistedAgentCompactions ?? clearPersistedAgentCompactions,
     enqueueRoomScheduler: overrides.enqueueRoomScheduler ?? enqueueRoomScheduler,
     stopRoomScheduler: overrides.stopRoomScheduler ?? stopRoomScheduler,
   };
@@ -298,6 +307,40 @@ export async function runRoomCommand(
         error: "",
         updatedAt: createTimestamp(),
       })), deps);
+    return getRoomResult(envelope, input.roomId);
+  }
+
+  if (input.type === "clear_room_logs") {
+    const agentIds = [...new Set(room.participants.flatMap((participant) => participant.agentId ? [participant.agentId] : []))];
+    const envelope = await applyMutation((workspace) => {
+      const nextWorkspace = updateRoomById(workspace, input.roomId, (entry) => ({
+        ...entry,
+        agentTurns: [],
+        error: "",
+        updatedAt: createTimestamp(),
+      }));
+
+      const nextAgentStates = { ...nextWorkspace.agentStates };
+      for (const agentId of agentIds) {
+        const agentState = nextAgentStates[agentId];
+        if (!agentState) {
+          continue;
+        }
+
+        nextAgentStates[agentId] = {
+          ...agentState,
+          agentTurns: agentState.agentTurns.filter((turn) => getTurnRoomId(turn) !== input.roomId),
+          updatedAt: createTimestamp(),
+        };
+      }
+
+      return {
+        ...nextWorkspace,
+        agentStates: nextAgentStates,
+      };
+    }, deps);
+
+    await Promise.all(agentIds.map((agentId) => deps.clearPersistedAgentCompactions(agentId)));
     return getRoomResult(envelope, input.roomId);
   }
 

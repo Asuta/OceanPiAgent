@@ -201,6 +201,7 @@ interface WorkspaceContextValue {
   restoreRoom: (roomId: string) => Promise<void>;
   deleteRoom: (roomId: string) => Promise<void>;
   clearRoom: (roomId: string) => Promise<void>;
+  clearRoomLogs: (roomId: string) => Promise<void>;
   addHumanParticipant: (roomId: string, name: string) => Promise<void>;
   addAgentParticipant: (roomId: string, agentId: RoomAgentId) => Promise<void>;
   removeParticipant: (roomId: string, participantId: string) => Promise<void>;
@@ -2188,6 +2189,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     restoreRoom,
     deleteRoom,
     clearRoom,
+    clearRoomLogs,
     addHumanParticipant,
     addAgentParticipant,
     removeParticipant,
@@ -2539,6 +2541,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       restoreRoom,
       deleteRoom,
       clearRoom,
+      clearRoomLogs,
       addHumanParticipant,
       addAgentParticipant,
       removeParticipant,
@@ -2560,6 +2563,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       clearAgentConsole,
       compactAgentContext,
       clearRoom,
+      clearRoomLogs,
       createRoom,
       deleteRoom,
       getAgentDefinition,

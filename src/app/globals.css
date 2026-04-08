@@ -314,6 +314,13 @@ p {
   padding-right: 40px;
 }
 
+.topbar-inline-warning {
+  max-width: 320px;
+  color: var(--accent-strong);
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
 .theme-status-chip {
   min-height: 38px;
 }
@@ -2794,6 +2801,10 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
 
   .topbar-model-select {
     min-width: 0;
+  }
+
+  .topbar-inline-warning {
+    max-width: none;
   }
 
   .launch-grid {

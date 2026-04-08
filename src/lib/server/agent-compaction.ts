@@ -3,12 +3,13 @@ import { formatMessageForTranscript, summarizeImageAttachments } from "@/lib/cha
 import type { PersistedVisibleMessage } from "./agent-runtime-store";
 
 const REQUIRED_SUMMARY_HEADINGS = [
-  "## Decisions",
-  "## Open TODOs",
-  "## Constraints/Rules",
-  "## Pending user asks",
-  "## Exact identifiers",
+  "## 关键结论",
+  "## 待办事项",
+  "## 约束与规则",
+  "## 用户仍在等待的问题",
+  "## 精确标识符",
 ] as const;
+const RULE_FALLBACK_MARKER = "[压缩后的共享历史摘要]";
 const MAX_CHUNK_CHARS = 12_000;
 const MAX_SUMMARY_ATTEMPTS = 2;
 
@@ -18,6 +19,13 @@ type GenerateCompactionSummaryArgs = {
   resolvedModel: string;
   signal?: AbortSignal;
 };
+
+export type CompactionSummaryMethod = "llm" | "rule_fallback";
+
+export interface GeneratedCompactionSummary {
+  summary: string;
+  method: CompactionSummaryMethod;
+}
 
 type TestSummaryOverride = (args: GenerateCompactionSummaryArgs) => Promise<string> | string;
 
@@ -92,22 +100,22 @@ export function buildRuleBasedCompactionSummary(messages: PersistedVisibleMessag
   }
 
   const sections = [
-    "[Compacted shared history summary]",
-    rooms.size > 0 ? `Rooms involved: ${[...rooms].join(", ")}` : "Rooms involved: unknown",
+    RULE_FALLBACK_MARKER,
+    rooms.size > 0 ? `涉及房间：${[...rooms].join(", ")}` : "涉及房间：未知",
     "",
-    "Important prior requests:",
-    ...(userRequests.slice(-6).length > 0 ? userRequests.slice(-6) : ["- none recorded"]),
+    "重要历史请求：",
+    ...(userRequests.slice(-6).length > 0 ? userRequests.slice(-6) : ["- 无记录"]),
     "",
-    "Visible deliveries already made:",
-    ...(deliveries.slice(-6).length > 0 ? deliveries.slice(-6) : ["- none recorded"]),
+    "已经发出到房间的内容：",
+    ...(deliveries.slice(-6).length > 0 ? deliveries.slice(-6) : ["- 无记录"]),
     "",
-    "Room actions already taken:",
-    ...(roomActions.slice(-6).length > 0 ? roomActions.slice(-6) : ["- none recorded"]),
+    "已经执行的房间动作：",
+    ...(roomActions.slice(-6).length > 0 ? roomActions.slice(-6) : ["- 无记录"]),
     "",
-    "Tool findings worth keeping:",
-    ...(toolFindings.slice(-6).length > 0 ? toolFindings.slice(-6) : ["- none recorded"]),
+    "值得保留的工具结论：",
+    ...(toolFindings.slice(-6).length > 0 ? toolFindings.slice(-6) : ["- 无记录"]),
     "",
-    "Treat this summary as compressed shared memory. Prefer newer tool results over older assumptions.",
+    "将这份摘要视为压缩后的共享记忆。若新旧信息冲突，优先相信较新的工具结果。",
   ];
 
   return sections.join("\n").trim();
@@ -219,20 +227,20 @@ function hasRequiredHeadings(summary: string): boolean {
 
 function buildStructuredFallbackSummary(baseSummary: string): string {
   return [
-    "## Decisions",
-    baseSummary || "- none",
+    "## 关键结论",
+    baseSummary || "- 无",
     "",
-    "## Open TODOs",
-    "- none",
+    "## 待办事项",
+    "- 无",
     "",
-    "## Constraints/Rules",
-    "- none",
+    "## 约束与规则",
+    "- 无",
     "",
-    "## Pending user asks",
-    "- none",
+    "## 用户仍在等待的问题",
+    "- 无",
     "",
-    "## Exact identifiers",
-    "- none",
+    "## 精确标识符",
+    "- 无",
   ].join("\n");
 }
 
@@ -245,30 +253,31 @@ function buildCompactionPrompt(args: {
 }): string {
   const transcript = args.chunk.map((message) => formatCompactionMessage(message)).join("\n\n");
   const sections = [
-    "Summarize this older hidden agent history for future continuity.",
-    "Return markdown only using these exact headings in this exact order:",
+    "请把这段较早的隐藏 agent 历史压缩成后续可复用的共享记忆。",
+    "只返回 Markdown，并且必须严格使用下面这些标题，顺序也必须完全一致：",
     ...REQUIRED_SUMMARY_HEADINGS,
-    "Use short factual bullets. If a section is empty, write '- none'.",
-    "Preserve exact identifiers when they matter: room IDs, message IDs, sender IDs, file paths, URLs, model names, and tool names.",
+    "请使用简短、事实性的项目符号。如果某一节没有内容，写 '- 无'。",
+    "需要保留精确标识符时，请原样保留：room ID、message ID、sender ID、文件路径、URL、模型名、工具名等。",
+    "默认使用中文输出；除精确标识符、文件路径、URL、工具名、模型名等必须保持原样的内容外，不要改成英文。",
   ];
 
   if (args.previousSummary?.trim()) {
-    sections.push("", "Existing running summary:", "<previous_summary>", args.previousSummary.trim(), "</previous_summary>");
+    sections.push("", "已有的运行中摘要：", "<previous_summary>", args.previousSummary.trim(), "</previous_summary>");
   }
 
   if (args.latestUserAsk) {
-    sections.push("", `Most recent user ask in this older history: ${args.latestUserAsk}`);
+    sections.push("", `这段较早历史里最近一次用户要求：${args.latestUserAsk}`);
   }
 
   if (args.identifierHints.length > 0) {
-    sections.push("", "Identifier hints to preserve if relevant:", ...args.identifierHints.map((hint) => `- ${hint}`));
+    sections.push("", "如果相关请保留这些精确标识符：", ...args.identifierHints.map((hint) => `- ${hint}`));
   }
 
   if (args.retryMessage) {
     sections.push("", args.retryMessage);
   }
 
-  sections.push("", "Transcript chunk:", "<transcript>", transcript, "</transcript>");
+  sections.push("", "待压缩的历史片段：", "<transcript>", transcript, "</transcript>");
   return sections.join("\n");
 }
 
@@ -287,10 +296,11 @@ async function summarizeChunk(args: {
     const result = await runTextPrompt({
       settings: args.settings,
       systemPrompt: [
-        "You compress prior hidden agent history into reusable shared memory.",
-        "Keep the summary factual and compact.",
-        "Do not invent tool results, room actions, or commitments.",
-        "Do not wrap the answer in code fences.",
+        "你负责把较早的隐藏 agent 历史压缩成可复用的共享记忆。",
+        "摘要必须简洁、准确、偏事实，不要扩写。",
+        "不要编造工具结果、房间动作、承诺或结论。",
+        "除精确标识符等必须保持原样的内容外，默认使用中文输出。",
+        "不要把回答包在代码块里。",
       ].join("\n"),
       prompt: buildCompactionPrompt({
         chunk: args.chunk,
@@ -307,7 +317,7 @@ async function summarizeChunk(args: {
       return summary;
     }
 
-    retryMessage = "Your previous response did not include every required heading. Rewrite it with all headings exactly as requested.";
+    retryMessage = "你上一版输出缺少必需标题。请严格使用要求里的所有标题，并保持完全相同的顺序重新输出。";
   }
 
   throw new Error("Structured compaction summary validation failed.");
@@ -335,19 +345,35 @@ async function generateStructuredCompactionSummary(args: GenerateCompactionSumma
 }
 
 export async function generateCompactionSummary(args: GenerateCompactionSummaryArgs): Promise<string> {
+  return (await generateCompactionSummaryResult(args)).summary;
+}
+
+export async function generateCompactionSummaryResult(args: GenerateCompactionSummaryArgs): Promise<GeneratedCompactionSummary> {
   const override = globalThis.__oceankingAgentCompactionSummaryOverride;
   if (override) {
     try {
-      return await Promise.resolve(override(args));
+      return {
+        summary: await Promise.resolve(override(args)),
+        method: "llm",
+      };
     } catch {
-      return buildStructuredFallbackSummary(buildRuleBasedCompactionSummary(args.messages));
+      return {
+        summary: buildStructuredFallbackSummary(buildRuleBasedCompactionSummary(args.messages)),
+        method: "rule_fallback",
+      };
     }
   }
 
   try {
-    return await generateStructuredCompactionSummary(args);
+    return {
+      summary: await generateStructuredCompactionSummary(args),
+      method: "llm",
+    };
   } catch {
-    return buildStructuredFallbackSummary(buildRuleBasedCompactionSummary(args.messages));
+    return {
+      summary: buildStructuredFallbackSummary(buildRuleBasedCompactionSummary(args.messages)),
+      method: "rule_fallback",
+    };
   }
 }
 
@@ -356,6 +382,7 @@ export const __testing = {
     globalThis.__oceankingAgentCompactionSummaryOverride = override;
   },
   buildRuleBasedCompactionSummary,
+  RULE_FALLBACK_MARKER,
   splitMessagesIntoChunks,
   hasRequiredHeadings,
   extractExactIdentifierHints,

@@ -79,19 +79,19 @@ test("compactAgentContext creates summary nodes and assembled history uses them"
   await withAgentContextModules(async ({ contextStore, assembler, contextCompaction, agentCompaction }) => {
     const agentId = "concierge";
     const summaryText = [
-      "## Decisions",
-      "- Rollout and rollback updates stay linked.",
+      "## 关键结论",
+      "- 发布与回滚更新需要保持关联。",
       "",
-      "## Open TODOs",
-      "- Send the concise rollout summary.",
+      "## 待办事项",
+      "- 发送简洁的发布摘要。",
       "",
-      "## Constraints/Rules",
-      "- Keep cross-room context aligned.",
+      "## 约束与规则",
+      "- 跨房间上下文需要保持一致。",
       "",
-      "## Pending user asks",
-      "- Provide the rollout update.",
+      "## 用户仍在等待的问题",
+      "- 提供发布进展更新。",
       "",
-      "## Exact identifiers",
+      "## 精确标识符",
       "- room-alpha",
     ].join("\n");
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => summaryText);

@@ -121,6 +121,39 @@ test("agent memory status and refresh always report structured LCM storage", asy
   });
 });
 
+test("assembleAgentLcmContext keeps full context even with a tiny prompt budget", async () => {
+  await withModules(async ({ lcmFacade }) => {
+    const agentId = "full-context-agent";
+    await lcmFacade.appendAgentLcmMessage({
+      agentId,
+      role: "user",
+      content: "First long context message about rollback planning and detailed notes.",
+      createdAt: "2026-04-02T10:00:00.000Z",
+      title: "Gamma Room",
+    });
+    await lcmFacade.appendAgentLcmMessage({
+      agentId,
+      role: "assistant",
+      content: "Second long context message with operational findings and follow-up tasks.",
+      createdAt: "2026-04-02T10:01:00.000Z",
+      title: "Gamma Room",
+    });
+    await lcmFacade.appendAgentLcmMessage({
+      agentId,
+      role: "user",
+      content: "Third long context message confirming the earlier details still matter.",
+      createdAt: "2026-04-02T10:02:00.000Z",
+      title: "Gamma Room",
+    });
+
+    const assembled = await lcmFacade.assembleAgentLcmContext(agentId, 1);
+
+    assert.ok(assembled);
+    assert.equal(assembled?.messages.length, 3);
+    assert.ok(assembled?.estimatedTokens && assembled.estimatedTokens > 1);
+  });
+});
+
 test("agent memory search falls back to split-term recall for CJK-heavy queries", async () => {
   await withModules(async ({ memoryStore, lcmFacade }) => {
     const agentId = "harbor-concierge";

@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 
 type RuntimeStoreModule = typeof import("../src/lib/server/agent-runtime-store");
 type AgentCompactionModule = typeof import("../src/lib/server/agent-compaction");
+type WorkspaceStoreModule = typeof import("../src/lib/server/workspace-store");
 
 const TEST_IMAGE_ATTACHMENT = {
   id: "img-1",
@@ -21,7 +22,7 @@ const TEST_IMAGE_ATTACHMENT = {
 const repoRoot = process.cwd();
 
 async function withRuntimeModules(
-  run: (runtimeStore: RuntimeStoreModule, agentCompaction: AgentCompactionModule, tempDir: string) => Promise<void>,
+  run: (runtimeStore: RuntimeStoreModule, agentCompaction: AgentCompactionModule, workspaceStore: WorkspaceStoreModule, tempDir: string) => Promise<void>,
 ) {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "oceanking-agent-runtime-test-"));
   const previousCwd = process.cwd();
@@ -29,13 +30,15 @@ async function withRuntimeModules(
 
   const runtimeStoreUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/agent-runtime-store.ts")).href;
   const agentCompactionUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/agent-compaction.ts")).href;
+  const workspaceStoreUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/workspace-store.ts")).href;
 
   try {
-    const [runtimeStore, agentCompaction] = await Promise.all([
+    const [runtimeStore, agentCompaction, workspaceStore] = await Promise.all([
       import(`${runtimeStoreUrl}?test=${Date.now()}-${Math.random()}`) as Promise<RuntimeStoreModule>,
       import(`${agentCompactionUrl}?test=${Date.now()}-${Math.random()}`) as Promise<AgentCompactionModule>,
+      import(`${workspaceStoreUrl}?test=${Date.now()}-${Math.random()}`) as Promise<WorkspaceStoreModule>,
     ]);
-    await run(runtimeStore, agentCompaction, tempDir);
+    await run(runtimeStore, agentCompaction, workspaceStore, tempDir);
   } finally {
     process.chdir(previousCwd);
     await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
@@ -113,19 +116,19 @@ test("compactPersistedAgentRuntime stores an LLM-style structured summary when a
   await withRuntimeModules(async (runtimeStore, agentCompaction) => {
     const agentId = "concierge";
     const structuredSummary = [
-      "## Decisions",
-      "- Deployment update should include rollout and rollback status.",
+      "## 关键结论",
+      "- 部署更新需要同时包含发布状态和回滚状态。",
       "",
-      "## Open TODOs",
-      "- Confirm the final rollback owner.",
+      "## 待办事项",
+      "- 确认最终的回滚负责人。",
       "",
-      "## Constraints/Rules",
-      "- Keep the room reply short.",
+      "## 约束与规则",
+      "- 房间内回复保持简短。",
       "",
-      "## Pending user asks",
-      "- Provide a short deployment-plan update.",
+      "## 用户仍在等待的问题",
+      "- 提供一版简短的部署计划更新。",
       "",
-      "## Exact identifiers",
+      "## 精确标识符",
       "- room-alpha",
       "- msg-1",
       "- msg-2",
@@ -147,6 +150,10 @@ test("compactPersistedAgentRuntime stores an LLM-style structured summary when a
     assert.equal(result.history.length >= 1, true);
     assert.equal(persisted.compactions.length, 1);
     assert.equal(persisted.compactions[0]?.summary, structuredSummary);
+    assert.equal(persisted.compactions[0]?.success, true);
+    assert.equal(persisted.compactions[0]?.method, "llm");
+    assert.equal(persisted.compactions[0]?.details?.result, "compacted");
+    assert.ok((persisted.compactions[0]?.details?.totalEstimatedTokens ?? 0) > 0);
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });
@@ -167,9 +174,10 @@ test("compactPersistedAgentRuntime falls back to the local rule summary when LLM
     });
 
     assert.equal(result.compacted, true);
-    assert.match(result.history[0]?.content ?? "", /^## Decisions/m);
-    assert.match(result.history[0]?.content ?? "", /\[Compacted shared history summary\]/);
-    assert.match(result.history[0]?.content ?? "", /^## Exact identifiers/m);
+    assert.match(result.history[0]?.content ?? "", /^## 关键结论/m);
+    assert.match(result.history[0]?.content ?? "", /\[压缩后的共享历史摘要\]/);
+    assert.match(result.history[0]?.content ?? "", /^## 精确标识符/m);
+    assert.equal((await runtimeStore.loadPersistedAgentRuntime(agentId)).compactions[0]?.method, "rule_fallback");
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });
@@ -180,20 +188,20 @@ test("compactPersistedAgentRuntime prunes image-bearing messages when they fall 
     const agentId = "operator";
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => {
       return [
-        "## Decisions",
-        "- none",
+        "## 关键结论",
+        "- 无",
         "",
-        "## Open TODOs",
-        "- none",
+        "## 待办事项",
+        "- 无",
         "",
-        "## Constraints/Rules",
-        "- none",
+        "## 约束与规则",
+        "- 无",
         "",
-        "## Pending user asks",
-        "- none",
+        "## 用户仍在等待的问题",
+        "- 无",
         "",
-        "## Exact identifiers",
-        "- none",
+        "## 精确标识符",
+        "- 无",
       ].join("\n");
     });
 
@@ -224,9 +232,68 @@ test("compactPersistedAgentRuntime prunes image-bearing messages when they fall 
     });
 
     assert.equal(result.compacted, true);
-    assert.match(result.history[0]?.content ?? "", /^## Decisions/m);
+    assert.match(result.history[0]?.content ?? "", /^## 关键结论/m);
     assert.equal((await runtimeStore.loadPersistedAgentRuntime(agentId)).compactions.length, 1);
     assert.ok(!result.history.some((message) => message.attachments.some((attachment) => attachment.id === TEST_IMAGE_ATTACHMENT.id)));
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
+test("compactPersistedAgentRuntime records skipped automatic checks when no compaction is needed", async () => {
+  await withRuntimeModules(async (runtimeStore) => {
+    const agentId = "concierge";
+    await seedConversation(runtimeStore, agentId);
+
+    const result = await runtimeStore.compactPersistedAgentRuntime({
+      agentId,
+      reason: "automatic",
+    });
+    const persisted = await runtimeStore.loadPersistedAgentRuntime(agentId);
+
+    assert.equal(result.compacted, false);
+    assert.equal(persisted.compactions.length, 1);
+    assert.equal(persisted.compactions[0]?.reason, "automatic");
+    assert.equal(persisted.compactions[0]?.success, true);
+    assert.equal(persisted.compactions[0]?.actionTaken, false);
+    assert.ok((persisted.compactions[0]?.summary ?? "").includes("阈值"));
+    assert.ok(["below_threshold", "no_eligible_leaf_chunk", "empty_context", "leaf_pass_failed", "no_condensation_candidate"].includes(persisted.compactions[0]?.details?.result ?? ""));
+  });
+});
+
+test("compactPersistedAgentRuntime includes system prompt overhead in automatic checks", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    const workspace = await workspaceStore.loadWorkspaceEnvelope();
+    await workspaceStore.saveWorkspaceState({
+      expectedVersion: workspace.version,
+      state: {
+        ...workspace.state,
+        agentStates: {
+          ...workspace.state.agentStates,
+          [agentId]: {
+            ...workspace.state.agentStates[agentId],
+            settings: {
+              ...workspace.state.agentStates[agentId]?.settings,
+              compactionTokenThreshold: 2_200,
+              systemPrompt: "System policy ".repeat(900),
+            },
+          },
+        },
+      },
+    });
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => "## 关键结论\n- 因为完整请求超过阈值，所以执行压缩。\n\n## 待办事项\n- 无\n\n## 约束与规则\n- 无\n\n## 用户仍在等待的问题\n- 无\n\n## 精确标识符\n- 无");
+    await seedConversation(runtimeStore, agentId);
+    await seedConversation(runtimeStore, agentId);
+    await seedConversation(runtimeStore, agentId);
+
+    const result = await runtimeStore.compactPersistedAgentRuntime({
+      agentId,
+      reason: "automatic",
+    });
+
+    assert.equal(result.compacted, true);
+    assert.equal((await runtimeStore.loadPersistedAgentRuntime(agentId)).compactions[0]?.reason, "automatic");
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });

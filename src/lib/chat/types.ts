@@ -519,7 +519,7 @@ export interface ChatSettings {
   systemPrompt: string;
   providerMode: ProviderMode;
   memoryBackend: MemoryBackendId;
-  compactionTokenThreshold: number;
+  compactionTokenThreshold?: number;
   maxToolLoopSteps: number;
   thinkingLevel: ThinkingLevel;
   enabledSkillIds: string[];

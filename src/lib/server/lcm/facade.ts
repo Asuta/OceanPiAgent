@@ -178,13 +178,34 @@ export async function assembleAgentLcmContext(agentId: RoomAgentId, tokenBudget 
   return assembler.assemble({ conversationId: conversation.conversationId, tokenBudget });
 }
 
-export async function compactAgentLcmContext(agentId: RoomAgentId, tokenThreshold: number, force?: boolean, summaryModel?: string) {
+export async function compactAgentLcmContext(
+  agentId: RoomAgentId,
+  tokenThreshold: number,
+  force?: boolean,
+  summaryModel?: string,
+  comparisonExtraTokens?: number,
+) {
   const { conversationStore, compaction } = await getLcmStores(tokenThreshold);
   const conversation = await conversationStore.getConversationBySessionKey(agentId);
   if (!conversation) {
     return null;
   }
-  return compaction.compact({ conversationId: conversation.conversationId, tokenBudget: tokenThreshold, force, summaryModel });
+  return compaction.compact({
+    conversationId: conversation.conversationId,
+    tokenBudget: tokenThreshold,
+    force,
+    summaryModel,
+    ...(typeof comparisonExtraTokens === "number" ? { comparisonExtraTokens } : {}),
+  });
+}
+
+export async function getAgentLcmStoredContextTokenCount(agentId: RoomAgentId): Promise<number | null> {
+  const { conversationStore, summaryStore } = await getLcmStores();
+  const conversation = await conversationStore.getConversationBySessionKey(agentId);
+  if (!conversation) {
+    return null;
+  }
+  return summaryStore.getContextTokenCount(conversation.conversationId);
 }
 
 export async function ingestIncomingRoomEnvelope(args: {

@@ -14,6 +14,14 @@ const MIXED_MODEL_CONFIG_VALUE = "__mixed_model_config__";
 const MIXED_COMPACTION_THRESHOLD_VALUE = "__mixed_compaction_threshold__";
 const EMPTY_MODEL_CONFIG_VALUE = "";
 
+type AgentPromptBaseline = {
+  agentId: string;
+  promptOverheadTokens: number;
+  systemPromptTokens: number;
+  toolSchemaTokens: number;
+  attachmentTokens: number;
+};
+
 function formatCompactionThreshold(value: number): string {
   if (value >= 1000 && value % 1000 === 0) {
     return `${value / 1000}K`;
@@ -81,6 +89,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
   const [compactionThresholdInput, setCompactionThresholdInput] = useState("");
+  const [agentPromptBaselines, setAgentPromptBaselines] = useState<AgentPromptBaseline[]>([]);
   const { mounted: themeMounted, resolvedTheme, setThemePreference, systemTheme, themePreference } = useTheme();
   const { activeRooms, archivedRooms, activeRoomId, hydrated } = useWorkspaceRoomsState();
   const { agents, agentStates } = useWorkspaceAgentsState();
@@ -159,6 +168,21 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
 
     return [...thresholds][0] ?? DEFAULT_COMPACTION_TOKEN_THRESHOLD;
   }, [agentStates, agents]);
+  const maxPromptOverheadTokens = useMemo(
+    () => agentPromptBaselines.reduce((maxValue, baseline) => Math.max(maxValue, baseline.promptOverheadTokens), 0),
+    [agentPromptBaselines],
+  );
+  const compactionThresholdWarning = useMemo(() => {
+    if (typeof globalCompactionThresholdValue !== "number" || maxPromptOverheadTokens <= 0) {
+      return "";
+    }
+
+    if (globalCompactionThresholdValue >= maxPromptOverheadTokens) {
+      return "";
+    }
+
+    return `当前阈值低于至少一个 agent 的当前 prompt 固定开销（约 ${formatCompactionThreshold(maxPromptOverheadTokens)}），自动压缩无法将总请求降到该值以下。`;
+  }, [globalCompactionThresholdValue, maxPromptOverheadTokens]);
   const sidebarRooms = useMemo(() => {
     if (!hydrated || activeRooms.length === 0) {
       return [];
@@ -216,6 +240,38 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
 
     setCompactionThresholdInput(formatCompactionThreshold(globalCompactionThresholdValue));
   }, [globalCompactionThresholdValue]);
+
+  useEffect(() => {
+    if (agents.length === 0) {
+      setAgentPromptBaselines([]);
+      return;
+    }
+
+    let cancelled = false;
+    const query = new URLSearchParams();
+    for (const agent of agents) {
+      query.append("agentId", agent.id);
+    }
+
+    void (async () => {
+      const response = await fetch(`/api/agent-runtime/prompt-baseline?${query.toString()}`, { cache: "no-store" }).catch(() => null);
+      if (!response?.ok) {
+        if (!cancelled) {
+          setAgentPromptBaselines([]);
+        }
+        return;
+      }
+
+      const payload = (await response.json().catch(() => null)) as { baselines?: AgentPromptBaseline[] } | null;
+      if (!cancelled) {
+        setAgentPromptBaselines(Array.isArray(payload?.baselines) ? payload.baselines : []);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [agentStates, agents]);
 
   return (
     <div className={`app-shell${sidebarOpen ? " sidebar-open" : ""}`}>
@@ -400,6 +456,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
                   handleGlobalCompactionThresholdChange(parsedValue);
                 }}
               />
+              {compactionThresholdWarning ? <span className="topbar-inline-warning">{compactionThresholdWarning}</span> : null}
             </label>
             <div className="theme-toggle-cluster compact" role="group" aria-label="切换浅色和深色模式">
               {THEME_PREFERENCES.map((option) => (
