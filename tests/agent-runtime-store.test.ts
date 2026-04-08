@@ -152,6 +152,7 @@ test("compactPersistedAgentRuntime stores an LLM-style structured summary when a
     assert.equal(persisted.compactions[0]?.summary, structuredSummary);
     assert.equal(persisted.compactions[0]?.success, true);
     assert.equal(persisted.compactions[0]?.method, "llm");
+    assert.equal(typeof persisted.compactions[0]?.createdSummaryId, "string");
     assert.equal(persisted.compactions[0]?.details?.result, "compacted");
     assert.ok((persisted.compactions[0]?.details?.totalEstimatedTokens ?? 0) > 0);
 

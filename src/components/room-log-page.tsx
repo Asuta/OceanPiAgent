@@ -86,6 +86,41 @@ interface CompactionLogEntry {
     tokensAfter?: number;
     totalEstimatedTokensAfter?: number;
   };
+  summaryRef?: {
+    summaryId: string;
+    kind: "leaf" | "condensed";
+    depth: number;
+    tokenCount: number;
+    sourceMessageTokenCount: number;
+    descendantCount: number;
+    descendantTokenCount: number;
+    messageIds: number[];
+    parentIds: string[];
+    childIds: string[];
+    subtree: Array<{
+      summaryId: string;
+      parentSummaryId: string | null;
+      depthFromRoot: number;
+      kind: "leaf" | "condensed";
+      depth: number;
+      tokenCount: number;
+      childCount: number;
+      sourceMessageTokenCount: number;
+    }>;
+    directChildren: Array<{
+      summaryId: string;
+      kind: "leaf" | "condensed";
+      tokenCount: number;
+      preview: string;
+    }>;
+    directMessages: Array<{
+      messageId: number;
+      role: string;
+      tokenCount: number;
+      preview: string;
+    }>;
+    mappingTruncated: boolean;
+  };
 }
 
 interface RoomLogCacheSnapshot {
@@ -208,6 +243,15 @@ function getCompactionResultLabel(result: string | undefined) {
   }
 }
 
+function formatIdList(values: string[] | number[], emptyLabel = "无") {
+  if (!values.length) {
+    return emptyLabel;
+  }
+
+  const rendered = values.slice(0, 6).join(", ");
+  return values.length > 6 ? `${rendered} 等 ${values.length} 项` : rendered;
+}
+
 function getModelLabel(turn: AgentRoomTurn) {
   return turn.resolvedModel || turn.meta?.emptyCompletion?.resolvedModel || turn.meta?.emptyCompletion?.requestedModel || "未记录模型";
 }
@@ -309,10 +353,10 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
               actionTaken: typeof record.actionTaken === "boolean" ? record.actionTaken : true,
               method: (record.method === "llm" || record.method === "rule_fallback" || record.method === "unknown" ? record.method : "unknown") as CompactionLogEntry["method"],
               summary: typeof record.summary === "string" ? record.summary : "",
-               error: typeof record.error === "string" ? record.error : "",
-               prunedMessages: typeof record.prunedMessages === "number" ? record.prunedMessages : 0,
-               keptMessages: typeof record.keptMessages === "number" ? record.keptMessages : 0,
-               ...(record.details && typeof record.details === "object"
+                error: typeof record.error === "string" ? record.error : "",
+                prunedMessages: typeof record.prunedMessages === "number" ? record.prunedMessages : 0,
+                keptMessages: typeof record.keptMessages === "number" ? record.keptMessages : 0,
+                ...(record.details && typeof record.details === "object"
                  ? {
                      details: {
                        thresholdTokens: typeof (record.details as { thresholdTokens?: unknown }).thresholdTokens === "number" ? (record.details as { thresholdTokens: number }).thresholdTokens : 0,
@@ -355,9 +399,50 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
                          ? { totalEstimatedTokensAfter: (record.details as { totalEstimatedTokensAfter: number }).totalEstimatedTokensAfter }
                          : {}),
                      },
-                   }
-                 : {}),
-             }));
+                    }
+                  : {}),
+                ...(record.summaryRef && typeof record.summaryRef === "object"
+                  ? {
+                       summaryRef: {
+                         summaryId: typeof (record.summaryRef as { summaryId?: unknown }).summaryId === "string" ? (record.summaryRef as { summaryId: string }).summaryId : "",
+                        kind: (record.summaryRef as { kind?: unknown }).kind === "condensed" ? ("condensed" as const) : ("leaf" as const),
+                        depth: typeof (record.summaryRef as { depth?: unknown }).depth === "number" ? (record.summaryRef as { depth: number }).depth : 0,
+                        tokenCount: typeof (record.summaryRef as { tokenCount?: unknown }).tokenCount === "number" ? (record.summaryRef as { tokenCount: number }).tokenCount : 0,
+                        sourceMessageTokenCount:
+                          typeof (record.summaryRef as { sourceMessageTokenCount?: unknown }).sourceMessageTokenCount === "number"
+                            ? (record.summaryRef as { sourceMessageTokenCount: number }).sourceMessageTokenCount
+                            : 0,
+                        descendantCount:
+                          typeof (record.summaryRef as { descendantCount?: unknown }).descendantCount === "number"
+                            ? (record.summaryRef as { descendantCount: number }).descendantCount
+                            : 0,
+                        descendantTokenCount:
+                          typeof (record.summaryRef as { descendantTokenCount?: unknown }).descendantTokenCount === "number"
+                            ? (record.summaryRef as { descendantTokenCount: number }).descendantTokenCount
+                            : 0,
+                        messageIds: Array.isArray((record.summaryRef as { messageIds?: unknown }).messageIds)
+                          ? ((record.summaryRef as { messageIds: number[] }).messageIds.filter((value) => typeof value === "number"))
+                          : [],
+                        parentIds: Array.isArray((record.summaryRef as { parentIds?: unknown }).parentIds)
+                          ? ((record.summaryRef as { parentIds: string[] }).parentIds.filter((value) => typeof value === "string"))
+                          : [],
+                        childIds: Array.isArray((record.summaryRef as { childIds?: unknown }).childIds)
+                          ? ((record.summaryRef as { childIds: string[] }).childIds.filter((value) => typeof value === "string"))
+                          : [],
+                        subtree: Array.isArray((record.summaryRef as { subtree?: unknown }).subtree)
+                          ? ((record.summaryRef as { subtree: NonNullable<CompactionLogEntry["summaryRef"]>["subtree"] }).subtree)
+                          : [],
+                        directChildren: Array.isArray((record.summaryRef as { directChildren?: unknown }).directChildren)
+                          ? ((record.summaryRef as { directChildren: NonNullable<CompactionLogEntry["summaryRef"]>["directChildren"] }).directChildren)
+                          : [],
+                        directMessages: Array.isArray((record.summaryRef as { directMessages?: unknown }).directMessages)
+                          ? ((record.summaryRef as { directMessages: NonNullable<CompactionLogEntry["summaryRef"]>["directMessages"] }).directMessages)
+                          : [],
+                        mappingTruncated: Boolean((record.summaryRef as { mappingTruncated?: unknown }).mappingTruncated),
+                      },
+                    }
+                  : {}),
+              }));
           }),
         );
 
@@ -818,9 +903,28 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
                           {entry.method === "llm" ? "大模型摘要" : entry.method === "rule_fallback" ? "程序回退摘要" : "方式未知"}
                         </span>
                         {entry.details ? <span className="meta-chip subtle">结果 {getCompactionResultLabel(entry.details.result)}</span> : null}
+                        {entry.summaryRef ? <span className="meta-chip subtle">{entry.summaryRef.kind === "condensed" ? "层级摘要" : "叶子摘要"}</span> : null}
+                        {entry.summaryRef ? <span className="meta-chip subtle">depth {entry.summaryRef.depth}</span> : null}
                         <span className="meta-chip subtle">pruned {entry.prunedMessages}</span>
                         <span className="meta-chip subtle">kept {entry.keptMessages}</span>
                       </div>
+                      {entry.summaryRef ? (
+                        <div className="room-log-pair-grid top-gap">
+                          <div>
+                            <p className="room-log-pair-label">摘要映射</p>
+                            <p>
+                              summaryId {entry.summaryRef.summaryId}，token {formatTokenK(entry.summaryRef.tokenCount)}，覆盖原始消息 {entry.summaryRef.messageIds.length} 条，
+                              直接子摘要 {entry.summaryRef.childIds.length} 个。
+                            </p>
+                          </div>
+                          <div>
+                            <p className="room-log-pair-label">层级关系</p>
+                            <p>
+                              父摘要 {formatIdList(entry.summaryRef.parentIds)} / 子摘要 {formatIdList(entry.summaryRef.childIds)} / 原始消息 {formatIdList(entry.summaryRef.messageIds)}
+                            </p>
+                          </div>
+                        </div>
+                      ) : null}
                       {entry.details ? (
                         <div className="room-log-pair-grid top-gap">
                           <div>
@@ -857,17 +961,70 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
                         <p>{entry.error || "压缩失败。"}</p>
                       )}
                       {entry.success && entry.summary.trim() ? (
-                        <button
-                          type="button"
-                          className="ghost-button top-gap"
-                          onClick={() => {
-                            setExpandedCompactionLogIds((current) =>
-                              current.includes(entry.id) ? current.filter((id) => id !== entry.id) : [...current, entry.id],
-                            );
-                          }}
-                        >
-                          {expandedCompactionLogIds.includes(entry.id) ? "收起完整内容" : "点击显示完整内容"}
-                        </button>
+                        <>
+                          {expandedCompactionLogIds.includes(entry.id) && entry.summaryRef ? (
+                            <div className="room-log-pair-grid top-gap">
+                              <div>
+                                <p className="room-log-pair-label">直接映射的原始消息</p>
+                                {entry.summaryRef.directMessages.length > 0 ? (
+                                  <div className="raw-log-block room-log-payload-block">
+                                    <pre>
+                                      {entry.summaryRef.directMessages
+                                        .map(
+                                          (message) =>
+                                            `#${message.messageId} [${message.role}] (${message.tokenCount} tokens)\n${message.preview}`,
+                                        )
+                                        .join("\n\n")}
+                                    </pre>
+                                  </div>
+                                ) : (
+                                  <p>这条摘要不是直接映射到原始消息，或当前没有可展示的原始消息预览。</p>
+                                )}
+                              </div>
+                              <div>
+                                <p className="room-log-pair-label">直接映射的下级摘要</p>
+                                {entry.summaryRef.directChildren.length > 0 ? (
+                                  <div className="raw-log-block room-log-payload-block">
+                                    <pre>
+                                      {entry.summaryRef.directChildren
+                                        .map(
+                                          (child) =>
+                                            `${child.summaryId} [${child.kind}] (${child.tokenCount} tokens)\n${child.preview}`,
+                                        )
+                                        .join("\n\n")}
+                                    </pre>
+                                  </div>
+                                ) : (
+                                  <p>当前没有直接下级摘要。</p>
+                                )}
+                              </div>
+                            </div>
+                          ) : null}
+                          {expandedCompactionLogIds.includes(entry.id) && entry.summaryRef && entry.summaryRef.subtree.length > 0 ? (
+                            <div className="raw-log-block room-log-payload-block top-gap">
+                              <pre>
+                                {entry.summaryRef.subtree
+                                  .map(
+                                    (node) =>
+                                      `${"  ".repeat(node.depthFromRoot)}- ${node.summaryId} [${node.kind}] depth=${node.depth} tokens=${node.tokenCount} childCount=${node.childCount} sourceTokens=${node.sourceMessageTokenCount}${node.parentSummaryId ? ` parent=${node.parentSummaryId}` : ""}`,
+                                  )
+                                  .join("\n")}
+                                {entry.summaryRef.mappingTruncated ? "\n... 映射结果已按 token 限制截断。" : ""}
+                              </pre>
+                            </div>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="ghost-button top-gap"
+                            onClick={() => {
+                              setExpandedCompactionLogIds((current) =>
+                                current.includes(entry.id) ? current.filter((id) => id !== entry.id) : [...current, entry.id],
+                              );
+                            }}
+                          >
+                            {expandedCompactionLogIds.includes(entry.id) ? "收起完整内容与映射" : "显示完整内容与映射"}
+                          </button>
+                        </>
                       ) : null}
                     </article>
                   ))}

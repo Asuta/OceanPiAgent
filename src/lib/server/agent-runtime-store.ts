@@ -58,6 +58,7 @@ export interface CompactionRecord {
   success: boolean;
   actionTaken: boolean;
   method: CompactionMethod;
+  createdSummaryId?: string;
   summary: string;
   error?: string;
   prunedMessages: number;
@@ -162,6 +163,7 @@ function normalizeCompactionRecord(value: unknown): CompactionRecord | null {
     success: typeof value.success === "boolean" ? value.success : true,
     actionTaken: typeof value.actionTaken === "boolean" ? value.actionTaken : true,
     method: value.method === "llm" || value.method === "rule_fallback" || value.method === "unknown" ? value.method : "unknown",
+    ...(typeof value.createdSummaryId === "string" && value.createdSummaryId ? { createdSummaryId: value.createdSummaryId } : {}),
     summary: typeof value.summary === "string" ? value.summary : "",
     ...(typeof value.error === "string" && value.error ? { error: value.error } : {}),
     prunedMessages:
@@ -563,6 +565,7 @@ export async function compactPersistedAgentRuntime(args: {
     success: true,
     actionTaken: true,
     method,
+    ...(lcmCompaction.createdSummaryId ? { createdSummaryId: lcmCompaction.createdSummaryId } : {}),
     summary,
     prunedMessages: Math.max(0, runtimeBefore.history.length - lcmHistory.length),
     keptMessages: lcmHistory.length,
