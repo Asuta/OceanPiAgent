@@ -5,7 +5,7 @@ import {
   createRoomSession,
   DEFAULT_AGENT_ID,
   DEFAULT_LOCAL_PARTICIPANT_ID as DEFAULT_LOCAL_PARTICIPANT_KEY,
-  sortRoomsByUpdatedAt,
+  sortRoomsForDisplay,
 } from "@/lib/chat/workspace-domain";
 import {
   addAgentParticipantToRoom,
@@ -98,8 +98,24 @@ function ensureAgentStates(
 function updateWorkspaceRooms(workspace: RoomWorkspaceState, rooms: RoomSession[]): RoomWorkspaceState {
   return {
     ...workspace,
-    rooms: sortRoomsByUpdatedAt(rooms),
+    rooms: sortRoomsForDisplay(rooms),
   };
+}
+
+function setRoomArchiveState(workspace: RoomWorkspaceState, roomId: string, archived: boolean): RoomWorkspaceState {
+  const timestamp = createTimestamp();
+  return updateRoomById(workspace, roomId, (entry) => ({
+    ...entry,
+    archivedAt: archived ? timestamp : null,
+    updatedAt: timestamp,
+  }));
+}
+
+function toggleRoomPinnedState(workspace: RoomWorkspaceState, roomId: string): RoomWorkspaceState {
+  return updateRoomById(workspace, roomId, (entry) => ({
+    ...entry,
+    pinnedAt: entry.pinnedAt ? null : createTimestamp(),
+  }));
 }
 
 function updateRoomById(
@@ -200,19 +216,18 @@ export async function runRoomCommand(
   };
 
   if (input.type === "create_room") {
+    let createdRoomId = "";
     const envelope = await applyMutation((workspace, agentDefinitions) => {
       const resolvedAgentId = input.agentId ?? DEFAULT_AGENT_ID;
       const room = createRoomSession(getNextRoomIndex(workspace.rooms), resolvedAgentId, agentDefinitions);
+      createdRoomId = room.id;
       return {
         ...workspace,
-        rooms: sortRoomsByUpdatedAt([room, ...workspace.rooms]),
+        rooms: sortRoomsForDisplay([room, ...workspace.rooms]),
         agentStates: ensureAgentStates(workspace, [resolvedAgentId]),
       };
     }, deps);
-    return {
-      envelope,
-      room: envelope.state.rooms[0] ?? null,
-    };
+    return getRoomResult(envelope, createdRoomId);
   }
 
   if (input.type === "send_message") {
@@ -253,43 +268,24 @@ export async function runRoomCommand(
   }
 
   if (input.type === "archive_room") {
-    const envelope = await applyMutation((workspace) => {
-      const timestamp = createTimestamp();
-      return updateRoomById(workspace, input.roomId, (entry) => ({
-        ...entry,
-        archivedAt: timestamp,
-        updatedAt: timestamp,
-      }));
-    }, deps);
+    const envelope = await applyMutation((workspace) => setRoomArchiveState(workspace, input.roomId, true), deps);
     return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "toggle_room_pinned") {
-    const envelope = await applyMutation((workspace) => {
-      const timestamp = createTimestamp();
-      return updateRoomById(workspace, input.roomId, (entry) => ({
-        ...entry,
-        pinnedAt: entry.pinnedAt ? null : timestamp,
-        updatedAt: timestamp,
-      }));
-    }, deps);
+    const envelope = await applyMutation((workspace) => toggleRoomPinnedState(workspace, input.roomId), deps);
     return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "restore_room") {
-    const envelope = await applyMutation((workspace) =>
-      updateRoomById(workspace, input.roomId, (entry) => ({
-        ...entry,
-        archivedAt: null,
-        updatedAt: createTimestamp(),
-      })), deps);
+    const envelope = await applyMutation((workspace) => setRoomArchiveState(workspace, input.roomId, false), deps);
     return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "delete_room") {
     const envelope = await applyMutation((workspace) => ({
       ...workspace,
-      rooms: sortRoomsByUpdatedAt(workspace.rooms.filter((entry) => entry.id !== input.roomId)),
+      rooms: sortRoomsForDisplay(workspace.rooms.filter((entry) => entry.id !== input.roomId)),
     }), deps);
     return { envelope, room: null };
   }

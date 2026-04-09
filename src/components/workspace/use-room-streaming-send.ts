@@ -38,7 +38,7 @@ export function useRoomStreamingSend(args: {
     options?: {
       pendingRoomId?: string;
     },
-  ) => Promise<RoomWorkspaceState | null | undefined>;
+  ) => Promise<{ rooms: RoomSession[]; roomId?: string | null } | null | undefined>;
   refreshWorkspaceFromServer: () => Promise<{ version?: number; state?: RoomWorkspaceState } | null>;
   clearDraftForRoom: (roomId: string) => void;
   setActiveRoomId: (roomId: string) => void;

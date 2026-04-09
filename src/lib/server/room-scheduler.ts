@@ -8,7 +8,7 @@ import type {
   ToolExecution,
 } from "@/lib/chat/types";
 import { createSchedulerPacket } from "@/lib/chat/room-scheduler";
-import { createAgentSharedState, createTimestamp, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
+import { createAgentSharedState, createTimestamp, sortRoomsForDisplay } from "@/lib/chat/workspace-domain";
 import { deliverBoundRoomMessages } from "@/lib/server/channel-outbound-service";
 import { abortRoomStream, combineAbortSignals } from "@/lib/server/room-stream-control";
 import {
@@ -121,7 +121,7 @@ function settleQueueWaiters(queueState: RoomQueueState, error?: unknown): void {
 function updateRoom(workspace: RoomWorkspaceState, roomId: string, updater: (room: RoomSession) => RoomSession): RoomWorkspaceState {
   return {
     ...workspace,
-    rooms: sortRoomsByUpdatedAt(workspace.rooms.map((room) => (room.id === roomId ? updater(room) : room))),
+    rooms: sortRoomsForDisplay(workspace.rooms.map((room) => (room.id === roomId ? updater(room) : room))),
   };
 }
 
@@ -152,7 +152,7 @@ function markTurnStopped(turn: AgentRoomTurn, reason: string): AgentRoomTurn {
 
 function applyStoppedStateToWorkspace(workspace: RoomWorkspaceState, roomId: string, reason: string): RoomWorkspaceState {
   const stoppedTurnIds = new Set<string>();
-  const rooms = sortRoomsByUpdatedAt(
+  const rooms = sortRoomsForDisplay(
     workspace.rooms.map((room) => {
       if (room.id !== roomId) {
         return room;

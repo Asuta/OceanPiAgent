@@ -189,6 +189,80 @@ test("runRoomCommand toggle_room_pinned toggles pinned state", async () => {
   assert.equal(unpinned.room?.pinnedAt, null);
 });
 
+test("runRoomCommand toggle_room_pinned keeps updatedAt unchanged because pinning is display-only", async () => {
+  const harness = createRoomServiceHarness();
+  const room = harness.getState().rooms[0]!;
+  const fixedUpdatedAt = "2026-01-02T03:04:05.000Z";
+
+  harness.setState({
+    ...harness.getState(),
+    rooms: harness.getState().rooms.map((entry) => (entry.id === room.id ? { ...entry, updatedAt: fixedUpdatedAt } : entry)),
+  });
+
+  const pinned = await runRoomCommand(
+    {
+      type: "toggle_room_pinned",
+      roomId: room.id,
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+
+  assert.ok(pinned.room?.pinnedAt);
+  assert.equal(pinned.room?.updatedAt, fixedUpdatedAt);
+
+  const unpinned = await runRoomCommand(
+    {
+      type: "toggle_room_pinned",
+      roomId: room.id,
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+
+  assert.equal(unpinned.room?.pinnedAt, null);
+  assert.equal(unpinned.room?.updatedAt, fixedUpdatedAt);
+});
+
+test("runRoomCommand create_room returns the new room even when a pinned room still sorts first", async () => {
+  const harness = createRoomServiceHarness();
+  const pinnedRoomId = harness.getState().rooms[0]!.id;
+
+  await runRoomCommand(
+    {
+      type: "toggle_room_pinned",
+      roomId: pinnedRoomId,
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+
+  const created = await runRoomCommand(
+    {
+      type: "create_room",
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+
+  assert.ok(created.room);
+  assert.notEqual(created.room?.id, pinnedRoomId);
+  assert.equal(created.envelope.state.rooms[0]?.id, pinnedRoomId);
+  assert.equal(created.room?.title, "Room 2");
+});
+
 test("runRoomCommand clear_room resets transcript, scheduler state, and room errors", async () => {
   const harness = createRoomServiceHarness();
   const state = harness.getState();

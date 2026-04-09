@@ -10,7 +10,7 @@ import type {
   RoomSession,
   RoomWorkspaceState,
 } from "@/lib/chat/types";
-import { dedupeRoomMessages, sortRoomsByUpdatedAt, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
+import { dedupeRoomMessages, sortRoomsForDisplay, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
 
 export interface RoomSessionPatch {
   roomId: string;
@@ -328,7 +328,7 @@ export function applyWorkspaceStatePatch(state: RoomWorkspaceState, patch: Works
     for (const room of patch.rooms ?? []) {
       roomsById.set(room.id, room);
     }
-    nextRooms = sortRoomsByUpdatedAt([...roomsById.values()]);
+    nextRooms = sortRoomsForDisplay([...roomsById.values()]);
   }
 
   let nextAgentStates = state.agentStates;

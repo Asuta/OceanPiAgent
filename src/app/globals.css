@@ -899,11 +899,8 @@ p {
   gap: 8px;
 }
 
-.sidebar-room-actions .mini-button {
-  min-width: 0;
-  padding: 7px 10px;
-  border-radius: 999px;
-  background: rgba(255, 252, 247, 0.92);
+.sidebar-room-actions .mini-button,
+.sidebar-icon-button {
   box-shadow: 0 8px 18px rgba(24, 53, 49, 0.08);
   backdrop-filter: blur(10px);
   opacity: 0;
@@ -916,6 +913,13 @@ p {
     background 180ms ease,
     color 180ms ease,
     box-shadow 180ms ease;
+}
+
+.sidebar-room-actions .mini-button {
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(255, 252, 247, 0.92);
 }
 
 .sidebar-room-card:hover .sidebar-room-actions .mini-button,
@@ -947,18 +951,6 @@ p {
   border: 1px solid rgba(24, 53, 49, 0.12);
   background: rgba(255, 252, 247, 0.92);
   color: rgba(24, 53, 49, 0.72);
-  box-shadow: 0 8px 18px rgba(24, 53, 49, 0.08);
-  backdrop-filter: blur(10px);
-  opacity: 0;
-  transform: translateY(6px) scale(0.96);
-  pointer-events: none;
-  transition:
-    opacity 160ms ease,
-    transform 160ms ease,
-    border-color 180ms ease,
-    background 180ms ease,
-    color 180ms ease,
-    box-shadow 180ms ease;
 }
 
 .sidebar-pin-icon {

@@ -15,7 +15,7 @@ export function useRoomCommands(args: {
     options?: {
       pendingRoomId?: string;
     },
-  ) => Promise<{ rooms: RoomSession[] } | null | undefined>;
+  ) => Promise<{ rooms: RoomSession[]; roomId?: string | null } | null | undefined>;
   clearDraftForRoom: (roomId: string) => void;
   setActiveRoomId: (roomId: string) => void;
   setSelectedConsoleAgentId: (agentId: RoomAgentId | null) => void;
@@ -41,7 +41,7 @@ export function useRoomCommands(args: {
         type: "create_room",
         agentId: resolvedAgentId,
       });
-      const nextRoom = snapshot?.rooms[0] ?? null;
+      const nextRoom = snapshot?.roomId ? snapshot.rooms.find((room) => room.id === snapshot.roomId) ?? null : null;
       if (nextRoom) {
         setActiveRoomId(nextRoom.id);
         setSelectedConsoleAgentId(getPrimaryRoomAgentId(nextRoom));

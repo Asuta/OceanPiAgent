@@ -64,7 +64,7 @@ import {
   getRoomPreview,
   pickRoomOwnerParticipantId,
   sortRoomParticipants,
-  sortRoomsByUpdatedAt,
+  sortRoomsForDisplay,
 } from "@/lib/chat/workspace-domain";
 import { applyWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
 import {
@@ -1635,7 +1635,7 @@ function parseWorkspaceState(raw: string): RoomWorkspaceState | null {
       : getPrimaryRoomAgentId(rooms.find((room) => room.id === activeRoomId) ?? rooms[0]);
 
     return {
-      rooms: sortRoomsByUpdatedAt(
+      rooms: sortRoomsForDisplay(
         rooms.map((room) => ({
           ...room,
           scheduler: {
@@ -1879,7 +1879,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           throw new Error(response?.error ?? "Room command failed.");
         }
 
-        return applyWorkspaceEnvelope(response.envelope);
+        const nextState = applyWorkspaceEnvelope(response.envelope);
+        return {
+          rooms: nextState.rooms,
+          roomId: response.roomId ?? null,
+        };
       } finally {
         if (options?.pendingRoomId) {
           setPendingRoomCommandIds((current) => {
@@ -1929,7 +1933,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     const availableRooms = getActiveRooms(rooms);
     if (availableRooms.length === 0) {
       const fallbackRoom = createRoomSession(getNextRoomIndex(roomsRef.current), DEFAULT_AGENT_ID, agentsRef.current);
-      const nextRooms = sortRoomsByUpdatedAt([fallbackRoom, ...roomsRef.current]);
+       const nextRooms = sortRoomsForDisplay([fallbackRoom, ...roomsRef.current]);
       roomsRef.current = nextRooms;
       setRooms(nextRooms);
       setActiveRoomId(fallbackRoom.id);

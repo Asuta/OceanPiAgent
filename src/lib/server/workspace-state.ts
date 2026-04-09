@@ -4,7 +4,7 @@ import {
   createAgentSharedState,
   createTimestamp,
   reduceRoomManagementActions,
-  sortRoomsByUpdatedAt,
+  sortRoomsForDisplay,
   upsertMessageToRoom,
   type ApplyCronTurnToWorkspaceArgs,
 } from "@/lib/chat/workspace-domain";
@@ -142,7 +142,7 @@ function applyAgentTurnLikeUpdate(
 
   return {
     ...args.workspace,
-    rooms: sortRoomsByUpdatedAt(rooms),
+    rooms: sortRoomsForDisplay(rooms),
     agentStates: nextAgentStates,
   };
 }

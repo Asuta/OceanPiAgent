@@ -1,5 +1,5 @@
 import type { RoomAgentDefinition, RoomMessage, RoomWorkspaceState } from "@/lib/chat/types";
-import { createAgentSharedState, createExternalRoomSession, createRoomMessage, createTimestamp, sortRoomsByUpdatedAt, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
+import { createAgentSharedState, createExternalRoomSession, createRoomMessage, createTimestamp, sortRoomsForDisplay, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
 import { createExternalOutboundMessages } from "@/lib/server/channel-outbound-service";
 import { findChannelBinding, touchChannelBinding, upsertChannelBinding } from "@/lib/server/channel-bindings-store";
 import { beginInboundMessage, finishInboundMessage, runSerializedDelivery } from "@/lib/server/channel-delivery-queue";
@@ -197,7 +197,7 @@ async function createBoundRoom(message: ExternalInboundMessage, deps: Required<E
 
   const workspaceEnvelope = await deps.mutateWorkspace((workspace) => ({
     ...workspace,
-    rooms: sortRoomsByUpdatedAt([room, ...workspace.rooms]),
+    rooms: sortRoomsForDisplay([room, ...workspace.rooms]),
     agentStates: workspace.agentStates[room.agentId]
       ? workspace.agentStates
       : {

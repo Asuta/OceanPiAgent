@@ -87,7 +87,7 @@ export function getRoomAgent(agentId: RoomAgentId, agentDefinitions: RoomAgentDe
   return agentDefinitions.find((agent) => agent.id === agentId) ?? createFallbackRoomAgent(agentId);
 }
 
-export function sortRoomsByUpdatedAt(rooms: RoomSession[]): RoomSession[] {
+export function sortRoomsForDisplay(rooms: RoomSession[]): RoomSession[] {
   return [...rooms].sort((left, right) => {
     const leftPinned = left.pinnedAt ?? "";
     const rightPinned = right.pinnedAt ?? "";
