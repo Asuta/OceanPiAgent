@@ -148,21 +148,8 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
       return [];
     }
 
-    const currentPathRoomId = pathname.startsWith("/rooms/") ? pathname.split("/")[2] ?? "" : activeRoomId;
-    if (!currentPathRoomId) {
-      return activeRooms;
-    }
-
-    const currentRoom = activeRooms.find((room) => room.id === currentPathRoomId);
-    if (!currentRoom) {
-      return activeRooms;
-    }
-
-    const sameBucket = activeRooms.filter((room) => room.id !== currentRoom.id && Boolean(room.pinnedAt) === Boolean(currentRoom.pinnedAt));
-    const otherBucket = activeRooms.filter((room) => Boolean(room.pinnedAt) !== Boolean(currentRoom.pinnedAt));
-
-    return currentRoom.pinnedAt ? [currentRoom, ...sameBucket, ...otherBucket] : [...otherBucket, currentRoom, ...sameBucket];
-  }, [activeRoomId, activeRooms, hydrated, pathname]);
+    return activeRooms;
+  }, [activeRooms, hydrated]);
   const handleArchiveRoom = useCallback(
     (roomId: string, roomTitle: string) => {
       if (!window.confirm(`确认归档“${roomTitle}”吗？归档后它会从最近房间中移除，但仍可在总览页恢复。`)) {
