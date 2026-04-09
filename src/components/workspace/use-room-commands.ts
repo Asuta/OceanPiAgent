@@ -88,6 +88,19 @@ export function useRoomCommands(args: {
     [clearDraftForRoom, runRoomCommandRequest],
   );
 
+  const toggleRoomPinned = useCallback(
+    async (roomId: string) => {
+      await runRoomCommandRequest(
+        {
+          type: "toggle_room_pinned",
+          roomId,
+        },
+        { pendingRoomId: roomId },
+      );
+    },
+    [runRoomCommandRequest],
+  );
+
   const restoreRoom = useCallback(
     async (roomId: string) => {
       await runRoomCommandRequest(
@@ -215,6 +228,7 @@ export function useRoomCommands(args: {
     createRoom,
     renameRoom,
     archiveRoom,
+    toggleRoomPinned,
     restoreRoom,
     deleteRoom,
     clearRoom,

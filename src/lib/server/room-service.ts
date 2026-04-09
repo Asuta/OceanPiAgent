@@ -48,6 +48,7 @@ export type RoomCommandInput =
   | { type: "create_room"; agentId?: RoomAgentId }
   | { type: "rename_room"; roomId: string; title: string }
   | { type: "archive_room"; roomId: string }
+  | { type: "toggle_room_pinned"; roomId: string }
   | { type: "restore_room"; roomId: string }
   | { type: "delete_room"; roomId: string }
   | { type: "clear_room"; roomId: string }
@@ -257,6 +258,18 @@ export async function runRoomCommand(
       return updateRoomById(workspace, input.roomId, (entry) => ({
         ...entry,
         archivedAt: timestamp,
+        updatedAt: timestamp,
+      }));
+    }, deps);
+    return getRoomResult(envelope, input.roomId);
+  }
+
+  if (input.type === "toggle_room_pinned") {
+    const envelope = await applyMutation((workspace) => {
+      const timestamp = createTimestamp();
+      return updateRoomById(workspace, input.roomId, (entry) => ({
+        ...entry,
+        pinnedAt: entry.pinnedAt ? null : timestamp,
         updatedAt: timestamp,
       }));
     }, deps);

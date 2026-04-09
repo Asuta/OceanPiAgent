@@ -158,6 +158,37 @@ test("runRoomCommand archive_room and restore_room toggle archive state", async 
   assert.equal(restored.room?.archivedAt, null);
 });
 
+test("runRoomCommand toggle_room_pinned toggles pinned state", async () => {
+  const harness = createRoomServiceHarness();
+  const roomId = harness.getState().rooms[0]!.id;
+
+  const pinned = await runRoomCommand(
+    {
+      type: "toggle_room_pinned",
+      roomId,
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+  assert.ok(pinned.room?.pinnedAt);
+
+  const unpinned = await runRoomCommand(
+    {
+      type: "toggle_room_pinned",
+      roomId,
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+  assert.equal(unpinned.room?.pinnedAt, null);
+});
+
 test("runRoomCommand clear_room resets transcript, scheduler state, and room errors", async () => {
   const harness = createRoomServiceHarness();
   const state = harness.getState();

@@ -88,7 +88,15 @@ export function getRoomAgent(agentId: RoomAgentId, agentDefinitions: RoomAgentDe
 }
 
 export function sortRoomsByUpdatedAt(rooms: RoomSession[]): RoomSession[] {
-  return [...rooms].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  return [...rooms].sort((left, right) => {
+    const leftPinned = left.pinnedAt ?? "";
+    const rightPinned = right.pinnedAt ?? "";
+    if (leftPinned !== rightPinned) {
+      return rightPinned.localeCompare(leftPinned);
+    }
+
+    return right.updatedAt.localeCompare(left.updatedAt);
+  });
 }
 
 export function createAgentSharedState(overrides?: Partial<AgentSharedState>): AgentSharedState {
@@ -223,6 +231,7 @@ export function createRoomSession(index: number, agentId: RoomAgentId = DEFAULT_
     title: `Room ${index}`,
     agentId,
     archivedAt: null,
+    pinnedAt: null,
     ownerParticipantId: DEFAULT_LOCAL_PARTICIPANT_ID,
     receiptRevision: 0,
     participants,
@@ -254,6 +263,7 @@ export function createExternalRoomSession(args: {
     title: args.title,
     agentId: args.agentId,
     archivedAt: null,
+    pinnedAt: null,
     ownerParticipantId: args.humanParticipantId,
     receiptRevision: 0,
     participants,
@@ -656,11 +666,12 @@ export function createAgentOwnedRoomSession(
   const participants = sortRoomParticipants(uniqueAgentIds.map((agentId, index) => createAgentParticipant(agentId, index + 1, agentDefinitions)));
 
   let room: RoomSession = {
-    id: roomId,
-    title,
-    agentId: ownerAgentId,
-    archivedAt: null,
-    ownerParticipantId: ownerAgentId,
+      id: roomId,
+      title,
+      agentId: ownerAgentId,
+      archivedAt: null,
+      pinnedAt: null,
+      ownerParticipantId: ownerAgentId,
     receiptRevision: 0,
     participants,
     scheduler: createSchedulerState(ownerAgentId),

@@ -551,6 +551,7 @@ export interface RoomSession {
   title: string;
   agentId: RoomAgentId;
   archivedAt: string | null;
+  pinnedAt: string | null;
   ownerParticipantId: string | null;
   receiptRevision: number;
   participants: RoomParticipant[];

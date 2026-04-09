@@ -21,6 +21,14 @@ const THINKING_LEVEL_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
   { value: "xhigh", label: "XHigh" },
 ];
 
+function PinIcon({ pinned }: { pinned: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className={pinned ? "sidebar-pin-icon pinned" : "sidebar-pin-icon"}>
+      <path d="M11.66 2.18a.75.75 0 0 0-1.06 0L9.28 3.5l-2.8-.56a.75.75 0 0 0-.7.2l-.96.95a.75.75 0 0 0 .24 1.22L7 6.12v1.7L2.22 12.6a.75.75 0 1 0 1.06 1.06L8.06 8.88h1.7l.8 1.94a.75.75 0 0 0 1.22.24l.95-.96a.75.75 0 0 0 .2-.7l-.56-2.8 1.31-1.32a.75.75 0 0 0 0-1.06l-2.02-2.02Zm-1 2.91 1.43 1.43-.72.72a.75.75 0 0 0-.2.67l.43 2.17-.08.08-.62-1.52a.75.75 0 0 0-.7-.47H8.06a.75.75 0 0 0-.53.22l-3.19 3.19-.13-.13 3.19-3.19a.75.75 0 0 0 .22-.53V5.87a.75.75 0 0 0-.47-.7l-1.52-.62.08-.08 2.17.43a.75.75 0 0 0 .67-.2l.72-.72Z" fill="currentColor" />
+    </svg>
+  );
+}
+
 async function fetchModelConfigs(): Promise<ModelConfig[]> {
   const response = await fetch("/api/model-configs", { cache: "no-store" });
   if (!response.ok) {
@@ -63,7 +71,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const { mounted: themeMounted, resolvedTheme, setThemePreference, systemTheme, themePreference } = useTheme();
   const { activeRooms, archivedRooms, activeRoomId, hydrated } = useWorkspaceRoomsState();
   const { agents, agentStates } = useWorkspaceAgentsState();
-  const { archiveRoom, createRoom, isRoomRunning, setActiveRoomId, updateAgentSettings } = useWorkspaceActions();
+  const { archiveRoom, createRoom, isRoomRunning, setActiveRoomId, toggleRoomPinned, updateAgentSettings } = useWorkspaceActions();
 
   useEffect(() => {
     let cancelled = false;
@@ -141,10 +149,19 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
     }
 
     const currentPathRoomId = pathname.startsWith("/rooms/") ? pathname.split("/")[2] ?? "" : activeRoomId;
-    const pinned = currentPathRoomId ? activeRooms.find((room) => room.id === currentPathRoomId) : null;
-    const recent = activeRooms.filter((room) => room.id !== pinned?.id);
+    if (!currentPathRoomId) {
+      return activeRooms;
+    }
 
-    return pinned ? [pinned, ...recent] : activeRooms;
+    const currentRoom = activeRooms.find((room) => room.id === currentPathRoomId);
+    if (!currentRoom) {
+      return activeRooms;
+    }
+
+    const sameBucket = activeRooms.filter((room) => room.id !== currentRoom.id && Boolean(room.pinnedAt) === Boolean(currentRoom.pinnedAt));
+    const otherBucket = activeRooms.filter((room) => Boolean(room.pinnedAt) !== Boolean(currentRoom.pinnedAt));
+
+    return currentRoom.pinnedAt ? [currentRoom, ...sameBucket, ...otherBucket] : [...otherBucket, currentRoom, ...sameBucket];
   }, [activeRoomId, activeRooms, hydrated, pathname]);
   const handleArchiveRoom = useCallback(
     (roomId: string, roomTitle: string) => {
@@ -249,7 +266,16 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
                   const active = pathname === `/rooms/${room.id}` || (pathname === "/rooms" && room.id === activeRoomId);
                   const isRunning = isRoomRunning(room.id);
                   return (
-                    <article key={room.id} className={active ? "sidebar-room-card active" : "sidebar-room-card"}>
+                    <article
+                      key={room.id}
+                      className={[
+                        "sidebar-room-card",
+                        active ? "active" : "",
+                        room.pinnedAt ? "pinned" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                    >
                       <Link
                         href={`/rooms/${room.id}`}
                         className="sidebar-room-card-link"
@@ -265,6 +291,16 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
                         <p>{getRoomPreview(room)}</p>
                       </Link>
                       <div className="sidebar-room-actions">
+                        <button
+                          type="button"
+                          className={room.pinnedAt ? "sidebar-icon-button active" : "sidebar-icon-button"}
+                          disabled={isRunning}
+                          onClick={() => void toggleRoomPinned(room.id)}
+                          aria-label={room.pinnedAt ? `取消置顶 ${room.title}` : `置顶 ${room.title}`}
+                          title={room.pinnedAt ? "取消置顶" : "置顶"}
+                        >
+                          <PinIcon pinned={Boolean(room.pinnedAt)} />
+                        </button>
                         <button
                           type="button"
                           className="mini-button"

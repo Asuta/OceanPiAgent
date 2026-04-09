@@ -18,6 +18,7 @@ export interface RoomSessionPatch {
   title?: string;
   agentId?: RoomAgentId;
   archivedAt?: string | null;
+  pinnedAt?: string | null;
   ownerParticipantId?: string | null;
   receiptRevision?: number;
   participants?: RoomParticipant[];
@@ -131,6 +132,7 @@ function createRoomSessionPatch(previous: RoomSession, next: RoomSession): RoomS
     ...(previous.title !== next.title ? { title: next.title } : {}),
     ...(previous.agentId !== next.agentId ? { agentId: next.agentId } : {}),
     ...(previous.archivedAt !== next.archivedAt ? { archivedAt: next.archivedAt } : {}),
+    ...(previous.pinnedAt !== next.pinnedAt ? { pinnedAt: next.pinnedAt } : {}),
     ...(previous.ownerParticipantId !== next.ownerParticipantId ? { ownerParticipantId: next.ownerParticipantId } : {}),
     ...(previous.receiptRevision !== next.receiptRevision ? { receiptRevision: next.receiptRevision } : {}),
     ...(stableStringify(previous.participants) !== stableStringify(next.participants) ? { participants: next.participants } : {}),
@@ -259,6 +261,7 @@ function applyRoomSessionPatch(room: RoomSession, patch: RoomSessionPatch): Room
     ...(typeof patch.title === "string" ? { title: patch.title } : {}),
     ...(typeof patch.agentId === "string" ? { agentId: patch.agentId } : {}),
     ...(Object.prototype.hasOwnProperty.call(patch, "archivedAt") ? { archivedAt: patch.archivedAt ?? null } : {}),
+    ...(Object.prototype.hasOwnProperty.call(patch, "pinnedAt") ? { pinnedAt: patch.pinnedAt ?? null } : {}),
     ...(Object.prototype.hasOwnProperty.call(patch, "ownerParticipantId") ? { ownerParticipantId: patch.ownerParticipantId ?? null } : {}),
     ...(typeof patch.receiptRevision === "number" ? { receiptRevision: patch.receiptRevision } : {}),
     ...(patch.participants ? { participants: patch.participants } : {}),

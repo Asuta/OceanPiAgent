@@ -421,6 +421,7 @@ const roomSessionSchema = z.object({
   title: z.string(),
   agentId: roomAgentIdSchema,
   archivedAt: z.string().nullable(),
+  pinnedAt: z.string().nullable(),
   ownerParticipantId: z.string().nullable(),
   receiptRevision: z.number().int(),
   participants: z.array(roomParticipantSchema),

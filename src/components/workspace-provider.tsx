@@ -195,6 +195,7 @@ interface WorkspaceContextValue {
   createAgentDefinition: (input: AgentMutationInput) => Promise<RoomAgentDefinition>;
   renameRoom: (roomId: string, title: string) => Promise<void>;
   archiveRoom: (roomId: string) => Promise<void>;
+  toggleRoomPinned: (roomId: string) => Promise<void>;
   restoreRoom: (roomId: string) => Promise<void>;
   deleteRoom: (roomId: string) => Promise<void>;
   clearRoom: (roomId: string) => Promise<void>;
@@ -1524,6 +1525,7 @@ function normalizeRoomSession(value: unknown, index: number): RoomSession | null
       title: defaultTitle,
       agentId,
       archivedAt: null,
+      pinnedAt: null,
       ownerParticipantId,
       receiptRevision: 0,
       participants,
@@ -1535,6 +1537,7 @@ function normalizeRoomSession(value: unknown, index: number): RoomSession | null
       updatedAt: createTimestamp(),
     }),
     archivedAt: typeof value.archivedAt === "string" && value.archivedAt ? value.archivedAt : null,
+    pinnedAt: typeof value.pinnedAt === "string" && value.pinnedAt ? value.pinnedAt : null,
     ownerParticipantId,
     receiptRevision:
       typeof value.receiptRevision === "number" && Number.isFinite(value.receiptRevision)
@@ -1689,6 +1692,7 @@ function migrateLegacyWorkspaceState(raw: string): RoomWorkspaceState | null {
       ...room,
       title: suggestedTitle || room.title,
       archivedAt: null,
+      pinnedAt: null,
       roomMessages,
       agentTurns: [],
       updatedAt: createTimestamp(),
@@ -2181,6 +2185,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     createRoom,
     renameRoom,
     archiveRoom,
+    toggleRoomPinned,
     restoreRoom,
     deleteRoom,
     clearRoom,
@@ -2531,6 +2536,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       createAgentDefinition,
       renameRoom,
       archiveRoom,
+      toggleRoomPinned,
       restoreRoom,
       deleteRoom,
       clearRoom,
@@ -2573,6 +2579,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       createAgentDefinition,
       setDraft,
       setSelectedSender,
+      toggleRoomPinned,
       toggleAgentParticipant,
       updateAgentSettings,
       updateAgentDefinition,
