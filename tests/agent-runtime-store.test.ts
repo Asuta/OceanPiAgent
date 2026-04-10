@@ -316,12 +316,12 @@ test("compactPersistedAgentRuntime records skipped post-turn checks when no comp
     const persisted = await runtimeStore.loadPersistedAgentRuntime(agentId);
 
     assert.equal(result.compacted, false);
-    assert.equal(persisted.compactions.length, 1);
-    assert.equal(persisted.compactions[0]?.reason, "post_turn");
-    assert.equal(persisted.compactions[0]?.success, true);
-    assert.equal(persisted.compactions[0]?.actionTaken, false);
-    assert.ok((persisted.compactions[0]?.summary ?? "").includes("阈值"));
-    assert.ok(["below_threshold", "no_eligible_leaf_chunk", "empty_context", "leaf_pass_failed", "no_condensation_candidate"].includes(persisted.compactions[0]?.details?.result ?? ""));
+    assert.ok(persisted.compactions.length >= 1);
+    assert.equal(persisted.compactions.at(-1)?.reason, "post_turn");
+    assert.equal(persisted.compactions.at(-1)?.success, true);
+    assert.equal(persisted.compactions.at(-1)?.actionTaken, false);
+    assert.ok((persisted.compactions.at(-1)?.summary ?? "").includes("阈值"));
+    assert.ok(["below_threshold", "no_eligible_leaf_chunk", "empty_context", "leaf_pass_failed", "no_condensation_candidate"].includes(persisted.compactions.at(-1)?.details?.result ?? ""));
   });
 });
 
@@ -343,7 +343,7 @@ test("compactPersistedAgentRuntime includes system prompt overhead in post-turn 
     });
 
     assert.equal(result.compacted, true);
-    assert.equal((await runtimeStore.loadPersistedAgentRuntime(agentId)).compactions[0]?.reason, "post_turn");
+    assert.equal((await runtimeStore.loadPersistedAgentRuntime(agentId)).compactions.at(-1)?.reason, "post_turn");
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });

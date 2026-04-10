@@ -86,6 +86,7 @@ interface StreamConversationCallbacks {
 
 interface PostToolBatchCompactionContext {
   historyDelta: AssistantHistoryMessage[];
+  resolvedModel: string;
   signal?: AbortSignal;
 }
 
@@ -738,7 +739,11 @@ async function runConversationAttempt(args: {
         return messages;
       }
 
-      const compaction = await args.resolvedOptions.postToolBatchCompaction({ historyDelta, signal });
+      const compaction = await args.resolvedOptions.postToolBatchCompaction({
+        historyDelta,
+        resolvedModel: args.resolvedModel.resolvedModelRef,
+        signal,
+      });
       if (!compaction || !compaction.summaryText.trim()) {
         return messages;
       }

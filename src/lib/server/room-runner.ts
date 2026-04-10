@@ -384,7 +384,7 @@ type RoomConversationRunner = (
     signal?: AbortSignal;
     toolContext?: RoomToolContext;
     modelConfigOverrides?: ModelConfigExecutionOverrides;
-    postToolBatchCompaction?: (args: { historyDelta: AssistantHistoryMessage[]; signal?: AbortSignal }) => Promise<{ summaryText: string; keptStartIndex: number } | null>;
+    postToolBatchCompaction?: (args: { historyDelta: AssistantHistoryMessage[]; resolvedModel: string; signal?: AbortSignal }) => Promise<{ summaryText: string; keptStartIndex: number } | null>;
   },
   ) => Promise<{
   assistantText: string;
@@ -710,7 +710,7 @@ export async function runPreparedRoomTurn(
         signal: runContext.signal,
         toolContext,
         modelConfigOverrides: args.modelConfigOverrides,
-        postToolBatchCompaction: async ({ historyDelta, signal }) => {
+        postToolBatchCompaction: async ({ historyDelta, resolvedModel, signal }) => {
           void signal;
           if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
             return null;
@@ -719,7 +719,7 @@ export async function runPreparedRoomTurn(
           const compaction = await compactPromptHistoryAfterToolBatch({
             agentId: args.agent.id,
             historyDelta,
-            resolvedModel: runContext.resolvedModel || args.settings.model,
+            resolvedModel,
           });
           if (!compaction.compacted || !compaction.summaryText || typeof compaction.keptStartIndex !== "number") {
             return null;
