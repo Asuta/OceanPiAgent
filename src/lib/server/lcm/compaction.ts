@@ -263,10 +263,6 @@ export class CompactionEngine {
       level = leafResult.level;
       previousSummaryContent = leafResult.content;
 
-      if (this.isBelowThreshold({ force: input.force, storedTokens: passTokensAfter, comparisonExtraTokens: input.comparisonExtraTokens })) {
-        previousTokens = passTokensAfter;
-        break;
-      }
       if (passTokensAfter >= passTokensBefore || passTokensAfter >= previousTokens) {
         break;
       }
@@ -399,10 +395,7 @@ export class CompactionEngine {
     return 0;
   }
 
-  private resolveFreshTailOrdinal(contextItems: ContextItemRecord[], force?: boolean): number {
-    if (force) {
-      return Infinity;
-    }
+  private resolveFreshTailOrdinal(contextItems: ContextItemRecord[]): number {
     const freshTailCount = this.resolveFreshTailCount();
     if (freshTailCount <= 0) {
       return Infinity;
@@ -430,8 +423,9 @@ export class CompactionEngine {
 
   private async selectOldestLeafChunk(conversationId: number, force?: boolean): Promise<LeafChunkSelection> {
     const contextItems = await this.summaryStore.getContextItems(conversationId);
-    const freshTailOrdinal = this.resolveFreshTailOrdinal(contextItems, force);
+    const freshTailOrdinal = this.resolveFreshTailOrdinal(contextItems);
     const threshold = this.resolveLeafChunkTokens();
+    void force;
 
     const chunk: ContextItemRecord[] = [];
     let chunkTokens = 0;
@@ -551,8 +545,9 @@ export class CompactionEngine {
 
   private async selectShallowestCondensationCandidate(params: { conversationId: number; hardTrigger: boolean; force?: boolean }): Promise<CondensedPhaseCandidate | null> {
     const contextItems = await this.summaryStore.getContextItems(params.conversationId);
-    const freshTailOrdinal = this.resolveFreshTailOrdinal(contextItems, params.force);
+    const freshTailOrdinal = this.resolveFreshTailOrdinal(contextItems);
     const minChunkTokens = this.resolveCondensedMinChunkTokens();
+    void params.force;
     const depthLevels = await this.summaryStore.getDistinctDepthsInContext(params.conversationId, { maxOrdinalExclusive: freshTailOrdinal });
 
     for (const targetDepth of depthLevels) {

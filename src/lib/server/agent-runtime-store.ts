@@ -13,7 +13,12 @@ import {
   getOrCreateAgentConversation,
 } from "./lcm/facade";
 import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runtime-hooks";
-import { DEFAULT_COMPACTION_TOKEN_THRESHOLD, coerceCompactionTokenThreshold } from "@/lib/chat/types";
+import {
+  DEFAULT_COMPACTION_FRESH_TAIL_COUNT,
+  DEFAULT_COMPACTION_TOKEN_THRESHOLD,
+  coerceCompactionFreshTailCount,
+  coerceCompactionTokenThreshold,
+} from "@/lib/chat/types";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 
@@ -338,6 +343,11 @@ async function resolveAgentCompactionTokenThreshold(agentId: RoomAgentId): Promi
   return coerceCompactionTokenThreshold(workspace?.state.agentStates[agentId]?.settings.compactionTokenThreshold ?? DEFAULT_COMPACTION_TOKEN_THRESHOLD);
 }
 
+async function resolveAgentCompactionFreshTailCount(agentId: RoomAgentId): Promise<number> {
+  const workspace = await loadWorkspaceEnvelope().catch(() => null);
+  return coerceCompactionFreshTailCount(workspace?.state.agentStates[agentId]?.settings.compactionFreshTailCount ?? DEFAULT_COMPACTION_FRESH_TAIL_COUNT);
+}
+
 async function saveStoredRuntime(runtime: PersistedAgentRuntime): Promise<void> {
   await ensureRuntimeDir();
   await writeFile(
@@ -427,6 +437,7 @@ export async function compactPersistedAgentRuntime(args: {
   const runtimeBefore = await readStoredRuntime(args.agentId);
   const charsBefore = estimateHistoryChars(runtimeBefore.history);
   const compactionTokenThreshold = await resolveAgentCompactionTokenThreshold(args.agentId);
+  const compactionFreshTailCount = await resolveAgentCompactionFreshTailCount(args.agentId);
   const summaryModel = runtimeBefore.resolvedModel.trim() || undefined;
   const assembledPromptContext = await assembleAgentLcmContext(args.agentId, 20_000).catch(() => null);
   const storedContextTokens = await getAgentLcmStoredContextTokenCount(args.agentId).catch(() => null);
@@ -453,6 +464,7 @@ export async function compactPersistedAgentRuntime(args: {
     args.force,
     summaryModel,
     comparisonExtraTokens,
+    compactionFreshTailCount,
   ).then(
     (result) => ({ result, error: null as string | null }),
     (error) => ({ result: null, error: error instanceof Error ? error.message : "Unknown compaction failure." }),

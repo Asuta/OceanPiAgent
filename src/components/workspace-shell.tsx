@@ -6,12 +6,13 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { applyModelConfigToSettings } from "@/lib/ai/model-configs";
 import { useTheme } from "@/components/theme-provider";
 import { formatTimestamp, getRoomPreview, useWorkspaceActions, useWorkspaceAgentsState, useWorkspaceRoomsState } from "@/components/workspace-provider";
-import { coerceCompactionTokenThreshold, DEFAULT_COMPACTION_TOKEN_THRESHOLD } from "@/lib/chat/types";
+import { coerceCompactionFreshTailCount, coerceCompactionTokenThreshold, DEFAULT_COMPACTION_FRESH_TAIL_COUNT, DEFAULT_COMPACTION_TOKEN_THRESHOLD } from "@/lib/chat/types";
 import type { ModelConfig } from "@/lib/chat/types";
 import { RESOLVED_THEME_LABELS, THEME_OPTION_LABELS, THEME_PREFERENCES } from "@/lib/theme";
 
 const MIXED_MODEL_CONFIG_VALUE = "__mixed_model_config__";
 const MIXED_COMPACTION_THRESHOLD_VALUE = "__mixed_compaction_threshold__";
+const MIXED_FRESH_TRAIL_COUNT_VALUE = "__mixed_fresh_trail_count__";
 const EMPTY_MODEL_CONFIG_VALUE = "";
 
 type AgentPromptBaseline = {
@@ -47,6 +48,23 @@ function parseCompactionThresholdInput(value: string): number | null {
 
   const multiplier = match[2] === "m" ? 1_000_000 : match[2] === "k" ? 1_000 : 1;
   return Math.round(numericValue * multiplier);
+}
+
+function formatFreshTrailCount(value: number): string {
+  return `${value}`;
+}
+
+function parseFreshTrailCountInput(value: string): number | null {
+  const normalized = value.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+
+  return coerceCompactionFreshTailCount(Number(normalized));
 }
 
 async function fetchModelConfigs(): Promise<ModelConfig[]> {
@@ -89,6 +107,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
   const [compactionThresholdInput, setCompactionThresholdInput] = useState("");
+  const [freshTrailCountInput, setFreshTrailCountInput] = useState("");
   const [agentPromptBaselines, setAgentPromptBaselines] = useState<AgentPromptBaseline[]>([]);
   const { mounted: themeMounted, resolvedTheme, setThemePreference, systemTheme, themePreference } = useTheme();
   const { activeRooms, archivedRooms, activeRoomId, hydrated } = useWorkspaceRoomsState();
@@ -168,6 +187,21 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
 
     return [...thresholds][0] ?? DEFAULT_COMPACTION_TOKEN_THRESHOLD;
   }, [agentStates, agents]);
+  const globalFreshTrailCountValue = useMemo(() => {
+    if (agents.length === 0) {
+      return DEFAULT_COMPACTION_FRESH_TAIL_COUNT;
+    }
+
+    const counts = new Set(
+      agents.map((agent) => coerceCompactionFreshTailCount(agentStates[agent.id]?.settings.compactionFreshTailCount)),
+    );
+
+    if (counts.size !== 1) {
+      return MIXED_FRESH_TRAIL_COUNT_VALUE;
+    }
+
+    return [...counts][0] ?? DEFAULT_COMPACTION_FRESH_TAIL_COUNT;
+  }, [agentStates, agents]);
   const maxPromptOverheadTokens = useMemo(
     () => agentPromptBaselines.reduce((maxValue, baseline) => Math.max(maxValue, baseline.promptOverheadTokens), 0),
     [agentPromptBaselines],
@@ -231,6 +265,15 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
     },
     [agents, updateAgentSettings],
   );
+  const handleGlobalFreshTrailCountChange = useCallback(
+    (nextValue: number) => {
+      const nextCount = coerceCompactionFreshTailCount(nextValue);
+      for (const agent of agents) {
+        updateAgentSettings(agent.id, { compactionFreshTailCount: nextCount });
+      }
+    },
+    [agents, updateAgentSettings],
+  );
 
   useEffect(() => {
     if (globalCompactionThresholdValue === MIXED_COMPACTION_THRESHOLD_VALUE) {
@@ -240,6 +283,15 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
 
     setCompactionThresholdInput(formatCompactionThreshold(globalCompactionThresholdValue));
   }, [globalCompactionThresholdValue]);
+
+  useEffect(() => {
+    if (globalFreshTrailCountValue === MIXED_FRESH_TRAIL_COUNT_VALUE) {
+      setFreshTrailCountInput("");
+      return;
+    }
+
+    setFreshTrailCountInput(formatFreshTrailCount(globalFreshTrailCountValue));
+  }, [globalFreshTrailCountValue]);
 
   useEffect(() => {
     if (agents.length === 0) {
@@ -457,6 +509,30 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
                 }}
               />
               {compactionThresholdWarning ? <span className="topbar-inline-warning">{compactionThresholdWarning}</span> : null}
+            </label>
+            <label className="topbar-model-switcher" aria-label="统一设置压缩时保留的 fresh trail 消息数">
+              <span className="eyebrow-label">Fresh Trail</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                className="text-input topbar-model-select"
+                value={freshTrailCountInput}
+                placeholder={globalFreshTrailCountValue === MIXED_FRESH_TRAIL_COUNT_VALUE ? "当前不一致" : "0 表示不保留"}
+                onChange={(event) => setFreshTrailCountInput(event.target.value)}
+                onBlur={() => {
+                  const parsedValue = parseFreshTrailCountInput(freshTrailCountInput);
+                  if (parsedValue == null) {
+                    setFreshTrailCountInput(
+                      globalFreshTrailCountValue === MIXED_FRESH_TRAIL_COUNT_VALUE
+                        ? ""
+                        : formatFreshTrailCount(globalFreshTrailCountValue),
+                    );
+                    return;
+                  }
+
+                  handleGlobalFreshTrailCountChange(parsedValue);
+                }}
+              />
             </label>
             <div className="theme-toggle-cluster compact" role="group" aria-label="切换浅色和深色模式">
               {THEME_PREFERENCES.map((option) => (

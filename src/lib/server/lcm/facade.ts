@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { DEFAULT_COMPACTION_TOKEN_THRESHOLD } from "@/lib/chat/types";
+import { DEFAULT_COMPACTION_FRESH_TAIL_COUNT, DEFAULT_COMPACTION_TOKEN_THRESHOLD } from "@/lib/chat/types";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId, RoomMessageEmission, RoomSender, RoomToolActionUnion, ToolExecution } from "@/lib/chat/types";
 import { getLcmDatabase } from "./db";
 import { getLcmDbFeatures } from "./features";
@@ -16,7 +16,10 @@ export function getAgentSessionId(agentId: RoomAgentId): string {
 
 const LARGE_TEXT_THRESHOLD = 12_000;
 
-export async function getLcmStores(compactionTokenThreshold = DEFAULT_COMPACTION_TOKEN_THRESHOLD) {
+export async function getLcmStores(
+  compactionTokenThreshold = DEFAULT_COMPACTION_TOKEN_THRESHOLD,
+  compactionFreshTailCount = DEFAULT_COMPACTION_FRESH_TAIL_COUNT,
+) {
   const db = await getLcmDatabase();
   const features = getLcmDbFeatures(db);
   const conversationStore = new ConversationStore(db, features);
@@ -29,7 +32,7 @@ export async function getLcmStores(compactionTokenThreshold = DEFAULT_COMPACTION
     assembler: new ContextAssembler(conversationStore, summaryStore),
     compaction: new CompactionEngine(conversationStore, summaryStore, {
       fixedTokenThreshold: compactionTokenThreshold,
-      freshTailCount: 8,
+      freshTailCount: compactionFreshTailCount,
       leafMinFanout: 8,
       condensedMinFanout: 4,
       condensedMinFanoutHard: 2,
@@ -184,8 +187,9 @@ export async function compactAgentLcmContext(
   force?: boolean,
   summaryModel?: string,
   comparisonExtraTokens?: number,
+  freshTailCount?: number,
 ) {
-  const { conversationStore, compaction } = await getLcmStores(tokenThreshold);
+  const { conversationStore, compaction } = await getLcmStores(tokenThreshold, freshTailCount);
   const conversation = await conversationStore.getConversationBySessionKey(agentId);
   if (!conversation) {
     return null;

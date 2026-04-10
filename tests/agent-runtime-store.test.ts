@@ -112,8 +112,68 @@ async function seedConversation(runtimeStore: RuntimeStoreModule, agentId: "conc
   });
 }
 
+async function seedLongConversation(runtimeStore: RuntimeStoreModule, agentId: "concierge" | "researcher" | "operator", turns: number) {
+  for (let index = 0; index < turns; index += 1) {
+    const suffix = `${index + 1}`.padStart(2, "0");
+    await runtimeStore.appendPersistedHistoryMessage({
+      agentId,
+      message: {
+        role: "user",
+        content: [
+          "[Incoming Chat Room message]",
+          `Room ID: room-long-${suffix}`,
+          "Room Title: Long Room",
+          `Message ID: msg-long-user-${suffix}`,
+          "Sender ID: local-user",
+          "Sender Name: You",
+          "Sender Role: participant",
+          "Visible room message:",
+          `Long planning request ${suffix}: ${"deploy rollback checklist and escalation notes ".repeat(220)}`,
+        ].join("\n"),
+      },
+    });
+    await runtimeStore.appendPersistedHistoryMessage({
+      agentId,
+      message: {
+        role: "assistant",
+        content: [
+          "[Shared agent room action summary]",
+          "",
+          `Visible room deliveries: - to room room-long-${suffix}: [answer / completed / final] ${"Acknowledged long planning context and captured action items. ".repeat(180)}`,
+          "",
+          `Tool results used: - workspace_read: ${"timeline evidence and follow-up references ".repeat(150)}`,
+        ].join("\n"),
+      },
+    });
+  }
+}
+
+async function setAgentCompactionSettings(
+  workspaceStore: WorkspaceStoreModule,
+  agentId: "concierge" | "researcher" | "operator",
+  patch: { compactionTokenThreshold?: number; compactionFreshTailCount?: number; systemPrompt?: string },
+) {
+  const workspace = await workspaceStore.loadWorkspaceEnvelope();
+  await workspaceStore.saveWorkspaceState({
+    expectedVersion: workspace.version,
+    state: {
+      ...workspace.state,
+      agentStates: {
+        ...workspace.state.agentStates,
+        [agentId]: {
+          ...workspace.state.agentStates[agentId],
+          settings: {
+            ...workspace.state.agentStates[agentId]?.settings,
+            ...patch,
+          },
+        },
+      },
+    },
+  });
+}
+
 test("compactPersistedAgentRuntime stores an LLM-style structured summary when available", async () => {
-  await withRuntimeModules(async (runtimeStore, agentCompaction) => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
     const agentId = "concierge";
     const structuredSummary = [
       "## 关键结论",
@@ -135,6 +195,7 @@ test("compactPersistedAgentRuntime stores an LLM-style structured summary when a
     ].join("\n");
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => structuredSummary);
+    await setAgentCompactionSettings(workspaceStore, agentId, { compactionFreshTailCount: 0 });
     await seedConversation(runtimeStore, agentId);
 
     const result = await runtimeStore.compactPersistedAgentRuntime({
@@ -161,11 +222,12 @@ test("compactPersistedAgentRuntime stores an LLM-style structured summary when a
 });
 
 test("compactPersistedAgentRuntime falls back to the local rule summary when LLM compaction fails", async () => {
-  await withRuntimeModules(async (runtimeStore, agentCompaction) => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
     const agentId = "researcher";
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => {
       throw new Error("Synthetic compaction failure");
     });
+    await setAgentCompactionSettings(workspaceStore, agentId, { compactionFreshTailCount: 0 });
     await seedConversation(runtimeStore, agentId);
 
     const result = await runtimeStore.compactPersistedAgentRuntime({
@@ -185,7 +247,7 @@ test("compactPersistedAgentRuntime falls back to the local rule summary when LLM
 });
 
 test("compactPersistedAgentRuntime prunes image-bearing messages when they fall outside the kept window", async () => {
-  await withRuntimeModules(async (runtimeStore, agentCompaction) => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
     const agentId = "operator";
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => {
       return [
@@ -206,6 +268,7 @@ test("compactPersistedAgentRuntime prunes image-bearing messages when they fall 
       ].join("\n");
     });
 
+    await setAgentCompactionSettings(workspaceStore, agentId, { compactionFreshTailCount: 0 });
     await runtimeStore.appendPersistedHistoryMessage({
       agentId,
       message: {
@@ -265,23 +328,9 @@ test("compactPersistedAgentRuntime records skipped automatic checks when no comp
 test("compactPersistedAgentRuntime includes system prompt overhead in automatic checks", async () => {
   await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
     const agentId = "concierge";
-    const workspace = await workspaceStore.loadWorkspaceEnvelope();
-    await workspaceStore.saveWorkspaceState({
-      expectedVersion: workspace.version,
-      state: {
-        ...workspace.state,
-        agentStates: {
-          ...workspace.state.agentStates,
-          [agentId]: {
-            ...workspace.state.agentStates[agentId],
-            settings: {
-              ...workspace.state.agentStates[agentId]?.settings,
-              compactionTokenThreshold: 2_200,
-              systemPrompt: "System policy ".repeat(900),
-            },
-          },
-        },
-      },
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionTokenThreshold: 2_200,
+      systemPrompt: "System policy ".repeat(900),
     });
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => "## 关键结论\n- 因为完整请求超过阈值，所以执行压缩。\n\n## 待办事项\n- 无\n\n## 约束与规则\n- 无\n\n## 用户仍在等待的问题\n- 无\n\n## 精确标识符\n- 无");
     await seedConversation(runtimeStore, agentId);
@@ -295,6 +344,56 @@ test("compactPersistedAgentRuntime includes system prompt overhead in automatic 
 
     assert.equal(result.compacted, true);
     assert.equal((await runtimeStore.loadPersistedAgentRuntime(agentId)).compactions[0]?.reason, "automatic");
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
+test("compactPersistedAgentRuntime allows fresh trail count to be set to zero", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => "## 关键结论\n- 无\n\n## 待办事项\n- 无\n\n## 约束与规则\n- 无\n\n## 用户仍在等待的问题\n- 无\n\n## 精确标识符\n- 无");
+    await setAgentCompactionSettings(workspaceStore, agentId, { compactionFreshTailCount: 0 });
+    await seedConversation(runtimeStore, agentId);
+
+    const result = await runtimeStore.compactPersistedAgentRuntime({
+      agentId,
+      reason: "manual",
+      force: true,
+    });
+
+    assert.equal(result.compacted, true);
+    assert.equal(result.history.length, 1);
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
+test("compactPersistedAgentRuntime keeps compressing raw history after crossing the threshold", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "operator";
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => "## 关键结论\n- 长历史已被持续压缩。\n\n## 待办事项\n- 无\n\n## 约束与规则\n- 无\n\n## 用户仍在等待的问题\n- 无\n\n## 精确标识符\n- 无");
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionFreshTailCount: 0,
+      compactionTokenThreshold: 20_000,
+    });
+    await seedLongConversation(runtimeStore, agentId, 12);
+
+    const result = await runtimeStore.compactPersistedAgentRuntime({
+      agentId,
+      reason: "manual",
+      force: true,
+    });
+
+    assert.equal(result.compacted, true);
+    assert.ok(result.history.length >= 1);
+    assert.ok(
+      result.history.every(
+        (message) =>
+          !message.content.includes("[Incoming Chat Room message]")
+          && !message.content.includes("[Shared agent room action summary]"),
+      ),
+    );
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });
