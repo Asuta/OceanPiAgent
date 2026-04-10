@@ -5,6 +5,7 @@ import {
   getResponsesContinuationOrder,
   shouldFallbackToResponsesReplay,
 } from "@/lib/ai/provider-compat";
+import { ensureOpenAiFetchCompatibility } from "@/lib/ai/openai-fetch-compat";
 import { extractRoomMessagePreviewFromToolCallBlock } from "@/lib/ai/room-message-preview";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { resolvePiModel } from "@/lib/ai/pi-model-resolver";
@@ -660,6 +661,7 @@ async function runConversationAttempt(args: {
   continuationStrategy: ResponsesContinuationStrategy;
   sessionId?: string;
 }): Promise<RunConversationResult> {
+  ensureOpenAiFetchCompatibility(args.resolvedModel.compatibility.baseUrl);
   const responsesContinuation = args.continuationStrategy === "previous_response_id"
     ? resolveResponsesContinuationContext(args.messages, args.resolvedModel.compatibility)
     : null;
