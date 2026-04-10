@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { estimateAgentPromptTokens } from "./agent-prompt-token-estimate";
+import { generateCompactionSummary } from "./agent-compaction";
 import { clearAgentMemory } from "./agent-memory-store";
 import { loadWorkspaceEnvelope } from "./workspace-store";
 import {
@@ -14,6 +15,8 @@ import {
 } from "./lcm/facade";
 import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runtime-hooks";
 import {
+  type AssistantHistoryAssistantMessage,
+  type AssistantHistoryMessage,
   DEFAULT_COMPACTION_FRESH_TAIL_COUNT,
   DEFAULT_COMPACTION_TOKEN_THRESHOLD,
   coerceCompactionFreshTailCount,
@@ -21,6 +24,7 @@ import {
 } from "@/lib/chat/types";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
+import { estimateTokens } from "./lcm/estimate-tokens";
 
 export type CompactionMethod = "llm" | "rule_fallback" | "unknown";
 
@@ -40,6 +44,7 @@ export interface CompactionRecordDetails {
     | "no_eligible_leaf_chunk"
     | "leaf_pass_failed"
     | "no_condensation_candidate"
+    | "no_eligible_post_tool_prefix"
     | "compaction_failed";
   contextTokensAfter?: number;
   storedContextTokensAfter?: number;
@@ -59,7 +64,7 @@ export interface PersistedVisibleMessage {
 export interface CompactionRecord {
   id: string;
   createdAt: string;
-  reason: "automatic" | "manual";
+  reason: "post_turn" | "post_tool" | "manual";
   success: boolean;
   actionTaken: boolean;
   method: CompactionMethod;
@@ -87,6 +92,13 @@ export interface CompactRuntimeResult {
   compacted: boolean;
   record?: CompactionRecord;
   history: PersistedVisibleMessage[];
+}
+
+export interface PromptCompactionTransformResult {
+  compacted: boolean;
+  summaryText?: string;
+  keptStartIndex?: number;
+  record?: CompactionRecord;
 }
 
 const RUNTIME_ROOT = path.join(process.cwd(), ".oceanking", "agent-runtime");
@@ -157,14 +169,17 @@ function normalizeMessage(value: unknown): PersistedVisibleMessage | null {
 }
 
 function normalizeCompactionRecord(value: unknown): CompactionRecord | null {
-  if (!isRecord(value) || (value.reason !== "automatic" && value.reason !== "manual")) {
+  if (
+    !isRecord(value)
+    || (value.reason !== "automatic" && value.reason !== "post_turn" && value.reason !== "post_tool" && value.reason !== "manual")
+  ) {
     return null;
   }
 
   return {
     id: typeof value.id === "string" && value.id ? value.id : createUuid(),
     createdAt: typeof value.createdAt === "string" && value.createdAt ? value.createdAt : createTimestamp(),
-    reason: value.reason,
+    reason: value.reason === "automatic" ? "post_turn" : value.reason,
     success: typeof value.success === "boolean" ? value.success : true,
     actionTaken: typeof value.actionTaken === "boolean" ? value.actionTaken : true,
     method: value.method === "llm" || value.method === "rule_fallback" || value.method === "unknown" ? value.method : "unknown",
@@ -205,6 +220,7 @@ function normalizeCompactionRecord(value: unknown): CompactionRecord | null {
               || value.details.result === "no_eligible_leaf_chunk"
               || value.details.result === "leaf_pass_failed"
               || value.details.result === "no_condensation_candidate"
+              || value.details.result === "no_eligible_post_tool_prefix"
               || value.details.result === "compaction_failed"
                 ? value.details.result
                 : "compaction_failed",
@@ -236,6 +252,8 @@ function formatCompactionSkipReason(reason: CompactionRecordDetails["result"]): 
       return "找到了候选历史块，但叶子压缩阶段未生成结果";
     case "no_condensation_candidate":
       return "叶子压缩后仍超阈值，但没有可继续凝缩的摘要块";
+    case "no_eligible_post_tool_prefix":
+      return "tool 批次之前没有可压缩前缀";
     case "compacted":
       return "已执行压缩";
     case "compaction_failed":
@@ -294,6 +312,106 @@ function contentToText(content: unknown): string {
       .join("\n");
   }
   return JSON.stringify(content);
+}
+
+function estimateSnapshotContentTokens(message: AssistantHistoryMessage): number {
+  return estimateTokens(JSON.stringify(message.content));
+}
+
+function estimateSnapshotChars(message: AssistantHistoryMessage): number {
+  return JSON.stringify(message.content).length;
+}
+
+function estimateSnapshotHistoryChars(historyDelta: AssistantHistoryMessage[]): number {
+  return historyDelta.reduce((total, message) => total + estimateSnapshotChars(message), 0);
+}
+
+function estimateSnapshotHistoryContextTokens(historyDelta: AssistantHistoryMessage[]): number {
+  return historyDelta.reduce((total, message) => total + estimateSnapshotContentTokens(message), 0);
+}
+
+function assistantTextPartsToString(parts: AssistantHistoryAssistantMessage["content"]): string {
+  return parts
+    .flatMap((part) => {
+      if (part.type === "text") {
+        return [part.text];
+      }
+      if (part.type === "toolCall") {
+        return [`[Tool Call] ${part.name} ${JSON.stringify(part.arguments)}`];
+      }
+      return [];
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function snapshotToPersistedVisibleMessage(message: AssistantHistoryMessage): PersistedVisibleMessage | null {
+  if (message.role === "user") {
+    const content = typeof message.content === "string"
+      ? message.content
+      : message.content.map((part) => (part.type === "text" ? part.text : `[Image attachment: ${part.mimeType}]`)).join("\n");
+    return {
+      id: createUuid(),
+      role: "user",
+      content,
+      attachments: [],
+      createdAt: new Date(message.timestamp).toISOString(),
+    };
+  }
+
+  if (message.role === "assistant") {
+    return {
+      id: createUuid(),
+      role: "assistant",
+      content: assistantTextPartsToString(message.content),
+      attachments: [],
+      createdAt: new Date(message.timestamp).toISOString(),
+    };
+  }
+
+  return {
+    id: createUuid(),
+    role: "assistant",
+    content: `[Tool Result] ${message.toolName}\n${contentToText(message.content)}`,
+    attachments: [],
+    createdAt: new Date(message.timestamp).toISOString(),
+  };
+}
+
+function buildPromptHistoryFromSnapshots(historyDelta: AssistantHistoryMessage[]): Array<{ role: "user" | "assistant"; attachments?: MessageImageAttachment[] }> {
+  return historyDelta.flatMap((message) => (message.role === "toolResult" ? [] : [{ role: message.role, attachments: [] }]));
+}
+
+function findLatestToolBatchStartIndex(historyDelta: AssistantHistoryMessage[]): number {
+  for (let index = historyDelta.length - 1; index >= 0; index -= 1) {
+    const message = historyDelta[index];
+    if (message.role === "assistant" && message.content.some((part) => part.type === "toolCall")) {
+      return index;
+    }
+  }
+  return historyDelta.length;
+}
+
+function determinePostToolKeptStartIndex(historyDelta: AssistantHistoryMessage[], freshTailCount: number): number {
+  const toolBatchStartIndex = findLatestToolBatchStartIndex(historyDelta);
+  if (toolBatchStartIndex >= historyDelta.length) {
+    return historyDelta.length;
+  }
+
+  if (freshTailCount <= 0) {
+    return toolBatchStartIndex;
+  }
+
+  const rawIndexes = historyDelta
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => message.role !== "toolResult")
+    .map(({ index }) => index);
+  if (rawIndexes.length === 0) {
+    return toolBatchStartIndex;
+  }
+
+  const tailStartIndex = rawIndexes[Math.max(0, rawIndexes.length - freshTailCount)] ?? toolBatchStartIndex;
+  return Math.min(toolBatchStartIndex, tailStartIndex);
 }
 
 function extractSummaryText(content: string): string {
@@ -355,6 +473,13 @@ async function saveStoredRuntime(runtime: PersistedAgentRuntime): Promise<void> 
     JSON.stringify(runtime, null, 2),
     "utf8",
   );
+}
+
+async function appendCompactionRecord(agentId: RoomAgentId, record: CompactionRecord): Promise<void> {
+  const runtime = await readStoredRuntime(agentId);
+  runtime.compactions = [...runtime.compactions, record].slice(-MAX_COMPACTION_RECORDS);
+  runtime.updatedAt = createTimestamp();
+  await saveStoredRuntime(runtime);
 }
 
 export async function loadPersistedAgentRuntime(agentId: RoomAgentId): Promise<PersistedAgentRuntime> {
@@ -431,7 +556,7 @@ export async function finalizePersistedAgentRuntime(args: {
 
 export async function compactPersistedAgentRuntime(args: {
   agentId: RoomAgentId;
-  reason: "automatic" | "manual";
+  reason: "post_turn" | "manual";
   force?: boolean;
 }): Promise<CompactRuntimeResult> {
   const runtimeBefore = await readStoredRuntime(args.agentId);
@@ -497,10 +622,7 @@ export async function compactPersistedAgentRuntime(args: {
       charsAfter: charsBefore,
       details: baseDetails,
     };
-    const runtime = await readStoredRuntime(args.agentId);
-    runtime.compactions = [...runtime.compactions, failureRecord].slice(-MAX_COMPACTION_RECORDS);
-    runtime.updatedAt = createTimestamp();
-    await saveStoredRuntime(runtime);
+    await appendCompactionRecord(args.agentId, failureRecord);
     return {
       compacted: false,
       record: failureRecord,
@@ -519,7 +641,6 @@ export async function compactPersistedAgentRuntime(args: {
   }).catch(() => null);
   const storedContextTokensAfter = lcmCompaction.tokensAfter;
   if (!lcmCompaction.actionTaken) {
-    const runtime = await readStoredRuntime(args.agentId);
     const result = (lcmCompaction.skipReason ?? "no_eligible_leaf_chunk") as CompactionRecordDetails["result"];
     const skippedRecord: CompactionRecord = {
       id: createUuid(),
@@ -548,9 +669,7 @@ export async function compactPersistedAgentRuntime(args: {
         totalEstimatedTokensAfter: promptTokenEstimateAfter?.totalTokens,
       },
     };
-    runtime.compactions = [...runtime.compactions, skippedRecord].slice(-MAX_COMPACTION_RECORDS);
-    runtime.updatedAt = createTimestamp();
-    await saveStoredRuntime(runtime);
+    await appendCompactionRecord(args.agentId, skippedRecord);
     return { compacted: false, record: skippedRecord, history: lcmHistory };
   }
 
@@ -614,6 +733,224 @@ export async function compactPersistedAgentRuntime(args: {
     record,
     history: lcmHistory,
   };
+}
+
+export async function compactPromptHistoryAfterToolBatch(args: {
+  agentId: RoomAgentId;
+  historyDelta: AssistantHistoryMessage[];
+  resolvedModel: string;
+}): Promise<PromptCompactionTransformResult> {
+  const charsBefore = estimateSnapshotHistoryChars(args.historyDelta);
+  const contextTokens = estimateSnapshotHistoryContextTokens(args.historyDelta);
+  const thresholdTokens = await resolveAgentCompactionTokenThreshold(args.agentId);
+  const freshTailCount = await resolveAgentCompactionFreshTailCount(args.agentId);
+  const keptStartIndex = determinePostToolKeptStartIndex(args.historyDelta, freshTailCount);
+  const promptTokenEstimate = await estimateAgentPromptTokens({
+    agentId: args.agentId,
+    contextTokens,
+    history: buildPromptHistoryFromSnapshots(args.historyDelta),
+  }).catch(() => ({
+    totalTokens: contextTokens,
+    contextTokens,
+    promptOverheadTokens: 0,
+    systemPromptTokens: 0,
+    toolSchemaTokens: 0,
+    attachmentTokens: 0,
+  }));
+  const baseDetails: CompactionRecordDetails = {
+    thresholdTokens,
+    contextTokens: promptTokenEstimate.contextTokens,
+    storedContextTokens: promptTokenEstimate.contextTokens,
+    promptOverheadTokens: promptTokenEstimate.promptOverheadTokens,
+    totalEstimatedTokens: promptTokenEstimate.totalTokens,
+    systemPromptTokens: promptTokenEstimate.systemPromptTokens,
+    toolSchemaTokens: promptTokenEstimate.toolSchemaTokens,
+    attachmentTokens: promptTokenEstimate.attachmentTokens,
+    result: "compaction_failed",
+  };
+
+  if (promptTokenEstimate.totalTokens <= thresholdTokens) {
+    const record: CompactionRecord = {
+      id: createUuid(),
+      createdAt: createTimestamp(),
+      reason: "post_tool",
+      success: true,
+      actionTaken: false,
+      method: "unknown",
+      summary: [
+        `tool 批次后压缩检查结果：${formatCompactionSkipReason("below_threshold")}。`,
+        `阈值 ${thresholdTokens} tokens。`,
+        `当前上下文 ${promptTokenEstimate.contextTokens} tokens。`,
+        `系统/工具等固定开销 ${promptTokenEstimate.promptOverheadTokens} tokens（system ${promptTokenEstimate.systemPromptTokens} / tools ${promptTokenEstimate.toolSchemaTokens} / attachments ${promptTokenEstimate.attachmentTokens}）。`,
+        `总估算 ${promptTokenEstimate.totalTokens} tokens。`,
+      ].join("\n"),
+      prunedMessages: 0,
+      keptMessages: args.historyDelta.length,
+      charsBefore,
+      charsAfter: charsBefore,
+      details: {
+        ...baseDetails,
+        result: "below_threshold",
+        tokensAfter: promptTokenEstimate.contextTokens,
+        contextTokensAfter: promptTokenEstimate.contextTokens,
+        storedContextTokensAfter: promptTokenEstimate.contextTokens,
+        totalEstimatedTokensAfter: promptTokenEstimate.totalTokens,
+      },
+    };
+    await appendCompactionRecord(args.agentId, record);
+    return { compacted: false, record };
+  }
+
+  if (keptStartIndex <= 0 || keptStartIndex >= args.historyDelta.length) {
+    const record: CompactionRecord = {
+      id: createUuid(),
+      createdAt: createTimestamp(),
+      reason: "post_tool",
+      success: true,
+      actionTaken: false,
+      method: "unknown",
+      summary: [
+        `tool 批次后压缩检查结果：${formatCompactionSkipReason("no_eligible_post_tool_prefix")}。`,
+        `阈值 ${thresholdTokens} tokens。`,
+        `当前上下文 ${promptTokenEstimate.contextTokens} tokens。`,
+        `总估算 ${promptTokenEstimate.totalTokens} tokens。`,
+      ].join("\n"),
+      prunedMessages: 0,
+      keptMessages: args.historyDelta.length,
+      charsBefore,
+      charsAfter: charsBefore,
+      details: {
+        ...baseDetails,
+        result: "no_eligible_post_tool_prefix",
+        tokensAfter: promptTokenEstimate.contextTokens,
+        contextTokensAfter: promptTokenEstimate.contextTokens,
+        storedContextTokensAfter: promptTokenEstimate.contextTokens,
+        totalEstimatedTokensAfter: promptTokenEstimate.totalTokens,
+      },
+    };
+    await appendCompactionRecord(args.agentId, record);
+    return { compacted: false, record };
+  }
+
+  const prunedSnapshots = args.historyDelta.slice(0, keptStartIndex);
+  const keptSnapshots = args.historyDelta.slice(keptStartIndex);
+  const compactionMessages = prunedSnapshots
+    .map((message) => snapshotToPersistedVisibleMessage(message))
+    .filter((message): message is PersistedVisibleMessage => Boolean(message));
+  if (compactionMessages.length === 0) {
+    const record: CompactionRecord = {
+      id: createUuid(),
+      createdAt: createTimestamp(),
+      reason: "post_tool",
+      success: true,
+      actionTaken: false,
+      method: "unknown",
+      summary: [
+        `tool 批次后压缩检查结果：${formatCompactionSkipReason("no_eligible_post_tool_prefix")}。`,
+        `阈值 ${thresholdTokens} tokens。`,
+        `当前上下文 ${promptTokenEstimate.contextTokens} tokens。`,
+        `总估算 ${promptTokenEstimate.totalTokens} tokens。`,
+      ].join("\n"),
+      prunedMessages: 0,
+      keptMessages: args.historyDelta.length,
+      charsBefore,
+      charsAfter: charsBefore,
+      details: {
+        ...baseDetails,
+        result: "no_eligible_post_tool_prefix",
+        tokensAfter: promptTokenEstimate.contextTokens,
+        contextTokensAfter: promptTokenEstimate.contextTokens,
+        storedContextTokensAfter: promptTokenEstimate.contextTokens,
+        totalEstimatedTokensAfter: promptTokenEstimate.totalTokens,
+      },
+    };
+    await appendCompactionRecord(args.agentId, record);
+    return { compacted: false, record };
+  }
+
+  try {
+    const summaryText = await generateCompactionSummary({
+      agentId: args.agentId,
+      messages: compactionMessages,
+      resolvedModel: args.resolvedModel,
+    });
+    const method: CompactionMethod = summaryText.includes("[Compacted shared history summary]") || summaryText.includes("[压缩后的共享历史摘要]")
+      ? "rule_fallback"
+      : "llm";
+    const compactedSnapshots: AssistantHistoryMessage[] = [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: summaryText }],
+        api: "internal",
+        provider: "internal",
+        model: args.resolvedModel || "internal/post_tool_compaction",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: args.historyDelta[Math.max(0, keptStartIndex - 1)]?.timestamp ?? Date.now(),
+      } satisfies AssistantHistoryAssistantMessage,
+      ...keptSnapshots,
+    ];
+    const charsAfter = estimateSnapshotHistoryChars(compactedSnapshots);
+    const contextTokensAfter = estimateSnapshotHistoryContextTokens(compactedSnapshots);
+    const promptTokenEstimateAfter = await estimateAgentPromptTokens({
+      agentId: args.agentId,
+      contextTokens: contextTokensAfter,
+      history: buildPromptHistoryFromSnapshots(compactedSnapshots),
+    }).catch(() => null);
+    const record: CompactionRecord = {
+      id: createUuid(),
+      createdAt: createTimestamp(),
+      reason: "post_tool",
+      success: true,
+      actionTaken: true,
+      method,
+      summary: summaryText,
+      prunedMessages: prunedSnapshots.length,
+      keptMessages: compactedSnapshots.length,
+      charsBefore,
+      charsAfter,
+      details: {
+        ...baseDetails,
+        result: "compacted",
+        tokensAfter: contextTokensAfter,
+        contextTokensAfter,
+        storedContextTokensAfter: contextTokensAfter,
+        totalEstimatedTokensAfter: promptTokenEstimateAfter?.totalTokens ?? contextTokensAfter,
+      },
+    };
+    await appendCompactionRecord(args.agentId, record);
+    return {
+      compacted: true,
+      summaryText,
+      keptStartIndex,
+      record,
+    };
+  } catch (error) {
+    const record: CompactionRecord = {
+      id: createUuid(),
+      createdAt: createTimestamp(),
+      reason: "post_tool",
+      success: false,
+      actionTaken: false,
+      method: "unknown",
+      summary: "",
+      ...(error instanceof Error ? { error: error.message } : {}),
+      prunedMessages: 0,
+      keptMessages: args.historyDelta.length,
+      charsBefore,
+      charsAfter: charsBefore,
+      details: baseDetails,
+    };
+    await appendCompactionRecord(args.agentId, record);
+    return { compacted: false, record };
+  }
 }
 
 export async function resetPersistedAgentRuntime(agentId: RoomAgentId): Promise<void> {

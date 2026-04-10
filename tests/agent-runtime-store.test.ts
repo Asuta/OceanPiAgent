@@ -304,20 +304,20 @@ test("compactPersistedAgentRuntime prunes image-bearing messages when they fall 
   });
 });
 
-test("compactPersistedAgentRuntime records skipped automatic checks when no compaction is needed", async () => {
+test("compactPersistedAgentRuntime records skipped post-turn checks when no compaction is needed", async () => {
   await withRuntimeModules(async (runtimeStore) => {
     const agentId = "concierge";
     await seedConversation(runtimeStore, agentId);
 
     const result = await runtimeStore.compactPersistedAgentRuntime({
       agentId,
-      reason: "automatic",
+      reason: "post_turn",
     });
     const persisted = await runtimeStore.loadPersistedAgentRuntime(agentId);
 
     assert.equal(result.compacted, false);
     assert.equal(persisted.compactions.length, 1);
-    assert.equal(persisted.compactions[0]?.reason, "automatic");
+    assert.equal(persisted.compactions[0]?.reason, "post_turn");
     assert.equal(persisted.compactions[0]?.success, true);
     assert.equal(persisted.compactions[0]?.actionTaken, false);
     assert.ok((persisted.compactions[0]?.summary ?? "").includes("阈值"));
@@ -325,7 +325,7 @@ test("compactPersistedAgentRuntime records skipped automatic checks when no comp
   });
 });
 
-test("compactPersistedAgentRuntime includes system prompt overhead in automatic checks", async () => {
+test("compactPersistedAgentRuntime includes system prompt overhead in post-turn checks", async () => {
   await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
     const agentId = "concierge";
     await setAgentCompactionSettings(workspaceStore, agentId, {
@@ -339,11 +339,11 @@ test("compactPersistedAgentRuntime includes system prompt overhead in automatic 
 
     const result = await runtimeStore.compactPersistedAgentRuntime({
       agentId,
-      reason: "automatic",
+      reason: "post_turn",
     });
 
     assert.equal(result.compacted, true);
-    assert.equal((await runtimeStore.loadPersistedAgentRuntime(agentId)).compactions[0]?.reason, "automatic");
+    assert.equal((await runtimeStore.loadPersistedAgentRuntime(agentId)).compactions[0]?.reason, "post_turn");
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });
@@ -394,6 +394,66 @@ test("compactPersistedAgentRuntime keeps compressing raw history after crossing 
           && !message.content.includes("[Shared agent room action summary]"),
       ),
     );
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
+test("compactPromptHistoryAfterToolBatch compresses only the prefix before the latest tool batch", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionTokenThreshold: 1_000,
+      compactionFreshTailCount: 0,
+    });
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => "## 关键结论\n- 已压缩 earlier context。\n\n## 待办事项\n- 无\n\n## 约束与规则\n- 无\n\n## 用户仍在等待的问题\n- 无\n\n## 精确标识符\n- 无");
+
+    const result = await runtimeStore.compactPromptHistoryAfterToolBatch({
+      agentId,
+      resolvedModel: "fake-provider/fake-model",
+      historyDelta: [
+        {
+          role: "user",
+          content: "Earlier room request: " + "context ".repeat(220),
+          timestamp: 1,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Earlier answer: " + "details ".repeat(180) }],
+          api: "responses",
+          provider: "openai",
+          model: "fake-model",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "stop",
+          timestamp: 2,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "tool-1", name: "web_fetch", arguments: { url: "https://example.com" } }],
+          api: "responses",
+          provider: "openai",
+          model: "fake-model",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "toolUse",
+          timestamp: 3,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool-1",
+          toolName: "web_fetch",
+          content: [{ type: "text", text: "tool output " + "result ".repeat(140) }],
+          isError: false,
+          timestamp: 4,
+        },
+      ],
+    });
+    const persisted = await runtimeStore.loadPersistedAgentRuntime(agentId);
+
+    assert.equal(result.compacted, true);
+    assert.equal(result.keptStartIndex, 2);
+    assert.match(result.summaryText ?? "", /^## 关键结论/m);
+    assert.ok(persisted.compactions.some((record) => record.reason === "post_tool"));
+    assert.equal(persisted.compactions.at(-1)?.details?.result, "compacted");
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });

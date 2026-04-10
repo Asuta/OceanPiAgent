@@ -63,7 +63,7 @@ interface CompactionLogEntry {
   id: string;
   createdAt: string;
   agentLabel: string;
-  trigger: "automatic" | "manual";
+  trigger: "post_turn" | "post_tool" | "manual";
   success: boolean;
   actionTaken: boolean;
   method: "llm" | "rule_fallback" | "unknown";
@@ -234,6 +234,8 @@ function getCompactionResultLabel(result: string | undefined) {
       return "叶子压缩未产出结果";
     case "no_condensation_candidate":
       return "无可继续凝缩摘要块";
+    case "no_eligible_post_tool_prefix":
+      return "当前 tool 批次前没有可压前缀";
     case "compacted":
       return "已压缩";
     case "compaction_failed":
@@ -250,6 +252,17 @@ function formatIdList(values: string[] | number[], emptyLabel = "无") {
 
   const rendered = values.slice(0, 6).join(", ");
   return values.length > 6 ? `${rendered} 等 ${values.length} 项` : rendered;
+}
+
+function getCompactionTriggerLabel(trigger: CompactionLogEntry["trigger"]) {
+  switch (trigger) {
+    case "post_tool":
+      return "post_tool";
+    case "post_turn":
+      return "post_turn";
+    default:
+      return "manual";
+  }
 }
 
 function getModelLabel(turn: AgentRoomTurn) {
@@ -348,7 +361,13 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
               id: typeof record.id === "string" && record.id ? record.id : `${agentId}-${index}`,
               createdAt: typeof record.createdAt === "string" ? record.createdAt : "",
               agentLabel,
-              trigger: (record.reason === "automatic" ? "automatic" : "manual") as CompactionLogEntry["trigger"],
+               trigger: (
+                 record.reason === "post_tool"
+                   ? "post_tool"
+                   : record.reason === "post_turn" || record.reason === "automatic"
+                     ? "post_turn"
+                     : "manual"
+               ) as CompactionLogEntry["trigger"],
               success: typeof record.success === "boolean" ? record.success : true,
               actionTaken: typeof record.actionTaken === "boolean" ? record.actionTaken : true,
               method: (record.method === "llm" || record.method === "rule_fallback" || record.method === "unknown" ? record.method : "unknown") as CompactionLogEntry["method"],
@@ -897,7 +916,7 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
                         <span>{formatTimestamp(entry.createdAt)}</span>
                       </div>
                       <div className="meta-chip-row compact">
-                        <span className="meta-chip subtle">{entry.trigger}</span>
+                        <span className="meta-chip subtle">{getCompactionTriggerLabel(entry.trigger)}</span>
                         <span className="meta-chip subtle">{entry.success ? (entry.actionTaken ? "success" : "skipped") : "failed"}</span>
                         <span className="meta-chip subtle">
                           {entry.method === "llm" ? "大模型摘要" : entry.method === "rule_fallback" ? "程序回退摘要" : "方式未知"}

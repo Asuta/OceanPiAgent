@@ -3,6 +3,7 @@ import { buildRoomBridgePrompt } from "@/lib/ai/system-prompt";
 import type {
   AgentInfoCard,
   AgentRoomTurn,
+  AssistantHistoryMessage,
   AssistantMessageMeta,
   AttachedRoomDefinition,
   ChatSettings,
@@ -36,6 +37,7 @@ import {
   type AgentRunStartupTiming,
   startAgentRoomRun,
 } from "@/lib/server/agent-room-sessions";
+import { compactPromptHistoryAfterToolBatch } from "@/lib/server/agent-runtime-store";
 import {
   createAttachedRoomDefinition,
   createKnownAgentCards,
@@ -382,6 +384,7 @@ type RoomConversationRunner = (
     signal?: AbortSignal;
     toolContext?: RoomToolContext;
     modelConfigOverrides?: ModelConfigExecutionOverrides;
+    postToolBatchCompaction?: (args: { historyDelta: AssistantHistoryMessage[]; signal?: AbortSignal }) => Promise<{ summaryText: string; keptStartIndex: number } | null>;
   },
   ) => Promise<{
   assistantText: string;
@@ -707,6 +710,26 @@ export async function runPreparedRoomTurn(
         signal: runContext.signal,
         toolContext,
         modelConfigOverrides: args.modelConfigOverrides,
+        postToolBatchCompaction: async ({ historyDelta, signal }) => {
+          void signal;
+          if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
+            return null;
+          }
+
+          const compaction = await compactPromptHistoryAfterToolBatch({
+            agentId: args.agent.id,
+            historyDelta,
+            resolvedModel: runContext.resolvedModel || args.settings.model,
+          });
+          if (!compaction.compacted || !compaction.summaryText || typeof compaction.keptStartIndex !== "number") {
+            return null;
+          }
+
+          return {
+            summaryText: compaction.summaryText,
+            keptStartIndex: compaction.keptStartIndex,
+          };
+        },
       },
     );
 

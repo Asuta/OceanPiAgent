@@ -5,6 +5,7 @@ import {
   getResponsesContinuationOrder,
   shouldFallbackToResponsesReplay,
 } from "@/lib/ai/provider-compat";
+import { ensureOpenAiFetchCompatibility } from "@/lib/ai/openai-fetch-compat";
 import { extractRoomMessagePreviewFromToolCallBlock } from "@/lib/ai/room-message-preview";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { resolvePiModel } from "@/lib/ai/pi-model-resolver";
@@ -83,6 +84,16 @@ interface StreamConversationCallbacks {
   onRoomMessagePreview?: (preview: RoomMessagePreviewEmission) => void;
 }
 
+interface PostToolBatchCompactionContext {
+  historyDelta: AssistantHistoryMessage[];
+  signal?: AbortSignal;
+}
+
+interface PostToolBatchCompactionResult {
+  summaryText: string;
+  keptStartIndex: number;
+}
+
 interface ConversationOptions {
   toolScope?: ToolScope;
   systemPromptOverride?: string;
@@ -90,6 +101,7 @@ interface ConversationOptions {
   signal?: AbortSignal;
   toolContext?: RoomToolContext;
   modelConfigOverrides?: ModelConfigExecutionOverrides;
+  postToolBatchCompaction?: (context: PostToolBatchCompactionContext) => Promise<PostToolBatchCompactionResult | null>;
 }
 
 class ConversationExecutionError extends Error {
@@ -105,11 +117,12 @@ class ConversationExecutionError extends Error {
 function resolveConversationOptions(options?: ConversationOptions): {
   toolScope: ToolScope;
   systemPromptOverride: string;
-    maxToolLoopSteps: number;
-    signal?: AbortSignal;
-    toolContext?: RoomToolContext;
-    modelConfigOverrides?: ModelConfigExecutionOverrides;
-  } {
+  maxToolLoopSteps: number;
+  signal?: AbortSignal;
+  toolContext?: RoomToolContext;
+  modelConfigOverrides?: ModelConfigExecutionOverrides;
+  postToolBatchCompaction?: ConversationOptions["postToolBatchCompaction"];
+} {
   return {
     toolScope: options?.toolScope || "default",
     systemPromptOverride: options?.systemPromptOverride || "",
@@ -117,6 +130,7 @@ function resolveConversationOptions(options?: ConversationOptions): {
     signal: options?.signal,
     toolContext: options?.toolContext,
     modelConfigOverrides: options?.modelConfigOverrides,
+    postToolBatchCompaction: options?.postToolBatchCompaction,
   };
 }
 
@@ -142,6 +156,23 @@ function createUsage() {
       cacheWrite: 0,
       total: 0,
     },
+  };
+}
+
+function createSyntheticSummaryMessage(args: {
+  summaryText: string;
+  resolvedModel: ReturnType<typeof resolvePiModel>;
+  timestamp: number;
+}): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text: args.summaryText }],
+    api: args.resolvedModel.model.api,
+    provider: args.resolvedModel.model.provider,
+    model: args.resolvedModel.model.id,
+    usage: createUsage(),
+    stopReason: "stop",
+    timestamp: args.timestamp,
   };
 }
 
@@ -660,6 +691,7 @@ async function runConversationAttempt(args: {
   continuationStrategy: ResponsesContinuationStrategy;
   sessionId?: string;
 }): Promise<RunConversationResult> {
+  ensureOpenAiFetchCompatibility(args.resolvedModel.compatibility.baseUrl);
   const responsesContinuation = args.continuationStrategy === "previous_response_id"
     ? resolveResponsesContinuationContext(args.messages, args.resolvedModel.compatibility)
     : null;
@@ -674,6 +706,7 @@ async function runConversationAttempt(args: {
         },
       }
     : args.resolvedModel.model;
+  let pendingPostToolBatchCompaction = false;
 
   const agent = new Agent({
     initialState: {
@@ -694,6 +727,36 @@ async function runConversationAttempt(args: {
         previousResponseId: responsesContinuation?.previousResponseId,
         systemPrompt: args.systemPromptText,
       }),
+    transformContext: async (messages: Message[], signal?: AbortSignal) => {
+      if (!pendingPostToolBatchCompaction || !args.resolvedOptions.postToolBatchCompaction) {
+        return messages;
+      }
+
+      pendingPostToolBatchCompaction = false;
+      const historyDelta = snapshotHistoryDelta(messages);
+      if (!historyDelta?.length) {
+        return messages;
+      }
+
+      const compaction = await args.resolvedOptions.postToolBatchCompaction({ historyDelta, signal });
+      if (!compaction || !compaction.summaryText.trim()) {
+        return messages;
+      }
+
+      const keptStartIndex = Math.max(0, Math.min(messages.length, compaction.keptStartIndex));
+      if (keptStartIndex <= 0 || keptStartIndex >= messages.length) {
+        return messages;
+      }
+
+      return [
+        createSyntheticSummaryMessage({
+          summaryText: compaction.summaryText,
+          resolvedModel: args.resolvedModel,
+          timestamp: messages[keptStartIndex - 1]?.timestamp ?? Date.now(),
+        }),
+        ...messages.slice(keptStartIndex),
+      ];
+    },
   });
 
   const startingMessageCount = agent.state.messages.length;
@@ -781,6 +844,9 @@ async function runConversationAttempt(args: {
 
     if (event.type === "turn_end" && isAssistantMessage(event.message)) {
       const hasToolCalls = event.message.content.some((item) => item.type === "toolCall");
+      if (event.toolResults.length > 0) {
+        pendingPostToolBatchCompaction = true;
+      }
       if (!hasToolCalls) {
         clearFinalRoomDeliveryShortCircuit();
         return;

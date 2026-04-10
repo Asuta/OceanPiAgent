@@ -10,7 +10,7 @@ import {
 } from "./pi-model-catalog";
 import type { ApiFormat, ChatSettings, ModelConfigExecutionOverrides, ProviderCompatibility, ThinkingLevel } from "@/lib/chat/types";
 
-const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
+const DEFAULT_OPENAI_MODEL = "gpt-5.4";
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 
 const ZERO_COST = {

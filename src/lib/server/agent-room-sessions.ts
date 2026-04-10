@@ -167,7 +167,7 @@ function scheduleAutomaticAgentCompaction(agentId: RoomAgentId): void {
     try {
       const compactResult = await compactPersistedAgentRuntime({
         agentId,
-        reason: "automatic",
+        reason: "post_turn",
       }).catch(() => null);
       if (compactResult?.compacted) {
         await syncCompactedHistoryToIdleSession(agentId, compactResult.history);
@@ -641,7 +641,7 @@ export function clearAgentRoomRun(agentId: RoomAgentId, requestId: string): void
   session.updatedAt = createTimestamp();
 }
 
-export async function compactAgentRoomSession(agentId: RoomAgentId, reason: "automatic" | "manual" = "manual") {
+export async function compactAgentRoomSession(agentId: RoomAgentId, reason: "post_turn" | "manual" = "manual") {
   await hydrateSession(agentId);
   const result = await runAgentCompactionTask(agentId, () => compactPersistedAgentRuntime({
     agentId,

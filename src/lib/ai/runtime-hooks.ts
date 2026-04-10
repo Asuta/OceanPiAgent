@@ -30,7 +30,7 @@ export interface AfterToolCallHookArgs extends BeforeToolCallHookArgs {
 
 export interface BeforeCompactionHookArgs {
   agentId: RoomAgentId;
-  reason: "automatic" | "manual";
+  reason: "post_turn" | "post_tool" | "manual";
   historyCount: number;
   charsBefore: number;
 }
