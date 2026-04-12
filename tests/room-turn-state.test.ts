@@ -52,6 +52,8 @@ function createAgentState(turns: AgentRoomTurn[]): AgentSharedState {
       model: "gpt-5.4",
       systemPrompt: "",
       providerMode: "auto",
+      memoryBackend: "sqlite-fts",
+      compactionTokenThreshold: 200_000,
       maxToolLoopSteps: 8,
       thinkingLevel: "off",
       enabledSkillIds: [],

@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_TOOL_LOOP_STEPS, type ChatSettings, type RoomAgentId } from "@/lib/chat/types";
+import { DEFAULT_COMPACTION_TOKEN_THRESHOLD, DEFAULT_MAX_TOOL_LOOP_STEPS, type ChatSettings, type RoomAgentId } from "@/lib/chat/types";
 import { formatMessageForTranscript, summarizeImageAttachments } from "@/lib/chat/message-attachments";
 import type { PersistedVisibleMessage } from "./agent-runtime-store";
 
@@ -121,6 +121,7 @@ function createCompactionSettings(resolvedModel: string): ChatSettings {
     systemPrompt: "",
     providerMode: "auto",
     memoryBackend: "sqlite-fts",
+    compactionTokenThreshold: DEFAULT_COMPACTION_TOKEN_THRESHOLD,
     maxToolLoopSteps: DEFAULT_MAX_TOOL_LOOP_STEPS,
     thinkingLevel: "low",
     enabledSkillIds: [],

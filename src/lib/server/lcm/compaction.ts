@@ -22,7 +22,7 @@ export interface CompactionResult {
 }
 
 export interface CompactionConfig {
-  contextThreshold: number;
+  fixedTokenThreshold: number;
   freshTailCount: number;
   leafMinFanout: number;
   condensedMinFanout: number;
@@ -38,7 +38,7 @@ export interface CompactionConfig {
 type CompactionLevel = "normal" | "aggressive" | "fallback";
 type CompactionPass = "leaf" | "condensed";
 type PassResult = { summaryId: string; level: CompactionLevel; content?: string };
-type LeafChunkSelection = { items: ContextItemRecord[]; rawTokensOutsideTail: number; threshold: number };
+type LeafChunkSelection = { items: ContextItemRecord[] };
 type CondensedChunkSelection = { items: ContextItemRecord[]; summaryTokens: number };
 type CondensedPhaseCandidate = { targetDepth: number; chunk: CondensedChunkSelection };
 
@@ -107,25 +107,16 @@ export class CompactionEngine {
   ) {}
 
   async evaluate(conversationId: number, tokenBudget: number, observedTokenCount?: number): Promise<CompactionDecision> {
+    void tokenBudget;
     const storedTokens = await this.summaryStore.getContextTokenCount(conversationId);
     const liveTokens = typeof observedTokenCount === "number" && Number.isFinite(observedTokenCount) && observedTokenCount > 0 ? Math.floor(observedTokenCount) : 0;
     const currentTokens = Math.max(storedTokens, liveTokens);
-    const threshold = Math.floor(this.config.contextThreshold * tokenBudget);
+    const threshold = this.resolveFixedTokenThreshold();
 
     if (currentTokens > threshold) {
       return { shouldCompact: true, reason: "threshold", currentTokens, threshold };
     }
     return { shouldCompact: false, reason: "none", currentTokens, threshold };
-  }
-
-  async evaluateLeafTrigger(conversationId: number): Promise<{ shouldCompact: boolean; rawTokensOutsideTail: number; threshold: number }> {
-    const rawTokensOutsideTail = await this.countRawTokensOutsideFreshTail(conversationId);
-    const threshold = this.resolveLeafChunkTokens();
-    return {
-      shouldCompact: rawTokensOutsideTail >= threshold,
-      rawTokensOutsideTail,
-      threshold,
-    };
   }
 
   async compact(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string }): Promise<CompactionResult> {
@@ -134,10 +125,9 @@ export class CompactionEngine {
 
   async compactLeaf(input: { conversationId: number; tokenBudget: number; force?: boolean; previousSummaryContent?: string; summaryModel?: string }): Promise<CompactionResult> {
     const tokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-    const threshold = Math.floor(this.config.contextThreshold * input.tokenBudget);
-    const leafTrigger = await this.evaluateLeafTrigger(input.conversationId);
+    const threshold = this.resolveFixedTokenThreshold();
 
-    if (!input.force && tokensBefore <= threshold && !leafTrigger.shouldCompact) {
+    if (!input.force && tokensBefore <= threshold) {
       return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false };
     }
 
@@ -215,10 +205,9 @@ export class CompactionEngine {
 
   async compactFullSweep(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string }): Promise<CompactionResult> {
     const tokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-    const threshold = Math.floor(this.config.contextThreshold * input.tokenBudget);
-    const leafTrigger = await this.evaluateLeafTrigger(input.conversationId);
+    const threshold = this.resolveFixedTokenThreshold();
 
-    if (!input.force && tokensBefore <= threshold && !leafTrigger.shouldCompact) {
+    if (!input.force && tokensBefore <= threshold) {
       return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false };
     }
 
@@ -365,6 +354,10 @@ export class CompactionEngine {
     return DEFAULT_LEAF_CHUNK_TOKENS;
   }
 
+  private resolveFixedTokenThreshold(): number {
+    return Math.max(1, Math.floor(this.config.fixedTokenThreshold));
+  }
+
   private resolveFreshTailCount(): number {
     if (typeof this.config.freshTailCount === "number" && Number.isFinite(this.config.freshTailCount) && this.config.freshTailCount > 0) {
       return Math.floor(this.config.freshTailCount);
@@ -401,39 +394,10 @@ export class CompactionEngine {
     return estimateTokens(message.content);
   }
 
-  private async countRawTokensOutsideFreshTail(conversationId: number): Promise<number> {
-    const contextItems = await this.summaryStore.getContextItems(conversationId);
-    const freshTailOrdinal = this.resolveFreshTailOrdinal(contextItems);
-    let rawTokens = 0;
-
-    for (const item of contextItems) {
-      if (item.ordinal >= freshTailOrdinal) {
-        break;
-      }
-      if (item.itemType !== "message" || item.messageId == null) {
-        continue;
-      }
-      rawTokens += await this.getMessageTokenCount(item.messageId);
-    }
-
-    return rawTokens;
-  }
-
   private async selectOldestLeafChunk(conversationId: number, force?: boolean): Promise<LeafChunkSelection> {
     const contextItems = await this.summaryStore.getContextItems(conversationId);
     const freshTailOrdinal = this.resolveFreshTailOrdinal(contextItems, force);
     const threshold = this.resolveLeafChunkTokens();
-
-    let rawTokensOutsideTail = 0;
-    for (const item of contextItems) {
-      if (item.ordinal >= freshTailOrdinal) {
-        break;
-      }
-      if (item.itemType !== "message" || item.messageId == null) {
-        continue;
-      }
-      rawTokensOutsideTail += await this.getMessageTokenCount(item.messageId);
-    }
 
     const chunk: ContextItemRecord[] = [];
     let chunkTokens = 0;
@@ -464,7 +428,7 @@ export class CompactionEngine {
       }
     }
 
-    return { items: chunk, rawTokensOutsideTail, threshold };
+    return { items: chunk };
   }
 
   private async resolvePriorLeafSummaryContext(conversationId: number, messageItems: ContextItemRecord[]): Promise<string | undefined> {

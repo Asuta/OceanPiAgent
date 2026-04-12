@@ -109,6 +109,7 @@ async function seedConversation(runtimeStore: RuntimeStoreModule, agentId: "conc
   });
 }
 
+
 test("compactPersistedAgentRuntime stores an LLM-style structured summary when available", async () => {
   await withRuntimeModules(async (runtimeStore, agentCompaction) => {
     const agentId = "concierge";

@@ -100,6 +100,7 @@ function createAgentState(turns: AgentRoomTurn[]): AgentSharedState {
       systemPrompt: "",
       providerMode: "auto",
       memoryBackend: "sqlite-fts",
+      compactionTokenThreshold: 200_000,
       maxToolLoopSteps: 8,
       thinkingLevel: "off",
       enabledSkillIds: [],

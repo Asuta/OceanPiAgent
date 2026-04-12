@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { clearAgentMemory } from "./agent-memory-store";
+import { loadWorkspaceEnvelope } from "./workspace-store";
 import {
   appendAgentLcmMessage,
   assembleAgentLcmContext,
@@ -10,6 +11,7 @@ import {
   getOrCreateAgentConversation,
 } from "./lcm/facade";
 import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runtime-hooks";
+import { DEFAULT_COMPACTION_TOKEN_THRESHOLD, coerceCompactionTokenThreshold } from "@/lib/chat/types";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 
@@ -238,6 +240,11 @@ async function assembleLcmPersistedHistory(agentId: RoomAgentId): Promise<Persis
   }));
 }
 
+async function resolveAgentCompactionTokenThreshold(agentId: RoomAgentId): Promise<number> {
+  const workspace = await loadWorkspaceEnvelope().catch(() => null);
+  return coerceCompactionTokenThreshold(workspace?.state.agentStates[agentId]?.settings.compactionTokenThreshold ?? DEFAULT_COMPACTION_TOKEN_THRESHOLD);
+}
+
 async function saveStoredRuntime(runtime: PersistedAgentRuntime): Promise<void> {
   await ensureRuntimeDir();
   await writeFile(
@@ -318,7 +325,8 @@ export async function compactPersistedAgentRuntime(args: {
 }): Promise<CompactRuntimeResult> {
   const runtimeBefore = await readStoredRuntime(args.agentId);
   const charsBefore = estimateHistoryChars(runtimeBefore.history);
-  const lcmCompaction = await compactAgentLcmContext(args.agentId, 20_000, args.force).catch(() => null);
+  const compactionTokenThreshold = await resolveAgentCompactionTokenThreshold(args.agentId);
+  const lcmCompaction = await compactAgentLcmContext(args.agentId, compactionTokenThreshold, args.force).catch(() => null);
   if (!lcmCompaction) {
     return {
       compacted: false,

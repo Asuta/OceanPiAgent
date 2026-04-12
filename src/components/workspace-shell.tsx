@@ -6,10 +6,12 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { applyModelConfigToSettings } from "@/lib/ai/model-configs";
 import { useTheme } from "@/components/theme-provider";
 import { formatTimestamp, getRoomPreview, useWorkspaceActions, useWorkspaceAgentsState, useWorkspaceRoomsState } from "@/components/workspace-provider";
+import { coerceCompactionTokenThreshold, DEFAULT_COMPACTION_TOKEN_THRESHOLD } from "@/lib/chat/types";
 import type { ModelConfig, ThinkingLevel } from "@/lib/chat/types";
 import { RESOLVED_THEME_LABELS, THEME_OPTION_LABELS, THEME_PREFERENCES } from "@/lib/theme";
 
 const MIXED_MODEL_CONFIG_VALUE = "__mixed_model_config__";
+const MIXED_COMPACTION_THRESHOLD_VALUE = "__mixed_compaction_threshold__";
 const MIXED_THINKING_LEVEL_VALUE = "__mixed_thinking_level__";
 const EMPTY_MODEL_CONFIG_VALUE = "";
 const THINKING_LEVEL_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
@@ -20,6 +22,34 @@ const THINKING_LEVEL_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
   { value: "high", label: "High" },
   { value: "xhigh", label: "XHigh" },
 ];
+
+function formatCompactionThreshold(value: number): string {
+  if (value >= 1000 && value % 1000 === 0) {
+    return `${value / 1000}K`;
+  }
+
+  return `${value}`;
+}
+
+function parseCompactionThresholdInput(value: string): number | null {
+  const normalized = value.trim().toLowerCase().replace(/,/g, "");
+  if (!normalized) {
+    return null;
+  }
+
+  const match = normalized.match(/^(\d+(?:\.\d+)?)\s*([km]?)$/);
+  if (!match) {
+    return null;
+  }
+
+  const numericValue = Number(match[1]);
+  if (!Number.isFinite(numericValue)) {
+    return null;
+  }
+
+  const multiplier = match[2] === "m" ? 1_000_000 : match[2] === "k" ? 1_000 : 1;
+  return Math.round(numericValue * multiplier);
+}
 
 function PinIcon({ pinned }: { pinned: boolean }) {
   return (
@@ -68,6 +98,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
+  const [compactionThresholdInput, setCompactionThresholdInput] = useState("");
   const { mounted: themeMounted, resolvedTheme, setThemePreference, systemTheme, themePreference } = useTheme();
   const { activeRooms, archivedRooms, activeRoomId, hydrated } = useWorkspaceRoomsState();
   const { agents, agentStates } = useWorkspaceAgentsState();
@@ -131,6 +162,21 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
 
     return modelConfigs.find((modelConfig) => modelConfig.id === globalModelConfigValue) ?? null;
   }, [globalModelConfigValue, modelConfigs]);
+  const globalCompactionThresholdValue = useMemo(() => {
+    if (agents.length === 0) {
+      return DEFAULT_COMPACTION_TOKEN_THRESHOLD;
+    }
+
+    const thresholds = new Set(
+      agents.map((agent) => coerceCompactionTokenThreshold(agentStates[agent.id]?.settings.compactionTokenThreshold)),
+    );
+
+    if (thresholds.size !== 1) {
+      return MIXED_COMPACTION_THRESHOLD_VALUE;
+    }
+
+    return [...thresholds][0] ?? DEFAULT_COMPACTION_TOKEN_THRESHOLD;
+  }, [agentStates, agents]);
   const globalThinkingLevelValue = useMemo(() => {
     if (agents.length === 0) {
       return "off";
@@ -178,6 +224,15 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
     },
     [agentStates, agents, modelConfigs, updateAgentSettings],
   );
+  const handleGlobalCompactionThresholdChange = useCallback(
+    (nextValue: number) => {
+      const nextThreshold = coerceCompactionTokenThreshold(nextValue);
+      for (const agent of agents) {
+        updateAgentSettings(agent.id, { compactionTokenThreshold: nextThreshold });
+      }
+    },
+    [agents, updateAgentSettings],
+  );
   const handleGlobalThinkingLevelChange = useCallback(
     (nextThinkingLevel: string) => {
       for (const agent of agents) {
@@ -191,6 +246,15 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
     },
     [agentStates, agents, updateAgentSettings],
   );
+
+  useEffect(() => {
+    if (globalCompactionThresholdValue === MIXED_COMPACTION_THRESHOLD_VALUE) {
+      setCompactionThresholdInput("");
+      return;
+    }
+
+    setCompactionThresholdInput(formatCompactionThreshold(globalCompactionThresholdValue));
+  }, [globalCompactionThresholdValue]);
 
   return (
     <div className={`app-shell${sidebarOpen ? " sidebar-open" : ""}`}>
@@ -381,6 +445,30 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
                   </option>
                 ))}
               </select>
+            </label>
+            <label className="topbar-model-switcher" aria-label="统一设置自动压缩阈值">
+              <span className="eyebrow-label">压缩阈值</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                className="text-input topbar-model-select"
+                value={compactionThresholdInput}
+                placeholder={globalCompactionThresholdValue === MIXED_COMPACTION_THRESHOLD_VALUE ? "当前不一致" : "例如 200K"}
+                onChange={(event) => setCompactionThresholdInput(event.target.value)}
+                onBlur={() => {
+                  const parsedValue = parseCompactionThresholdInput(compactionThresholdInput);
+                  if (parsedValue == null) {
+                    setCompactionThresholdInput(
+                      globalCompactionThresholdValue === MIXED_COMPACTION_THRESHOLD_VALUE
+                        ? ""
+                        : formatCompactionThreshold(globalCompactionThresholdValue),
+                    );
+                    return;
+                  }
+
+                  handleGlobalCompactionThresholdChange(parsedValue);
+                }}
+              />
             </label>
             <div className="theme-toggle-cluster compact" role="group" aria-label="切换浅色和深色模式">
               {THEME_PREFERENCES.map((option) => (

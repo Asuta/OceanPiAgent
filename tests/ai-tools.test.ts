@@ -41,6 +41,7 @@ function createRoomToolContext(agentId = "concierge", memoryBackend: ChatSetting
         systemPrompt: "",
         providerMode: "auto",
         memoryBackend,
+        compactionTokenThreshold: 200_000,
         maxToolLoopSteps: 6,
         thinkingLevel: "off",
         enabledSkillIds: [],

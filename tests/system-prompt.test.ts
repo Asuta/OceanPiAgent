@@ -28,6 +28,7 @@ function createSettings(overrides?: Partial<ChatSettings>): ChatSettings {
     systemPrompt: "",
     providerMode: "auto",
     memoryBackend: "sqlite-fts",
+    compactionTokenThreshold: 200_000,
     maxToolLoopSteps: 8,
     thinkingLevel: "off",
     enabledSkillIds: [],

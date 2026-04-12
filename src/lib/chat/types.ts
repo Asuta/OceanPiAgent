@@ -19,6 +19,9 @@ export const MEMORY_BACKENDS = ["sqlite-fts", "markdown"] as const;
 export type MemoryBackendId = (typeof MEMORY_BACKENDS)[number];
 
 export const DEFAULT_MAX_TOOL_LOOP_STEPS = 200;
+export const DEFAULT_COMPACTION_TOKEN_THRESHOLD = 200_000;
+export const MIN_COMPACTION_TOKEN_THRESHOLD = 1_000;
+export const MAX_COMPACTION_TOKEN_THRESHOLD = 2_000_000;
 
 export const MIN_MAX_TOOL_LOOP_STEPS = 1;
 
@@ -516,6 +519,7 @@ export interface ChatSettings {
   systemPrompt: string;
   providerMode: ProviderMode;
   memoryBackend: MemoryBackendId;
+  compactionTokenThreshold: number;
   maxToolLoopSteps: number;
   thinkingLevel: ThinkingLevel;
   enabledSkillIds: string[];
@@ -700,6 +704,15 @@ export function coerceMaxToolLoopSteps(value: unknown): number {
 
   const rounded = Math.round(value);
   return Math.min(MAX_MAX_TOOL_LOOP_STEPS, Math.max(MIN_MAX_TOOL_LOOP_STEPS, rounded));
+}
+
+export function coerceCompactionTokenThreshold(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_COMPACTION_TOKEN_THRESHOLD;
+  }
+
+  const rounded = Math.round(value);
+  return Math.min(MAX_COMPACTION_TOKEN_THRESHOLD, Math.max(MIN_COMPACTION_TOKEN_THRESHOLD, rounded));
 }
 
 export function coerceThinkingLevel(value: unknown): ThinkingLevel {
