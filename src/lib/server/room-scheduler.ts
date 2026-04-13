@@ -20,7 +20,7 @@ import {
 } from "@/lib/server/room-runner";
 import { applyRoomTurnToWorkspace } from "@/lib/server/workspace-state";
 import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store";
-import { loadWorkspaceEnvelope, mutateWorkspace } from "@/lib/server/workspace-store";
+import { loadWorkspaceEnvelope, mutateWorkspace, mutateWorkspaceWithResult } from "@/lib/server/workspace-store";
 import { hasSupersedingVisibleActivity, planSchedulerRound } from "@/lib/server/room-scheduler-planner";
 import { createUuid } from "@/lib/utils/uuid";
 
@@ -41,6 +41,7 @@ export interface RoomSchedulerRunHooks {
 interface RoomSchedulerDependencies {
   loadWorkspaceEnvelope: typeof loadWorkspaceEnvelope;
   mutateWorkspace: typeof mutateWorkspace;
+  mutateWorkspaceWithResult?: typeof mutateWorkspaceWithResult;
   runRoomTurnNonStreaming: typeof runRoomTurnNonStreaming;
   runPreparedRoomTurn: typeof runPreparedRoomTurn;
   buildPreparedInputFromWorkspace: typeof buildPreparedInputFromWorkspace;
@@ -403,6 +404,8 @@ export async function runRoomSchedulerNow(
   const deps: RoomSchedulerDependencies = {
     loadWorkspaceEnvelope: overrides.loadWorkspaceEnvelope ?? loadWorkspaceEnvelope,
     mutateWorkspace: overrides.mutateWorkspace ?? mutateWorkspace,
+    mutateWorkspaceWithResult: overrides.mutateWorkspaceWithResult
+      ?? (overrides.loadWorkspaceEnvelope || overrides.mutateWorkspace ? undefined : mutateWorkspaceWithResult),
     runRoomTurnNonStreaming: overrides.runRoomTurnNonStreaming ?? runRoomTurnNonStreaming,
     runPreparedRoomTurn: overrides.runPreparedRoomTurn ?? runPreparedRoomTurn,
     buildPreparedInputFromWorkspace: overrides.buildPreparedInputFromWorkspace ?? buildPreparedInputFromWorkspace,
@@ -525,16 +528,47 @@ export async function runRoomSchedulerNow(
       throw error;
     }
 
-    const latestWorkspace = await deps.loadWorkspaceEnvelope();
-    const latestRoom = latestWorkspace.state.rooms.find((entry) => entry.id === roomId);
-    if (!latestRoom) {
-      return;
-    }
+    result.markTimingPhase?.("scheduler_execute_turn_returned", {
+      turnStatus: result.turn.status,
+      emittedMessageCount: result.emittedMessages.length,
+      receiptUpdateCount: result.receiptUpdates.length,
+      roomActionCount: result.roomActions.length,
+    });
 
-    const wasSuperseded = hasSupersedingVisibleActivity(latestRoom, roundPlan.participant.id, roundPlan.cutoffSeq);
     let roomRunningAfterTurn = result.turn.status === "completed";
-    if (!wasSuperseded) {
-      await deps.mutateWorkspace((workspace) => {
+    let roomExistsAfterTurn = true;
+    let wasSuperseded = false;
+    if (deps.mutateWorkspaceWithResult) {
+      result.markTimingPhase?.("scheduler_apply_workspace_result_start");
+      const mutation = await deps.mutateWorkspaceWithResult((workspace, envelope) => {
+        result.markTimingPhase?.("scheduler_post_turn_workspace_loaded", {
+          workspaceVersion: envelope.version,
+        });
+        const currentRoom = workspace.rooms.find((entry) => entry.id === roomId);
+        if (!currentRoom) {
+          return {
+            result: {
+              roomExistsAfterTurn: false,
+              wasSuperseded: false,
+              roomRunningAfterTurn: false,
+            },
+          };
+        }
+
+        wasSuperseded = hasSupersedingVisibleActivity(currentRoom, roundPlan.participant.id, roundPlan.cutoffSeq);
+        if (wasSuperseded) {
+          return {
+            result: {
+              roomExistsAfterTurn: true,
+              wasSuperseded: true,
+              roomRunningAfterTurn,
+            },
+          };
+        }
+
+        result.markTimingPhase?.("scheduler_apply_room_turn_start", {
+          workspaceVersion: envelope.version,
+        });
         const appliedWorkspace = applyRoomTurnToWorkspace({
           workspace,
           agentId: targetAgentId,
@@ -546,32 +580,43 @@ export async function runRoomSchedulerNow(
           receiptUpdates: result.receiptUpdates,
           roomActions: result.roomActions,
         });
+        result.markTimingPhase?.("scheduler_apply_room_turn_end", {
+          emittedMessageCount: result.emittedMessages.length,
+          receiptUpdateCount: result.receiptUpdates.length,
+          roomActionCount: result.roomActions.length,
+        });
 
-        return updateRoom(appliedWorkspace, roomId, (currentRoom) => {
+        const nextState = updateRoom(appliedWorkspace, roomId, (updatedRoom) => {
           const nextRoom: RoomSession = {
-            ...currentRoom,
+            ...updatedRoom,
             scheduler: {
-              ...currentRoom.scheduler,
+              ...updatedRoom.scheduler,
               status: "running",
               activeParticipantId: null,
               nextAgentParticipantId: roundPlan.nextAfterParticipantId,
               roundCount: dispatchedRounds,
               agentCursorByParticipantId: {
-                ...currentRoom.scheduler.agentCursorByParticipantId,
+                ...updatedRoom.scheduler.agentCursorByParticipantId,
                 [roundPlan.participant.id]: Math.max(
-                  currentRoom.scheduler.agentCursorByParticipantId[roundPlan.participant.id] ?? 0,
+                  updatedRoom.scheduler.agentCursorByParticipantId[roundPlan.participant.id] ?? 0,
                   roundPlan.cutoffSeq,
                 ),
               },
               agentReceiptRevisionByParticipantId: {
-                ...currentRoom.scheduler.agentReceiptRevisionByParticipantId,
-                [roundPlan.participant.id]: currentRoom.receiptRevision,
+                ...updatedRoom.scheduler.agentReceiptRevisionByParticipantId,
+                [roundPlan.participant.id]: updatedRoom.receiptRevision,
               },
             },
             updatedAt: createTimestamp(),
           };
 
+          result.markTimingPhase?.("scheduler_compute_room_running_start", {
+            nextParticipantId: roundPlan.nextAfterParticipantId,
+          });
           roomRunningAfterTurn = result.turn.status === "completed" && shouldKeepRoomRunningAfterAppliedTurn(nextRoom);
+          result.markTimingPhase?.("scheduler_compute_room_running_end", {
+            roomRunningAfterTurn,
+          });
           if (roomRunningAfterTurn) {
             return nextRoom;
           }
@@ -585,15 +630,149 @@ export async function runRoomSchedulerNow(
             },
           };
         });
-      });
 
-      if (hooks.onTurnDone) {
-        await hooks.onTurnDone(result, roomRunningAfterTurn);
+        return {
+          state: nextState,
+          result: {
+            roomExistsAfterTurn: true,
+            wasSuperseded: false,
+            roomRunningAfterTurn,
+          },
+        };
+      }, {
+        deferPatchBroadcast: true,
+      });
+      roomExistsAfterTurn = mutation.result.roomExistsAfterTurn;
+      wasSuperseded = mutation.result.wasSuperseded;
+      roomRunningAfterTurn = mutation.result.roomRunningAfterTurn;
+      result.markTimingPhase?.("scheduler_apply_workspace_result_end", {
+        roomRunningAfterTurn,
+        wasSuperseded,
+        workspaceVersion: mutation.envelope.version,
+      });
+      if (!roomExistsAfterTurn) {
+        result.markTimingPhase?.("scheduler_post_turn_room_missing");
+        return;
+      }
+    } else {
+      result.markTimingPhase?.("scheduler_post_turn_load_workspace_start");
+      const latestWorkspace = await deps.loadWorkspaceEnvelope();
+      result.markTimingPhase?.("scheduler_post_turn_load_workspace_end", {
+        workspaceVersion: latestWorkspace.version,
+      });
+      const latestRoom = latestWorkspace.state.rooms.find((entry) => entry.id === roomId);
+      if (!latestRoom) {
+        result.markTimingPhase?.("scheduler_post_turn_room_missing");
+        return;
       }
 
+      wasSuperseded = hasSupersedingVisibleActivity(latestRoom, roundPlan.participant.id, roundPlan.cutoffSeq);
+      if (!wasSuperseded) {
+        result.markTimingPhase?.("scheduler_apply_workspace_result_start", {
+          latestWorkspaceVersion: latestWorkspace.version,
+        });
+        await deps.mutateWorkspace((workspace) => {
+          result.markTimingPhase?.("scheduler_apply_room_turn_start", {
+            workspaceVersionHint: latestWorkspace.version,
+          });
+          const appliedWorkspace = applyRoomTurnToWorkspace({
+            workspace,
+            agentId: targetAgentId,
+            targetRoomId: roomId,
+            turn: result.turn,
+            resolvedModel: result.resolvedModel,
+            compatibility: result.compatibility,
+            emittedMessages: result.emittedMessages,
+            receiptUpdates: result.receiptUpdates,
+            roomActions: result.roomActions,
+          });
+          result.markTimingPhase?.("scheduler_apply_room_turn_end", {
+            emittedMessageCount: result.emittedMessages.length,
+            receiptUpdateCount: result.receiptUpdates.length,
+            roomActionCount: result.roomActions.length,
+          });
+
+          return updateRoom(appliedWorkspace, roomId, (currentRoom) => {
+            const nextRoom: RoomSession = {
+              ...currentRoom,
+              scheduler: {
+                ...currentRoom.scheduler,
+                status: "running",
+                activeParticipantId: null,
+                nextAgentParticipantId: roundPlan.nextAfterParticipantId,
+                roundCount: dispatchedRounds,
+                agentCursorByParticipantId: {
+                  ...currentRoom.scheduler.agentCursorByParticipantId,
+                  [roundPlan.participant.id]: Math.max(
+                    currentRoom.scheduler.agentCursorByParticipantId[roundPlan.participant.id] ?? 0,
+                    roundPlan.cutoffSeq,
+                  ),
+                },
+                agentReceiptRevisionByParticipantId: {
+                  ...currentRoom.scheduler.agentReceiptRevisionByParticipantId,
+                  [roundPlan.participant.id]: currentRoom.receiptRevision,
+                },
+              },
+              updatedAt: createTimestamp(),
+            };
+
+            result.markTimingPhase?.("scheduler_compute_room_running_start", {
+              nextParticipantId: roundPlan.nextAfterParticipantId,
+            });
+            roomRunningAfterTurn = result.turn.status === "completed" && shouldKeepRoomRunningAfterAppliedTurn(nextRoom);
+            result.markTimingPhase?.("scheduler_compute_room_running_end", {
+              roomRunningAfterTurn,
+            });
+            if (roomRunningAfterTurn) {
+              return nextRoom;
+            }
+
+            return {
+              ...nextRoom,
+              scheduler: {
+                ...nextRoom.scheduler,
+                status: "idle",
+                roundCount: 0,
+              },
+            };
+          });
+        });
+        result.markTimingPhase?.("scheduler_apply_workspace_result_end", {
+          roomRunningAfterTurn,
+        });
+      }
+    }
+
+    if (!wasSuperseded) {
+
+      if (hooks.onTurnDone) {
+        result.markTimingPhase?.("scheduler_on_turn_done_start", {
+          roomRunningAfterTurn,
+        });
+        await hooks.onTurnDone(result, roomRunningAfterTurn);
+        result.markTimingPhase?.("scheduler_on_turn_done_end", {
+          roomRunningAfterTurn,
+        });
+      }
+
+      result.markTimingPhase?.("scheduler_deliver_bound_messages_start", {
+        emittedMessageCount: result.emittedMessages.length,
+      });
       await deps.deliverBoundRoomMessages(result.emittedMessages);
+      result.markTimingPhase?.("scheduler_deliver_bound_messages_end", {
+        emittedMessageCount: result.emittedMessages.length,
+      });
     } else if (hooks.onTurnDone) {
+      result.markTimingPhase?.("scheduler_turn_superseded", {
+        roomRunningAfterTurn,
+      });
+      result.markTimingPhase?.("scheduler_on_turn_done_start", {
+        roomRunningAfterTurn,
+      });
       await hooks.onTurnDone(result, roomRunningAfterTurn);
+      result.markTimingPhase?.("scheduler_on_turn_done_end", {
+        roomRunningAfterTurn,
+      });
     }
 
     for (const additionalRoomId of collectAdditionalRoomIds(result.emittedMessages, roomId)) {
@@ -601,8 +780,15 @@ export async function runRoomSchedulerNow(
     }
 
     if (!roomRunningAfterTurn) {
+      result.markTimingPhase?.("scheduler_turn_cycle_finished", {
+        roomRunningAfterTurn,
+      });
       return;
     }
+
+    result.markTimingPhase?.("scheduler_turn_cycle_continues", {
+      roomRunningAfterTurn,
+    });
   }
 }
 

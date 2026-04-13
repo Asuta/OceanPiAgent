@@ -16,6 +16,7 @@ const WORKSPACE_FILE = path.join(WORKSPACE_ROOT, "state.json");
 
 declare global {
   var __oceankingWorkspaceWriteQueue: Promise<void> | undefined;
+  var __oceankingWorkspaceBroadcastQueue: Promise<void> | undefined;
   var __oceankingWorkspaceSubscribers: Map<string, (event: WorkspaceStreamEvent) => void> | undefined;
 }
 
@@ -75,13 +76,26 @@ export async function loadWorkspaceEnvelope(): Promise<WorkspaceEnvelope> {
 
 async function writeWorkspaceEnvelope(envelope: WorkspaceEnvelope): Promise<void> {
   await ensureWorkspaceDir();
-  await writeFile(WORKSPACE_FILE, JSON.stringify(envelope, null, 2), "utf8");
+  await writeFile(WORKSPACE_FILE, JSON.stringify(envelope), "utf8");
 }
 
 function broadcastWorkspaceEvent(event: WorkspaceStreamEvent): void {
   for (const listener of workspaceSubscribers.values()) {
     listener(event);
   }
+}
+
+function queueWorkspaceEvent(eventFactory: () => WorkspaceStreamEvent): void {
+  const previous = globalThis.__oceankingWorkspaceBroadcastQueue ?? Promise.resolve();
+  const current = previous
+    .catch(() => undefined)
+    .then(() => {
+      broadcastWorkspaceEvent(eventFactory());
+    });
+  globalThis.__oceankingWorkspaceBroadcastQueue = current;
+  void current.catch(() => {
+    // Best-effort event broadcast only.
+  });
 }
 
 export function subscribeWorkspaceEvents(listener: (event: WorkspaceStreamEvent) => void): () => void {
@@ -156,5 +170,55 @@ export async function mutateWorkspace(
       patch: createWorkspaceStatePatch(current.state, nextEnvelope.state),
     });
     return nextEnvelope;
+  });
+}
+
+export async function mutateWorkspaceWithResult<TResult>(
+  mutator: (state: RoomWorkspaceState, envelope: WorkspaceEnvelope) => {
+    state?: RoomWorkspaceState;
+    result: TResult;
+  } | Promise<{
+    state?: RoomWorkspaceState;
+    result: TResult;
+  }>,
+  options?: {
+    deferPatchBroadcast?: boolean;
+  },
+): Promise<{
+  envelope: WorkspaceEnvelope;
+  result: TResult;
+}> {
+  return withWorkspaceWriteLock(async () => {
+    const current = await loadWorkspaceEnvelope();
+    const outcome = await mutator(current.state, current);
+    if (typeof outcome.state === "undefined") {
+      return {
+        envelope: current,
+        result: outcome.result,
+      };
+    }
+
+    const nextState = roomWorkspaceStateSchema.parse(outcome.state);
+    const nextEnvelope: WorkspaceEnvelope = {
+      version: current.version + 1,
+      updatedAt: createTimestamp(),
+      state: nextState,
+    };
+    await writeWorkspaceEnvelope(nextEnvelope);
+    const eventFactory = () => ({
+      type: "patch" as const,
+      version: nextEnvelope.version,
+      updatedAt: nextEnvelope.updatedAt,
+      patch: createWorkspaceStatePatch(current.state, nextEnvelope.state),
+    });
+    if (options?.deferPatchBroadcast) {
+      queueWorkspaceEvent(eventFactory);
+    } else {
+      broadcastWorkspaceEvent(eventFactory());
+    }
+    return {
+      envelope: nextEnvelope,
+      result: outcome.result,
+    };
   });
 }

@@ -78,11 +78,17 @@ export async function POST(request: Request) {
                 emitEvent({ type: "message-receipt", update });
               },
               onTurnDone: (result, roomRunning) => {
+                result.markTimingPhase?.("rooms_stream_done_emit_start", {
+                  roomRunning,
+                });
                 emitEvent({
                   type: "done",
                   turn: result.turn,
                   resolvedModel: result.resolvedModel,
                   compatibility: result.compatibility,
+                  roomRunning,
+                });
+                result.markTimingPhase?.("rooms_stream_done_emit_end", {
                   roomRunning,
                 });
               },

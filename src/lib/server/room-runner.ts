@@ -489,6 +489,8 @@ export interface RunRoomTurnInput {
 
 export interface RunRoomTurnResult extends RoomChatResponseBody {
   roomActions: RoomToolActionUnion[];
+  requestId?: string;
+  markTimingPhase?: (phase: string, details?: Record<string, unknown>) => void;
 }
 
 export interface RoomTurnCallbacks {
@@ -836,6 +838,8 @@ export async function runPreparedRoomTurn(
       emittedMessages: completedState.emittedMessages,
       receiptUpdates: completedState.receiptUpdates,
       roomActions: completedState.roomActions,
+      requestId: runContext.requestId,
+      markTimingPhase: (phase, details) => tailTrace.mark(phase, details),
     };
   } catch (error) {
     clearAgentRoomRun(args.agent.id, runContext.requestId);
