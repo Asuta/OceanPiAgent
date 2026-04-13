@@ -209,7 +209,7 @@ test("runRoomSchedulerNow emits streaming callbacks for each scheduled turn", as
 
   const streamedTurns: string[] = [];
   const streamedDeltas: string[] = [];
-  const streamedDone: string[] = [];
+  const streamedDone: Array<{ agentId: string; roomRunning: boolean }> = [];
   const loadWorkspaceEnvelope = async () => ({
     version: 1,
     updatedAt: new Date().toISOString(),
@@ -321,14 +321,17 @@ test("runRoomSchedulerNow emits streaming callbacks for each scheduled turn", as
     onTextDelta: (delta) => {
       streamedDeltas.push(delta);
     },
-    onTurnDone: (result) => {
-      streamedDone.push(result.turn.agent.id);
+    onTurnDone: (result, roomRunning) => {
+      streamedDone.push({ agentId: result.turn.agent.id, roomRunning });
     },
   });
 
   assert.deepEqual(streamedTurns, ["concierge", "researcher"]);
   assert.deepEqual(streamedDeltas, ["concierge-draft", "researcher-draft"]);
-  assert.deepEqual(streamedDone, ["concierge", "researcher"]);
+  assert.deepEqual(streamedDone, [
+    { agentId: "concierge", roomRunning: true },
+    { agentId: "researcher", roomRunning: false },
+  ]);
 });
 
 test("runRoomSchedulerNow forwards completed emitted room messages for bound-room delivery", async () => {

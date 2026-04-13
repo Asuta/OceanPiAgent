@@ -692,6 +692,7 @@ export type RoomChatStreamEvent =
       turn: AgentRoomTurn;
       resolvedModel: string;
       compatibility: ProviderCompatibility;
+      roomRunning: boolean;
     }
   | {
       type: "error";

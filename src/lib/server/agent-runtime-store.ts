@@ -545,13 +545,25 @@ export async function finalizePersistedAgentRuntime(args: {
   assistantMessage: PersistedVisibleMessage;
   resolvedModel: string;
   compatibility: ProviderCompatibility;
+  onTimingPhase?: (phase: string, details?: Record<string, unknown>) => void;
 }): Promise<void> {
+  const readStartedAt = performance.now();
   const runtime = await readStoredRuntime(args.agentId);
+  args.onTimingPhase?.("finalize_runtime_read_stored", {
+    durationMs: Math.max(0, performance.now() - readStartedAt),
+    historyCountBefore: runtime.history.length,
+  });
   runtime.history = [...runtime.history, args.assistantMessage];
   runtime.resolvedModel = args.resolvedModel;
   runtime.compatibility = args.compatibility;
   runtime.updatedAt = createTimestamp();
+  const saveStartedAt = performance.now();
   await saveStoredRuntime(runtime);
+  args.onTimingPhase?.("finalize_runtime_save_stored", {
+    durationMs: Math.max(0, performance.now() - saveStartedAt),
+    historyCountAfter: runtime.history.length,
+    assistantChars: args.assistantMessage.content.length,
+  });
 }
 
 export async function compactPersistedAgentRuntime(args: {

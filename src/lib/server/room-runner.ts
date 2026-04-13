@@ -48,6 +48,7 @@ import {
 } from "@/lib/server/workspace-state";
 import { listAgentDefinitions } from "@/lib/server/agent-registry";
 import { createRoomTurnAccumulator } from "@/lib/server/room-turn-accumulator";
+import { createRoomTurnTailTrace } from "@/lib/server/room-turn-tail-log";
 
 function createAgentSender(agent: AgentRoomTurn["agent"]): RoomSender {
   return {
@@ -613,7 +614,28 @@ export async function runPreparedRoomTurn(
   let firstToolLogged = false;
   let firstRoomPreviewLogged = false;
   let firstTokenLogged = false;
+  const tailTrace = createRoomTurnTailTrace({
+    requestId: runContext.requestId,
+    roomId: args.room.id,
+    agentId: args.agent.id,
+    userMessageId: args.message.id,
+  });
   const resolveRoomMessageId = createRoomMessageIdResolver(runContext.requestId);
+  const tracedCallbacks: RoomTurnCallbacks = {
+    onTextDelta: callbacks?.onTextDelta,
+    onTool: callbacks?.onTool,
+    onRoomMessagePreview: callbacks?.onRoomMessagePreview,
+    onRoomMessage: (message) => {
+      if (message.roomId === args.room.id && message.status === "completed" && message.final) {
+        tailTrace.mark("final_room_message_emitted", {
+          roomMessageKind: message.kind,
+          contentChars: message.content.length,
+        });
+      }
+      callbacks?.onRoomMessage?.(message);
+    },
+    onReceiptUpdate: callbacks?.onReceiptUpdate,
+  };
   const accumulator = createRoomTurnAccumulator({
     agent,
     roomId: args.room.id,
@@ -624,7 +646,7 @@ export async function runPreparedRoomTurn(
     anchorMessageId: args.anchorMessageId,
     resolvedModel: runContext.resolvedModel,
     continuationSnapshot: runContext.continuationSnapshot,
-    callbacks,
+    callbacks: tracedCallbacks,
     createEmittedRoomMessage: (message, toolCallId) => createEmittedRoomMessage(message, agent, resolveRoomMessageId, toolCallId),
     createStreamControlRoomMessage: (control) => createStreamControlRoomMessage(control, agent, resolveRoomMessageId, control.content),
     createReadNoReplyReceipt: (createdAt) => createReadNoReplyReceipt(agent, createdAt),
@@ -732,6 +754,12 @@ export async function runPreparedRoomTurn(
         },
       },
     );
+    tailTrace.mark("conversation_runner_returned", {
+      assistantChars: result.assistantText.length,
+      toolEventCount: result.toolEvents.length,
+      hasHistoryDelta: Boolean(result.historyDelta),
+      historyDeltaCount: result.historyDelta?.length ?? 0,
+    });
 
     if (firstTokenTimingEnabled && !firstTokenLogged) {
       firstTokenLogged = true;
@@ -747,7 +775,14 @@ export async function runPreparedRoomTurn(
     }
 
     const assistantMeta = buildAssistantTurnMeta(result);
+    tailTrace.mark("assistant_meta_built", {
+      hasUsage: Boolean(result.usage),
+      hasResponseId: Boolean(result.responseId),
+      hasContinuation: Boolean(result.continuation),
+      historyDeltaCount: result.historyDelta?.length ?? 0,
+    });
 
+    tailTrace.mark("complete_agent_room_run_start");
     await completeAgentRoomRun({
       agentId: args.agent.id,
       requestId: runContext.requestId,
@@ -755,9 +790,17 @@ export async function runPreparedRoomTurn(
       resolvedModel: result.resolvedModel,
       compatibility: result.compatibility,
       meta: assistantMeta,
+      onTimingPhase: (phase, details) => tailTrace.mark(phase, details),
     });
+    tailTrace.mark("complete_agent_room_run_end");
 
     const completedState = accumulator.getCompletedState(result.toolEvents);
+    tailTrace.mark("accumulator_completed_state_ready", {
+      emittedMessageCount: completedState.emittedMessages.length,
+      receiptUpdateCount: completedState.receiptUpdates.length,
+      roomActionCount: completedState.roomActions.length,
+      toolEventCount: completedState.toolEvents.length,
+    });
 
     const turn = createTurn(
       args.turnId,
@@ -781,6 +824,10 @@ export async function runPreparedRoomTurn(
       "completed",
       runContext.continuationSnapshot,
     );
+    tailTrace.mark("turn_created", {
+      turnStatus: "completed",
+      assistantContentChars: result.assistantText.length,
+    });
 
     return {
       turn,

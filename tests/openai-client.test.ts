@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { shouldApplyPostToolBatchCompaction } from "@/lib/ai/post-tool-compaction";
 import { extractRoomMessagePreviewFromToolArgs, extractRoomMessagePreviewFromToolCallBlock } from "@/lib/ai/room-message-preview";
+import { roomMessageArgsSchema } from "@/lib/ai/tools/shared";
 
 test("extractRoomMessagePreviewFromToolArgs builds a send_message preview from partial tool args", () => {
   const preview = extractRoomMessagePreviewFromToolArgs("tool-1", "send_message_to_room", {
@@ -63,4 +65,47 @@ test("extractRoomMessagePreviewFromToolCallBlock prefers raw partialJson over pa
     status: "streaming",
     final: false,
   });
+});
+
+test("roomMessageArgsSchema defaults send_message_to_room deliveries to non-final", () => {
+  const parsed = roomMessageArgsSchema.parse({
+    roomId: "room-1",
+    content: "Checking now.",
+    kind: "progress",
+    status: "completed",
+  });
+
+  assert.equal(parsed.final, false);
+});
+
+test("roomMessageArgsSchema preserves explicit final room deliveries", () => {
+  const parsed = roomMessageArgsSchema.parse({
+    roomId: "room-1",
+    content: "All done.",
+    final: true,
+  });
+
+  assert.equal(parsed.final, true);
+});
+
+test("shouldApplyPostToolBatchCompaction skips compaction after final room delivery is armed", () => {
+  assert.equal(
+    shouldApplyPostToolBatchCompaction({
+      pendingPostToolBatchCompaction: true,
+      hasPostToolBatchCompactionHandler: true,
+      finalRoomDeliveryShortCircuitArmed: true,
+    }),
+    false,
+  );
+});
+
+test("shouldApplyPostToolBatchCompaction still allows normal post-tool compaction", () => {
+  assert.equal(
+    shouldApplyPostToolBatchCompaction({
+      pendingPostToolBatchCompaction: true,
+      hasPostToolBatchCompactionHandler: true,
+      finalRoomDeliveryShortCircuitArmed: false,
+    }),
+    true,
+  );
 });

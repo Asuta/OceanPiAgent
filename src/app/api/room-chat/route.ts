@@ -138,6 +138,7 @@ export async function POST(request: Request) {
                 turn: result.turn,
                 resolvedModel: result.resolvedModel,
                 compatibility: result.compatibility,
+                roomRunning: false,
               }),
             );
           } catch (error) {

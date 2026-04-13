@@ -8,7 +8,7 @@ import type {
   ToolExecution,
 } from "@/lib/chat/types";
 import { createSchedulerPacket } from "@/lib/chat/room-scheduler";
-import { createAgentSharedState, createTimestamp, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
+import { createAgentSharedState, createTimestamp, getEnabledAgentParticipants, sortRoomsByUpdatedAt } from "@/lib/chat/workspace-domain";
 import { deliverBoundRoomMessages } from "@/lib/server/channel-outbound-service";
 import { abortRoomStream, combineAbortSignals } from "@/lib/server/room-stream-control";
 import {
@@ -34,7 +34,7 @@ export interface RoomSchedulerRunHooks {
   onRoomMessagePreview?: (message: RoomMessage) => void | Promise<void>;
   onRoomMessage?: (message: RoomMessage) => void | Promise<void>;
   onReceiptUpdate?: (update: RunRoomTurnResult["receiptUpdates"][number]) => void | Promise<void>;
-  onTurnDone?: (result: RunRoomTurnResult) => void | Promise<void>;
+  onTurnDone?: (result: RunRoomTurnResult, roomRunning: boolean) => void | Promise<void>;
   onError?: (error: unknown, meta?: AssistantMessageMeta) => void | Promise<void>;
 }
 
@@ -136,6 +136,44 @@ function withIdleScheduler(room: RoomSession): RoomSession {
     },
     updatedAt: createTimestamp(),
   };
+}
+
+function shouldKeepRoomRunningAfterAppliedTurn(room: RoomSession): boolean {
+  const enabledAgentCount = getEnabledAgentParticipants(room).length;
+  if (enabledAgentCount === 0) {
+    return false;
+  }
+
+  let candidateRoom = room;
+  for (let idlePassCount = 0; idlePassCount < enabledAgentCount; idlePassCount += 1) {
+    const nextRound = planSchedulerRound(candidateRoom);
+    if (nextRound.type === "idle") {
+      return false;
+    }
+
+    if (nextRound.visibleTargetMessages.length > 0) {
+      return true;
+    }
+
+    candidateRoom = {
+      ...candidateRoom,
+      scheduler: {
+        ...candidateRoom.scheduler,
+        activeParticipantId: null,
+        nextAgentParticipantId: nextRound.nextAfterParticipantId,
+        agentCursorByParticipantId: {
+          ...candidateRoom.scheduler.agentCursorByParticipantId,
+          [nextRound.participant.id]: nextRound.cutoffSeq,
+        },
+        agentReceiptRevisionByParticipantId: {
+          ...candidateRoom.scheduler.agentReceiptRevisionByParticipantId,
+          [nextRound.participant.id]: candidateRoom.receiptRevision,
+        },
+      },
+    };
+  }
+
+  return false;
 }
 
 function markTurnStopped(turn: AgentRoomTurn, reason: string): AgentRoomTurn {
@@ -494,6 +532,7 @@ export async function runRoomSchedulerNow(
     }
 
     const wasSuperseded = hasSupersedingVisibleActivity(latestRoom, roundPlan.participant.id, roundPlan.cutoffSeq);
+    let roomRunningAfterTurn = result.turn.status === "completed";
     if (!wasSuperseded) {
       await deps.mutateWorkspace((workspace) => {
         const appliedWorkspace = applyRoomTurnToWorkspace({
@@ -508,14 +547,15 @@ export async function runRoomSchedulerNow(
           roomActions: result.roomActions,
         });
 
-        return updateRoom(appliedWorkspace, roomId, (currentRoom) => ({
-          ...currentRoom,
+        return updateRoom(appliedWorkspace, roomId, (currentRoom) => {
+          const nextRoom: RoomSession = {
+            ...currentRoom,
             scheduler: {
               ...currentRoom.scheduler,
-              status: result.turn.status === "completed" ? "running" : "idle",
+              status: "running",
               activeParticipantId: null,
               nextAgentParticipantId: roundPlan.nextAfterParticipantId,
-              roundCount: result.turn.status === "completed" ? dispatchedRounds : 0,
+              roundCount: dispatchedRounds,
               agentCursorByParticipantId: {
                 ...currentRoom.scheduler.agentCursorByParticipantId,
                 [roundPlan.participant.id]: Math.max(
@@ -529,20 +569,38 @@ export async function runRoomSchedulerNow(
               },
             },
             updatedAt: createTimestamp(),
-        }));
+          };
+
+          roomRunningAfterTurn = result.turn.status === "completed" && shouldKeepRoomRunningAfterAppliedTurn(nextRoom);
+          if (roomRunningAfterTurn) {
+            return nextRoom;
+          }
+
+          return {
+            ...nextRoom,
+            scheduler: {
+              ...nextRoom.scheduler,
+              status: "idle",
+              roundCount: 0,
+            },
+          };
+        });
       });
 
-      await deps.deliverBoundRoomMessages(result.emittedMessages);
-    }
+      if (hooks.onTurnDone) {
+        await hooks.onTurnDone(result, roomRunningAfterTurn);
+      }
 
-    await emit(hooks.onTurnDone, result);
+      await deps.deliverBoundRoomMessages(result.emittedMessages);
+    } else if (hooks.onTurnDone) {
+      await hooks.onTurnDone(result, roomRunningAfterTurn);
+    }
 
     for (const additionalRoomId of collectAdditionalRoomIds(result.emittedMessages, roomId)) {
       void enqueueRoomScheduler(additionalRoomId);
     }
 
-    if (result.turn.status !== "completed") {
-      await deps.mutateWorkspace((workspace) => updateRoom(workspace, roomId, withIdleScheduler));
+    if (!roomRunningAfterTurn) {
       return;
     }
   }

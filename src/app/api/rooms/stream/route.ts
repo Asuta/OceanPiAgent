@@ -77,12 +77,13 @@ export async function POST(request: Request) {
               onReceiptUpdate: (update) => {
                 emitEvent({ type: "message-receipt", update });
               },
-              onTurnDone: (result) => {
+              onTurnDone: (result, roomRunning) => {
                 emitEvent({
                   type: "done",
                   turn: result.turn,
                   resolvedModel: result.resolvedModel,
                   compatibility: result.compatibility,
+                  roomRunning,
                 });
               },
               onError: (error, meta) => {

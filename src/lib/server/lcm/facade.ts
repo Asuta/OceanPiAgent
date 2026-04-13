@@ -65,19 +65,39 @@ async function maybeExternalizeLargeText(args: {
   summaryStore: SummaryStore;
   text: string;
   toolName?: string | null;
+  source?: string;
+  onTimingPhase?: (phase: string, details?: Record<string, unknown>) => void;
 }): Promise<string> {
   if (args.text.trim().length < LARGE_TEXT_THRESHOLD) {
     return args.text;
   }
 
+  args.onTimingPhase?.("lcm_large_text_externalize_needed", {
+    source: args.source ?? "unknown",
+    textChars: args.text.length,
+    thresholdChars: LARGE_TEXT_THRESHOLD,
+  });
   const fileId = `file_${createHash("sha256").update(`${args.agentId}:${args.toolName ?? "text"}:${args.text}`).digest("hex").slice(0, 16)}`;
+  const existingLookupStartedAt = performance.now();
   const existing = await args.summaryStore.getLargeFile(fileId);
+  args.onTimingPhase?.("lcm_large_text_lookup", {
+    source: args.source ?? "unknown",
+    durationMs: Math.max(0, performance.now() - existingLookupStartedAt),
+    cacheHit: Boolean(existing),
+  });
   if (!existing) {
+    const summaryStartedAt = performance.now();
     const summary = await generateExplorationSummary({
       content: args.text,
       fileName: args.toolName ? `${args.toolName}.txt` : undefined,
       mimeType: "text/plain",
     });
+    args.onTimingPhase?.("lcm_large_text_generate_summary", {
+      source: args.source ?? "unknown",
+      durationMs: Math.max(0, performance.now() - summaryStartedAt),
+      textChars: args.text.length,
+    });
+    const insertStartedAt = performance.now();
     await args.summaryStore.insertLargeFile({
       fileId,
       conversationId: args.conversationId,
@@ -87,13 +107,24 @@ async function maybeExternalizeLargeText(args: {
       storageUri: `memory://agent/${args.agentId}/${fileId}`,
       explorationSummary: summary,
     });
+    args.onTimingPhase?.("lcm_large_text_inserted", {
+      source: args.source ?? "unknown",
+      durationMs: Math.max(0, performance.now() - insertStartedAt),
+      byteSize: Buffer.byteLength(args.text, "utf8"),
+    });
   }
 
+  const readBackStartedAt = performance.now();
+  const persisted = await args.summaryStore.getLargeFile(fileId);
+  args.onTimingPhase?.("lcm_large_text_reference_readback", {
+    source: args.source ?? "unknown",
+    durationMs: Math.max(0, performance.now() - readBackStartedAt),
+  });
   return formatToolOutputReference({
     fileId,
     toolName: args.toolName ?? undefined,
     byteSize: Buffer.byteLength(args.text, "utf8"),
-    summary: (await args.summaryStore.getLargeFile(fileId))?.explorationSummary ?? "",
+    summary: persisted?.explorationSummary ?? "",
   });
 }
 
@@ -104,20 +135,40 @@ export async function appendAgentLcmMessage(args: {
   createdAt?: string;
   parts?: CreateMessagePartInput[];
   title?: string;
+  onTimingPhase?: (phase: string, details?: Record<string, unknown>) => void;
 }): Promise<number> {
+  const loadConversationStartedAt = performance.now();
   const { conversationStore, summaryStore } = await getLcmStores();
   const conversation = await conversationStore.getOrCreateConversation(getAgentSessionId(args.agentId), {
     sessionKey: args.agentId,
     title: args.title ?? `Agent ${args.agentId}`,
   });
+  args.onTimingPhase?.("lcm_get_or_create_conversation", {
+    durationMs: Math.max(0, performance.now() - loadConversationStartedAt),
+    conversationId: conversation.conversationId,
+  });
+  const seqStartedAt = performance.now();
   const seq = (await conversationStore.getMaxSeq(conversation.conversationId)) + 1;
+  args.onTimingPhase?.("lcm_get_next_seq", {
+    durationMs: Math.max(0, performance.now() - seqStartedAt),
+    seq,
+  });
 
+  const normalizeContentStartedAt = performance.now();
   const normalizedContent = await maybeExternalizeLargeText({
     agentId: args.agentId,
     conversationId: conversation.conversationId,
     summaryStore,
     text: args.content,
+    source: "message_content",
+    onTimingPhase: args.onTimingPhase,
   });
+  args.onTimingPhase?.("lcm_normalize_content", {
+    durationMs: Math.max(0, performance.now() - normalizeContentStartedAt),
+    contentCharsBefore: args.content.length,
+    contentCharsAfter: normalizedContent.length,
+  });
+  const normalizePartsStartedAt = performance.now();
   const normalizedParts = args.parts?.length
     ? await Promise.all(args.parts.map(async (part) => {
         if (part.partType !== "tool") {
@@ -130,6 +181,8 @@ export async function appendAgentLcmMessage(args: {
               summaryStore,
               text: part.toolOutput,
               toolName: part.toolName,
+              source: `tool_output:${part.toolName ?? "unknown"}`,
+              onTimingPhase: args.onTimingPhase,
             })
           : part.toolOutput;
         const externalizedPreview = typeof part.textContent === "string"
@@ -139,6 +192,8 @@ export async function appendAgentLcmMessage(args: {
               summaryStore,
               text: part.textContent,
               toolName: part.toolName,
+              source: `tool_preview:${part.toolName ?? "unknown"}`,
+              onTimingPhase: args.onTimingPhase,
             })
           : part.textContent;
         return {
@@ -148,7 +203,13 @@ export async function appendAgentLcmMessage(args: {
         };
       }))
     : undefined;
+  args.onTimingPhase?.("lcm_normalize_parts", {
+    durationMs: Math.max(0, performance.now() - normalizePartsStartedAt),
+    partCount: args.parts?.length ?? 0,
+    normalizedPartCount: normalizedParts?.length ?? 0,
+  });
 
+  const createMessageStartedAt = performance.now();
   const message = await conversationStore.createMessage({
     conversationId: conversation.conversationId,
     seq,
@@ -156,11 +217,29 @@ export async function appendAgentLcmMessage(args: {
     content: normalizedContent,
     createdAt: args.createdAt,
   });
+  args.onTimingPhase?.("lcm_create_message", {
+    durationMs: Math.max(0, performance.now() - createMessageStartedAt),
+    messageId: message.messageId,
+  });
   if (normalizedParts?.length) {
+    const createPartsStartedAt = performance.now();
     await conversationStore.createMessageParts(message.messageId, normalizedParts);
+    args.onTimingPhase?.("lcm_create_message_parts", {
+      durationMs: Math.max(0, performance.now() - createPartsStartedAt),
+      partCount: normalizedParts.length,
+    });
   }
+  const appendContextStartedAt = performance.now();
   await summaryStore.appendContextMessage(conversation.conversationId, message.messageId, args.createdAt);
+  args.onTimingPhase?.("lcm_append_context_message", {
+    durationMs: Math.max(0, performance.now() - appendContextStartedAt),
+  });
+  const markBootstrappedStartedAt = performance.now();
   await conversationStore.markConversationBootstrapped(conversation.conversationId);
+  args.onTimingPhase?.("lcm_mark_conversation_bootstrapped", {
+    durationMs: Math.max(0, performance.now() - markBootstrappedStartedAt),
+  });
+  const bootstrapStateStartedAt = performance.now();
   await summaryStore.upsertConversationBootstrapState({
     conversationId: conversation.conversationId,
     sessionFilePath: `live://agent/${args.agentId}`,
@@ -168,6 +247,9 @@ export async function appendAgentLcmMessage(args: {
     lastSeenMtimeMs: Date.now(),
     lastProcessedOffset: seq,
     lastProcessedEntryHash: createHash("sha256").update(`${seq}:${normalizedContent}`).digest("hex"),
+  });
+  args.onTimingPhase?.("lcm_upsert_bootstrap_state", {
+    durationMs: Math.max(0, performance.now() - bootstrapStateStartedAt),
   });
   return message.messageId;
 }
@@ -304,7 +386,9 @@ export async function ingestCompletedRun(args: {
   compatibility: ProviderCompatibility;
   meta?: AssistantMessageMeta;
   createdAt: string;
+  onTimingPhase?: (phase: string, details?: Record<string, unknown>) => void;
 }) {
+  const partsBuildStartedAt = performance.now();
   const parts: CreateMessagePartInput[] = [
     {
       sessionId: getAgentSessionId(args.agentId),
@@ -328,7 +412,21 @@ export async function ingestCompletedRun(args: {
       metadata: json({ originalRole: tool.roomAction || tool.roomMessage ? "assistant" : "toolResult", rawType: "tool_event", raw: tool }),
     });
   }
-  return appendAgentLcmMessage({ agentId: args.agentId, role: "assistant", content: args.assistantText.trim() || args.assistantHistoryEntry, createdAt: args.createdAt, title: args.roomTitle, parts });
+  args.onTimingPhase?.("ingest_completed_run_build_parts", {
+    durationMs: Math.max(0, performance.now() - partsBuildStartedAt),
+    toolCount: args.tools.length,
+    assistantChars: args.assistantText.length,
+    assistantHistoryEntryChars: args.assistantHistoryEntry.length,
+  });
+  return appendAgentLcmMessage({
+    agentId: args.agentId,
+    role: "assistant",
+    content: args.assistantText.trim() || args.assistantHistoryEntry,
+    createdAt: args.createdAt,
+    title: args.roomTitle,
+    parts,
+    onTimingPhase: args.onTimingPhase,
+  });
 }
 
 export async function getAgentLcmRetrieval(agentId: RoomAgentId) {

@@ -19,6 +19,49 @@ import { appendDraftDelta, appendTimelineEvent, finalizeLatestDraftSegment, merg
 
 const ROOM_MESSAGE_PREVIEW_FLUSH_MS = 75;
 
+type RoomUiTimingEntry = {
+  roomId: string;
+  requestId: string;
+  phase: string;
+  elapsedMs: number;
+  details?: Record<string, string | number | boolean | null>;
+};
+
+declare global {
+  interface Window {
+    __oceankingRoomUiTimingLog?: RoomUiTimingEntry[];
+  }
+}
+
+function recordRoomUiTiming(args: {
+  roomId: string;
+  requestId: string;
+  phase: string;
+  startedAt: number;
+  details?: Record<string, string | number | boolean | null | undefined>;
+}) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const entry: RoomUiTimingEntry = {
+    roomId: args.roomId,
+    requestId: args.requestId,
+    phase: args.phase,
+    elapsedMs: Math.round((performance.now() - args.startedAt) * 10) / 10,
+    ...(args.details
+      ? {
+          details: Object.fromEntries(
+            Object.entries(args.details).filter(([, value]) => typeof value !== "undefined"),
+          ) as Record<string, string | number | boolean | null>,
+        }
+      : {}),
+  };
+
+  window.__oceankingRoomUiTimingLog = [...(window.__oceankingRoomUiTimingLog ?? []), entry].slice(-400);
+  console.info("[room-ui-timing]", entry);
+}
+
 type MutableRef<T> = {
   current: T;
 };
@@ -122,6 +165,20 @@ export function useRoomStreamingSend(args: {
         ...current,
         [roomId]: true,
       }));
+      const uiTimingStartedAt = performance.now();
+      let firstPreviewLogged = false;
+      let firstFinalRoomMessageLogged = false;
+      let doneLogged = false;
+      recordRoomUiTiming({
+        roomId,
+        requestId: localRequestId,
+        phase: "send_start",
+        startedAt: uiTimingStartedAt,
+        details: {
+          contentChars: normalizedContent.length,
+          attachmentCount: attachments.length,
+        },
+      });
 
       let activeTurnId: string | null = null;
       let activeTurnAgentId: RoomAgentId | null = null;
@@ -264,12 +321,41 @@ export function useRoomStreamingSend(args: {
             );
           },
           onRoomMessagePreview: (message) => {
+            if (!firstPreviewLogged) {
+              firstPreviewLogged = true;
+              recordRoomUiTiming({
+                roomId,
+                requestId: localRequestId,
+                phase: "preview_first",
+                startedAt: uiTimingStartedAt,
+                details: {
+                  previewRoomId: message.roomId,
+                  contentChars: message.content.length,
+                  final: message.final,
+                  status: message.status,
+                },
+              });
+            }
             previewMessageIds.add(message.id);
             previewMessageRoomIdById.set(message.id, message.roomId);
             pendingPreviewMessagesById.set(message.id, message);
             schedulePreviewFlush();
           },
           onRoomMessage: (message) => {
+            if (!firstFinalRoomMessageLogged && message.role === "assistant" && message.status === "completed" && message.final) {
+              firstFinalRoomMessageLogged = true;
+              recordRoomUiTiming({
+                roomId,
+                requestId: localRequestId,
+                phase: "final_room_message",
+                startedAt: uiTimingStartedAt,
+                details: {
+                  finalRoomId: message.roomId,
+                  contentChars: message.content.length,
+                  kind: message.kind,
+                },
+              });
+            }
             previewMessageIds.delete(message.id);
             previewMessageRoomIdById.delete(message.id);
             clearPreviewMessage(message.id);
@@ -299,12 +385,33 @@ export function useRoomStreamingSend(args: {
             applyReceiptUpdateToAllAgentConsolesEphemeral(update);
           },
           onDone: (event) => {
+            if (!doneLogged) {
+              doneLogged = true;
+              recordRoomUiTiming({
+                roomId,
+                requestId: localRequestId,
+                phase: "stream_done",
+                startedAt: uiTimingStartedAt,
+                details: {
+                  turnStatus: event.turn.status,
+                  emittedMessages: event.turn.emittedMessages.length,
+                },
+              });
+            }
             flushPreviewMessages();
             const finalTurn = event.turn;
             activeTurnId = finalTurn.id;
             activeTurnAgentId = finalTurn.agent.id;
             updateRoomStateEphemeral(roomId, (room) => ({
               ...room,
+              scheduler: event.roomRunning
+                ? room.scheduler
+                : {
+                    ...room.scheduler,
+                    status: "idle",
+                    activeParticipantId: null,
+                    roundCount: 0,
+                  },
               roomMessages: room.roomMessages.map((message) =>
                 message.id === finalTurn.userMessage.id ? finalTurn.userMessage : message,
               ),
@@ -355,8 +462,24 @@ export function useRoomStreamingSend(args: {
           },
         });
 
-        await refreshWorkspaceFromServer();
+        recordRoomUiTiming({
+          roomId,
+          requestId: localRequestId,
+          phase: "stream_reader_complete",
+          startedAt: uiTimingStartedAt,
+        });
+
         clearDraftForRoom(roomId);
+        void refreshWorkspaceFromServer()
+          .then(() => {
+            recordRoomUiTiming({
+              roomId,
+              requestId: localRequestId,
+              phase: "refresh_done",
+              startedAt: uiTimingStartedAt,
+            });
+          })
+          .catch(() => undefined);
       } catch (error) {
         if (requestController.signal.aborted) {
           return;
@@ -384,6 +507,12 @@ export function useRoomStreamingSend(args: {
             const nextState = { ...current };
             delete nextState[roomId];
             return nextState;
+          });
+          recordRoomUiTiming({
+            roomId,
+            requestId: localRequestId,
+            phase: "ui_cleanup",
+            startedAt: uiTimingStartedAt,
           });
         }
       }

@@ -88,6 +88,26 @@ import { useRoomCommands } from "@/components/workspace/use-room-commands";
 import { useRoomStreamingSend } from "@/components/workspace/use-room-streaming-send";
 import { useWorkspaceStreamSync } from "@/components/workspace/use-workspace-stream-sync";
 
+type WorkspaceUiTimingEntry = {
+  phase: string;
+  elapsedMs: number;
+  details?: Record<string, string | number | boolean | null>;
+};
+
+declare global {
+  interface Window {
+    __oceankingWorkspaceUiTimingLog?: WorkspaceUiTimingEntry[];
+  }
+}
+
+function recordWorkspaceUiTiming(entry: WorkspaceUiTimingEntry) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.__oceankingWorkspaceUiTimingLog = [...(window.__oceankingWorkspaceUiTimingLog ?? []), entry].slice(-200);
+  console.info("[workspace-ui-timing]", entry);
+}
+
 const DEFAULT_AGENT_ID: RoomAgentId = "concierge";
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
 const LEGACY_DEFAULT_MAX_TOOL_LOOP_STEPS = 6;
@@ -1799,6 +1819,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         skipServerPersist?: boolean;
       },
     ) => {
+      const applyStartedAt = typeof window === "undefined" ? 0 : performance.now();
       if (options?.skipServerPersist) {
         skipNextServerPersistRef.current = true;
       }
@@ -1825,6 +1846,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setSelectedConsoleAgentId(nextSelectedConsoleAgentId);
       setWorkspaceVersion(version);
       setHydrated(true);
+      if (typeof window !== "undefined") {
+        recordWorkspaceUiTiming({
+          phase: "workspace_snapshot_applied",
+          elapsedMs: Math.round((performance.now() - applyStartedAt) * 10) / 10,
+          details: {
+            version,
+            roomCount: nextRooms.length,
+            activeRoomId: nextActiveRoomId,
+          },
+        });
+      }
     },
     [],
   );
@@ -1899,7 +1931,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   );
 
   const refreshWorkspaceFromServer = useCallback(async () => {
+    const fetchStartedAt = typeof window === "undefined" ? 0 : performance.now();
     const payload = await fetchWorkspaceEnvelope();
+    if (typeof window !== "undefined") {
+      recordWorkspaceUiTiming({
+        phase: "workspace_fetch_done",
+        elapsedMs: Math.round((performance.now() - fetchStartedAt) * 10) / 10,
+        details: {
+          ok: Boolean(payload?.state),
+          version: typeof payload?.version === "number" ? payload.version : null,
+        },
+      });
+    }
     if (typeof payload?.version !== "number" || !payload.state) {
       return null;
     }

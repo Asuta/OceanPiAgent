@@ -6,6 +6,7 @@ import {
   shouldFallbackToResponsesReplay,
 } from "@/lib/ai/provider-compat";
 import { ensureOpenAiFetchCompatibility } from "@/lib/ai/openai-fetch-compat";
+import { shouldApplyPostToolBatchCompaction } from "@/lib/ai/post-tool-compaction";
 import { extractRoomMessagePreviewFromToolCallBlock } from "@/lib/ai/room-message-preview";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { resolvePiModel } from "@/lib/ai/pi-model-resolver";
@@ -40,7 +41,7 @@ type ResponsesContinuationStrategy = "replay" | "previous_response_id";
 
 type PayloadRecord = Record<string, unknown>;
 
-const FINAL_ROOM_DELIVERY_SHORT_CIRCUIT_MS = 750;
+const FINAL_ROOM_DELIVERY_SHORT_CIRCUIT_MS = 50;
 
 function toPiAgentThinkingLevel(level: ThinkingLevel): PiAgentThinkingLevel {
   // pi-agent-core types lag OpenAI's current `none` effort value, but the
@@ -729,7 +730,18 @@ async function runConversationAttempt(args: {
         systemPrompt: args.systemPromptText,
       }),
     transformContext: async (messages: Message[], signal?: AbortSignal) => {
-      if (!pendingPostToolBatchCompaction || !args.resolvedOptions.postToolBatchCompaction) {
+      const postToolBatchCompaction = args.resolvedOptions.postToolBatchCompaction;
+      if (!shouldApplyPostToolBatchCompaction({
+        pendingPostToolBatchCompaction,
+        hasPostToolBatchCompactionHandler: Boolean(postToolBatchCompaction),
+        finalRoomDeliveryShortCircuitArmed,
+      })) {
+        if (finalRoomDeliveryShortCircuitArmed) {
+          pendingPostToolBatchCompaction = false;
+        }
+        return messages;
+      }
+      if (!postToolBatchCompaction) {
         return messages;
       }
 
@@ -739,7 +751,7 @@ async function runConversationAttempt(args: {
         return messages;
       }
 
-      const compaction = await args.resolvedOptions.postToolBatchCompaction({
+      const compaction = await postToolBatchCompaction({
         historyDelta,
         resolvedModel: args.resolvedModel.resolvedModelRef,
         signal,
@@ -772,20 +784,28 @@ async function runConversationAttempt(args: {
   const lastRoomMessagePreviewByToolCallId = new Map<string, string>();
   const currentRoomId = args.resolvedOptions.toolContext?.currentRoomId?.trim();
   let finalRoomDeliveryShortCircuitTimer: ReturnType<typeof setTimeout> | null = null;
+  let finalRoomDeliveryShortCircuitArmed = false;
   let shortCircuitedAfterFinalRoomDelivery = false;
+  let resolveFinalRoomDeliveryShortCircuit: (() => void) | null = null;
+  const finalRoomDeliveryShortCircuitPromise = new Promise<void>((resolve) => {
+    resolveFinalRoomDeliveryShortCircuit = resolve;
+  });
 
   const clearFinalRoomDeliveryShortCircuit = () => {
     if (finalRoomDeliveryShortCircuitTimer !== null) {
       clearTimeout(finalRoomDeliveryShortCircuitTimer);
       finalRoomDeliveryShortCircuitTimer = null;
     }
+    finalRoomDeliveryShortCircuitArmed = false;
   };
 
   const armFinalRoomDeliveryShortCircuit = () => {
     clearFinalRoomDeliveryShortCircuit();
+    finalRoomDeliveryShortCircuitArmed = true;
     finalRoomDeliveryShortCircuitTimer = setTimeout(() => {
       shortCircuitedAfterFinalRoomDelivery = true;
       agent.abort();
+      resolveFinalRoomDeliveryShortCircuit?.();
     }, FINAL_ROOM_DELIVERY_SHORT_CIRCUIT_MS);
   };
 
@@ -849,7 +869,7 @@ async function runConversationAttempt(args: {
 
     if (event.type === "turn_end" && isAssistantMessage(event.message)) {
       const hasToolCalls = event.message.content.some((item) => item.type === "toolCall");
-      if (event.toolResults.length > 0) {
+      if (event.toolResults.length > 0 && !finalRoomDeliveryShortCircuitArmed) {
         pendingPostToolBatchCompaction = true;
       }
       if (!hasToolCalls) {
@@ -868,8 +888,18 @@ async function runConversationAttempt(args: {
   const abortListener = () => agent.abort();
   args.resolvedOptions.signal?.addEventListener("abort", abortListener, { once: true });
 
+  const continuePromise = agent.continue()
+    .then(() => ({ kind: "completed" } as const))
+    .catch((error) => ({ kind: "error", error } as const));
+
   try {
-    await agent.continue();
+    const continueOutcome = await Promise.race([
+      continuePromise,
+      finalRoomDeliveryShortCircuitPromise.then(() => ({ kind: "short_circuited" } as const)),
+    ]);
+    if (continueOutcome.kind === "error") {
+      throw continueOutcome.error;
+    }
   } finally {
     clearFinalRoomDeliveryShortCircuit();
     unsubscribe();

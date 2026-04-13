@@ -108,7 +108,7 @@ test("readRoomStream processes a trailing done event without a final separator",
     "",
     `data: ${JSON.stringify({ type: "room-message", message: emittedMessage })}`,
     "",
-    `data: ${JSON.stringify({ type: "done", turn, resolvedModel: "gpt-5.4", compatibility: { providerKey: "generic", providerLabel: "Generic", baseUrl: "https://example.test/v1", chatCompletionsToolStyle: "tools", responsesContinuation: "replay", responsesPayloadMode: "json", notes: [] } })}`,
+    `data: ${JSON.stringify({ type: "done", turn, resolvedModel: "gpt-5.4", compatibility: { providerKey: "generic", providerLabel: "Generic", baseUrl: "https://example.test/v1", chatCompletionsToolStyle: "tools", responsesContinuation: "replay", responsesPayloadMode: "json", notes: [] }, roomRunning: false })}`,
   ].join("\n");
 
   const seenTools: ToolExecution[] = [];
@@ -137,4 +137,36 @@ test("readRoomStream processes a trailing done event without a final separator",
   assert.equal(seenDone.length, 1);
   assert.equal(result.emittedMessages.length, 1);
   assert.equal(result.emittedMessages[0]?.id, emittedMessage.id);
+});
+
+test("readRoomStream returns immediately after done without processing later events", async () => {
+  const emittedMessage = createRoomMessage();
+  const lateMessage = createRoomMessage({ id: "message-late", content: "Should not be processed" });
+  const turn = createTurn(emittedMessage);
+  const events = [
+    `data: ${JSON.stringify({ type: "done", turn, resolvedModel: "gpt-5.4", compatibility: { providerKey: "generic", providerLabel: "Generic", baseUrl: "https://example.test/v1", chatCompletionsToolStyle: "tools", responsesContinuation: "replay", responsesPayloadMode: "json", notes: [] }, roomRunning: false })}`,
+    "",
+    `data: ${JSON.stringify({ type: "room-message", message: lateMessage })}`,
+    "",
+  ].join("\n");
+
+  const seenMessages: RoomMessage[] = [];
+  const seenDone: AgentRoomTurn[] = [];
+
+  const result = await readRoomStream({
+    response: createSseResponse(events),
+    shouldContinue: () => true,
+    onTurnStart: () => undefined,
+    onTextDelta: () => undefined,
+    onTool: () => undefined,
+    onRoomMessagePreview: () => undefined,
+    onRoomMessage: (message) => seenMessages.push(message),
+    onReceiptUpdate: () => undefined,
+    onDone: (event) => seenDone.push(event.turn),
+    onMeta: () => undefined,
+  });
+
+  assert.equal(seenDone.length, 1);
+  assert.equal(seenMessages.length, 0);
+  assert.equal(result.emittedMessages.length, 0);
 });

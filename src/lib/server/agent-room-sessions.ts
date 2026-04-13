@@ -95,6 +95,7 @@ declare global {
   var __oceankingAgentRoomSessions: Map<RoomAgentId, AgentRuntimeSession> | undefined;
   var __oceankingAgentCompactionQueues: Map<RoomAgentId, Promise<void>> | undefined;
   var __oceankingPendingAutomaticCompactions: Set<RoomAgentId> | undefined;
+  var __oceankingAgentRunFinalizationQueues: Map<RoomAgentId, Promise<void>> | undefined;
 }
 
 const agentSessions = globalThis.__oceankingAgentRoomSessions ?? new Map<RoomAgentId, AgentRuntimeSession>();
@@ -103,6 +104,8 @@ const agentCompactionQueues = globalThis.__oceankingAgentCompactionQueues ?? new
 globalThis.__oceankingAgentCompactionQueues = agentCompactionQueues;
 const pendingAutomaticCompactions = globalThis.__oceankingPendingAutomaticCompactions ?? new Set<RoomAgentId>();
 globalThis.__oceankingPendingAutomaticCompactions = pendingAutomaticCompactions;
+const agentRunFinalizationQueues = globalThis.__oceankingAgentRunFinalizationQueues ?? new Map<RoomAgentId, Promise<void>>();
+globalThis.__oceankingAgentRunFinalizationQueues = agentRunFinalizationQueues;
 
 const ROOM_KIND_LABELS: Record<RoomMessageEmission["kind"], string> = {
   answer: "answer",
@@ -204,6 +207,24 @@ async function persistSession(agentId: RoomAgentId): Promise<void> {
     compatibility: session.compatibility,
     updatedAt: session.updatedAt,
   });
+}
+
+function enqueueAgentRunFinalization(agentId: RoomAgentId, task: () => Promise<void>): Promise<void> {
+  const previous = agentRunFinalizationQueues.get(agentId) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(task);
+  agentRunFinalizationQueues.set(agentId, next);
+  void next.finally(() => {
+    if (agentRunFinalizationQueues.get(agentId) === next) {
+      agentRunFinalizationQueues.delete(agentId);
+    }
+  });
+  return next;
+}
+
+async function waitForPendingAgentRunFinalization(agentId: RoomAgentId): Promise<void> {
+  await (agentRunFinalizationQueues.get(agentId) ?? Promise.resolve()).catch(() => undefined);
 }
 
 function lcmMessageToVisibleMessage(content: unknown): PersistedVisibleMessage {
@@ -426,6 +447,7 @@ export async function startAgentRoomRun(args: {
   requestSignal: AbortSignal;
 }) {
   const startupStartedAt = performance.now();
+  await waitForPendingAgentRunFinalization(args.agentId);
   const hydrateStartedAt = performance.now();
   const session = await hydrateSession(args.agentId);
   const hydrateMs = performance.now() - hydrateStartedAt;
@@ -581,13 +603,19 @@ export async function completeAgentRoomRun(args: {
   resolvedModel: string;
   compatibility: ProviderCompatibility;
   meta?: AssistantMessageMeta;
+  onTimingPhase?: (phase: string, details?: Record<string, unknown>) => void;
 }): Promise<void> {
+  const hydrateStartedAt = performance.now();
   const session = await hydrateSession(args.agentId);
+  args.onTimingPhase?.("complete_run_hydrate_session", {
+    durationMs: Math.max(0, performance.now() - hydrateStartedAt),
+  });
   const run = session.activeRun;
   if (!run || run.requestId !== args.requestId) {
     return;
   }
 
+  const buildAssistantMessageStartedAt = performance.now();
   const assistantMessage: PersistedVisibleMessage = {
     id: createUuid(),
     role: "assistant",
@@ -596,38 +624,61 @@ export async function completeAgentRoomRun(args: {
     ...(args.meta ? { meta: args.meta } : {}),
     createdAt: createTimestamp(),
   };
+  args.onTimingPhase?.("complete_run_build_assistant_message", {
+    durationMs: Math.max(0, performance.now() - buildAssistantMessageStartedAt),
+    assistantChars: assistantMessage.content.length,
+    emittedMessageCount: run.emittedMessages.length,
+    toolCount: run.toolEvents.length,
+  });
 
   session.history.push(assistantMessage);
   session.activeRun = undefined;
   session.resolvedModel = args.resolvedModel;
   session.compatibility = args.compatibility;
   session.updatedAt = createTimestamp();
-  await finalizePersistedAgentRuntime({
-    agentId: args.agentId,
-    assistantMessage,
-    resolvedModel: args.resolvedModel,
-    compatibility: args.compatibility,
+  args.onTimingPhase?.("complete_run_update_in_memory_session", {
+    historyCountAfter: session.history.length,
   });
-  await ingestCompletedRun({
-    agentId: args.agentId,
-    requestId: args.requestId,
-    assistantText: args.assistantText,
-    assistantHistoryEntry: assistantMessage.content,
-    roomId: run.roomId,
-    roomTitle: run.roomTitle,
-    userMessageId: run.userMessageId,
-    userSender: run.userSender,
-    userAttachments: run.userAttachments,
-    emittedMessages: run.emittedMessages,
-    roomActions: run.roomActions,
-    tools: run.toolEvents,
-    resolvedModel: args.resolvedModel,
-    compatibility: args.compatibility,
-    meta: args.meta,
-    createdAt: assistantMessage.createdAt,
-  }).catch(() => undefined);
+  void enqueueAgentRunFinalization(args.agentId, async () => {
+    args.onTimingPhase?.("complete_run_finalize_runtime_start");
+    await finalizePersistedAgentRuntime({
+      agentId: args.agentId,
+      assistantMessage,
+      resolvedModel: args.resolvedModel,
+      compatibility: args.compatibility,
+      onTimingPhase: args.onTimingPhase,
+    });
+    args.onTimingPhase?.("complete_run_finalize_runtime_end");
+    args.onTimingPhase?.("complete_run_ingest_completed_run_start");
+    await ingestCompletedRun({
+      agentId: args.agentId,
+      requestId: args.requestId,
+      assistantText: args.assistantText,
+      assistantHistoryEntry: assistantMessage.content,
+      roomId: run.roomId,
+      roomTitle: run.roomTitle,
+      userMessageId: run.userMessageId,
+      userSender: run.userSender,
+      userAttachments: run.userAttachments,
+      emittedMessages: run.emittedMessages,
+      roomActions: run.roomActions,
+      tools: run.toolEvents,
+      resolvedModel: args.resolvedModel,
+      compatibility: args.compatibility,
+      meta: args.meta,
+      createdAt: assistantMessage.createdAt,
+      onTimingPhase: args.onTimingPhase,
+    }).catch((error) => {
+      args.onTimingPhase?.("complete_run_ingest_completed_run_error", {
+        error: error instanceof Error ? error.message : "Unknown ingest error.",
+      });
+      return undefined;
+    });
+    args.onTimingPhase?.("complete_run_ingest_completed_run_end");
 
-  scheduleAutomaticAgentCompaction(args.agentId);
+    scheduleAutomaticAgentCompaction(args.agentId);
+    args.onTimingPhase?.("complete_run_schedule_automatic_compaction");
+  });
 }
 
 export function clearAgentRoomRun(agentId: RoomAgentId, requestId: string): void {
@@ -656,6 +707,7 @@ export async function compactAgentRoomSession(agentId: RoomAgentId, reason: "pos
 }
 
 export async function resetAgentRoomSession(agentId: RoomAgentId): Promise<void> {
+  await waitForPendingAgentRunFinalization(agentId);
   await (agentCompactionQueues.get(agentId) ?? Promise.resolve());
   pendingAutomaticCompactions.delete(agentId);
   const session = getOrCreateSession(agentId);

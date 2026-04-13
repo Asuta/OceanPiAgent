@@ -169,7 +169,7 @@ export const roomMessageArgsSchema = z.object({
   content: z.string().trim().min(1).max(4_000),
   kind: z.enum(["answer", "progress", "warning", "error", "clarification"]).optional().default("answer"),
   status: z.enum(["pending", "streaming", "completed", "failed"]).optional().default("completed"),
-  final: z.boolean().optional().default(true),
+  final: z.boolean().optional().default(false),
 });
 
 export const beginRoomMessageStreamArgsSchema = z
