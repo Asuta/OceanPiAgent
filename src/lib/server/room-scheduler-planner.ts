@@ -30,7 +30,21 @@ export function planSchedulerRound(room: RoomSession): SchedulerRoundPlan {
   const unseenMessages = room.roomMessages.filter(
     (message) => message.seq > lastCursor && message.seq <= cutoffSeq && message.sender.id !== participant.id,
   );
-  const visibleTargetMessages = getSchedulerVisibleTargetMessages(unseenMessages, participant);
+  const enabledAgentIds = new Set(enabledAgents.map((entry) => entry.id));
+  const hasHumanTrigger = unseenMessages.some(
+    (message) => message.sender.role === "participant" && !enabledAgentIds.has(message.sender.id),
+  );
+  const hasInitialOwnerAgentTrigger = lastCursor <= 0 && unseenMessages.some(
+    (message) => message.sender.role === "participant" && message.sender.id === room.ownerParticipantId && enabledAgentIds.has(message.sender.id),
+  );
+  const hasOwnerSynthesisTrigger = participant.id === room.ownerParticipantId && unseenMessages.some(
+    (message) => message.sender.role === "participant"
+      && enabledAgentIds.has(message.sender.id)
+      && message.sender.id !== room.ownerParticipantId,
+  );
+  const visibleTargetMessages = hasHumanTrigger || hasInitialOwnerAgentTrigger || hasOwnerSynthesisTrigger
+    ? getSchedulerVisibleTargetMessages(unseenMessages, participant)
+    : [];
 
   return {
     type: "participant",
