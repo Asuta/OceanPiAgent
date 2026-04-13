@@ -156,3 +156,65 @@ test("workspace store accepts assistant history tool-call parts with partialJson
     assert.equal(saved.version, currentEnvelope.version + 1);
   });
 });
+
+test("workspace store recovers stale running rooms while loading", async () => {
+  await withTempCwd(async ({ domain, store }) => {
+    const state = domain.createDefaultWorkspaceState();
+    const room = state.rooms[0]!;
+    const runningTurn = {
+      id: "stream:stale-running-turn",
+      agent: {
+        id: room.agentId,
+        label: "Harbor Concierge",
+      },
+      userMessage: {
+        ...domain.createRoomMessage(room.id, "system", "Scheduler packet", "system", {
+          sender: {
+            id: "room-scheduler",
+            name: "Room Scheduler",
+            role: "system",
+          },
+          kind: "system",
+        }),
+        roomId: room.id,
+      },
+      assistantContent: "",
+      tools: [],
+      emittedMessages: [],
+      status: "running" as const,
+      resolvedModel: "generic/fake-model",
+    };
+
+    const staleUpdatedAt = new Date(Date.now() - 200_000).toISOString();
+    state.rooms[0] = {
+      ...room,
+      scheduler: {
+        ...room.scheduler,
+        status: "running",
+        activeParticipantId: room.participants.find((participant) => participant.runtimeKind === "agent")?.id ?? null,
+      },
+      agentTurns: [runningTurn],
+      updatedAt: staleUpdatedAt,
+    };
+    state.agentStates[room.agentId] = {
+      ...state.agentStates[room.agentId],
+      agentTurns: [runningTurn],
+      updatedAt: staleUpdatedAt,
+    };
+
+    const current = await store.loadWorkspaceEnvelope();
+    await store.saveWorkspaceState({
+      expectedVersion: current.version,
+      state,
+    });
+
+    const loaded = await store.loadWorkspaceEnvelope();
+    const loadedRoom = loaded.state.rooms[0]!;
+    const loadedTurn = loaded.state.agentStates[room.agentId]?.agentTurns[0];
+
+    assert.equal(loadedRoom.scheduler.status, "idle");
+    assert.equal(loadedRoom.agentTurns[0]?.status, "error");
+    assert.equal(loadedTurn?.status, "error");
+    assert.equal(loadedTurn?.error, "Recovered stale running room after the scheduler stopped updating.");
+  });
+});

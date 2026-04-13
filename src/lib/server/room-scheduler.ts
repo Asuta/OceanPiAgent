@@ -18,6 +18,7 @@ import {
   runRoomTurnNonStreaming,
   type RunRoomTurnResult,
 } from "@/lib/server/room-runner";
+import { clearActiveAgentRoomRunForRoom } from "@/lib/server/agent-room-sessions";
 import { applyRoomTurnToWorkspace } from "@/lib/server/workspace-state";
 import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store";
 import { loadWorkspaceEnvelope, mutateWorkspace, mutateWorkspaceWithResult } from "@/lib/server/workspace-store";
@@ -25,6 +26,7 @@ import { hasSupersedingVisibleActivity, planSchedulerRound } from "@/lib/server/
 import { createUuid } from "@/lib/utils/uuid";
 
 export const DEFAULT_ROOM_SCHEDULER_MAX_ROUNDS = 20;
+const DEFAULT_ROOM_SCHEDULER_TURN_TIMEOUT_MS = 120_000;
 
 export interface RoomSchedulerRunHooks {
   signal?: AbortSignal;
@@ -273,6 +275,14 @@ function markTurnStopped(turn: AgentRoomTurn, reason: string): AgentRoomTurn {
   };
 }
 
+function shouldStopTurnForRoom(turn: AgentRoomTurn, roomId: string, stoppedTurnIds: Set<string>): boolean {
+  if (stoppedTurnIds.has(turn.id)) {
+    return true;
+  }
+
+  return turn.status === "running" && turn.userMessage.roomId === roomId;
+}
+
 function applyStoppedStateToWorkspace(workspace: RoomWorkspaceState, roomId: string, reason: string): RoomWorkspaceState {
   const stoppedTurnIds = new Set<string>();
   const rooms = sortRoomsByUpdatedAt(
@@ -298,23 +308,42 @@ function applyStoppedStateToWorkspace(workspace: RoomWorkspaceState, roomId: str
     }),
   );
 
-  if (stoppedTurnIds.size === 0) {
+  let agentStatesChanged = false;
+  const nextAgentStates = Object.fromEntries(
+    Object.entries(workspace.agentStates).map(([agentId, state]) => {
+      let stateChanged = false;
+      const nextTurns = state.agentTurns.map((turn) => {
+        if (!shouldStopTurnForRoom(turn, roomId, stoppedTurnIds)) {
+          return turn;
+        }
+
+        const nextTurn = markTurnStopped(turn, reason);
+        if (nextTurn !== turn) {
+          stoppedTurnIds.add(turn.id);
+          stateChanged = true;
+        }
+        return nextTurn;
+      });
+
+      if (!stateChanged) {
+        return [agentId, state];
+      }
+
+      agentStatesChanged = true;
+      return [agentId, {
+        ...state,
+        agentTurns: nextTurns,
+        updatedAt: createTimestamp(),
+      }];
+    }),
+  ) as RoomWorkspaceState["agentStates"];
+
+  if (!agentStatesChanged) {
     return {
       ...workspace,
       rooms,
     };
   }
-
-  const nextAgentStates = Object.fromEntries(
-    Object.entries(workspace.agentStates).map(([agentId, state]) => [
-      agentId,
-      {
-        ...state,
-        agentTurns: state.agentTurns.map((turn) => (stoppedTurnIds.has(turn.id) ? markTurnStopped(turn, reason) : turn)),
-        updatedAt: createTimestamp(),
-      },
-    ]),
-  ) as RoomWorkspaceState["agentStates"];
 
   return {
     ...workspace,
@@ -332,6 +361,29 @@ function getAbortReason(signal: AbortSignal | undefined, fallback: string): stri
     return reason;
   }
   return fallback;
+}
+
+function getRoomSchedulerTurnTimeoutMs(): number {
+  const raw = process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS?.trim();
+  const parsed = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ROOM_SCHEDULER_TURN_TIMEOUT_MS;
+}
+
+function createTimeoutSignal(timeoutMs: number): {
+  signal: AbortSignal;
+  cancel: () => void;
+} {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`Room scheduler turn timed out after ${timeoutMs} ms.`));
+  }, timeoutMs);
+
+  return {
+    signal: controller.signal,
+    cancel: () => {
+      clearTimeout(timer);
+    },
+  };
 }
 
 function isAbortLike(error: unknown, signal?: AbortSignal): boolean {
@@ -588,6 +640,10 @@ export async function runRoomSchedulerNow(
 
     const targetAgentId = roundPlan.participant.agentId ?? room.agentId;
     let result: RunRoomTurnResult;
+    const turnTimeout = createTimeoutSignal(getRoomSchedulerTurnTimeoutMs());
+    const currentTurnSignal = hooks.signal
+      ? combineAbortSignals([hooks.signal, turnTimeout.signal])
+      : turnTimeout.signal;
     try {
       result = await executeScheduledTurn({
         workspace: workspaceEnvelope.state,
@@ -596,12 +652,16 @@ export async function runRoomSchedulerNow(
         participant: roundPlan.participant,
         unseenMessages: roundPlan.unseenMessages,
         anchorMessageId: roundPlan.anchorMessageId,
-        hooks,
+        hooks: {
+          ...hooks,
+          signal: currentTurnSignal,
+        },
         deps,
       });
     } catch (error) {
-      if (isAbortLike(error, hooks.signal)) {
-        await deps.mutateWorkspace((workspace) => applyStoppedStateToWorkspace(workspace, roomId, getAbortReason(hooks.signal, "Room scheduler stopped.")));
+      if (isAbortLike(error, currentTurnSignal)) {
+        clearActiveAgentRoomRunForRoom(targetAgentId, roomId, getAbortReason(currentTurnSignal, "Room scheduler stopped."));
+        await deps.mutateWorkspace((workspace) => applyStoppedStateToWorkspace(workspace, roomId, getAbortReason(currentTurnSignal, "Room scheduler stopped.")));
         return;
       }
 
@@ -610,6 +670,8 @@ export async function runRoomSchedulerNow(
         await hooks.onError(error, meta);
       }
       throw error;
+    } finally {
+      turnTimeout.cancel();
     }
 
     result.markTimingPhase?.("scheduler_execute_turn_returned", {

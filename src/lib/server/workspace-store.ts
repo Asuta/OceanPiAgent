@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { roomWorkspaceStateSchema } from "@/lib/chat/schemas";
-import type { RoomWorkspaceState } from "@/lib/chat/types";
+import type { AgentRoomTurn, RoomWorkspaceState } from "@/lib/chat/types";
 import { createWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
 import { createDefaultWorkspaceState } from "@/lib/server/workspace-state";
 
@@ -13,6 +13,7 @@ export interface WorkspaceEnvelope {
 
 const WORKSPACE_ROOT = path.join(process.cwd(), ".oceanking", "workspace");
 const WORKSPACE_FILE = path.join(WORKSPACE_ROOT, "state.json");
+const DEFAULT_STALE_RUNNING_ROOM_TIMEOUT_MS = 150_000;
 
 declare global {
   var __oceankingWorkspaceWriteQueue: Promise<void> | undefined;
@@ -60,6 +61,76 @@ function normalizeEnvelope(value: unknown): WorkspaceEnvelope {
   };
 }
 
+function markTurnStopped(turn: AgentRoomTurn, reason: string): AgentRoomTurn {
+  if (turn.status !== "running") {
+    return turn;
+  }
+
+  return {
+    ...turn,
+    status: "error",
+    error: reason,
+  };
+}
+
+function getStaleRunningRoomTimeoutMs(): number {
+  const raw = process.env.OCEANKING_STALE_RUNNING_ROOM_TIMEOUT_MS?.trim();
+  const parsed = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_STALE_RUNNING_ROOM_TIMEOUT_MS;
+}
+
+function recoverStaleRunningRooms(state: RoomWorkspaceState, now = Date.now()): RoomWorkspaceState {
+  const staleReason = "Recovered stale running room after the scheduler stopped updating.";
+  const staleRoomIds = new Set<string>();
+  const nextRooms = state.rooms.map((room) => {
+    if (room.scheduler.status !== "running") {
+      return room;
+    }
+
+    const updatedAtMs = Date.parse(room.updatedAt || "");
+    if (!Number.isFinite(updatedAtMs) || now - updatedAtMs < getStaleRunningRoomTimeoutMs()) {
+      return room;
+    }
+
+    staleRoomIds.add(room.id);
+    return {
+      ...room,
+      scheduler: {
+        ...room.scheduler,
+        status: "idle" as const,
+        activeParticipantId: null,
+        roundCount: 0,
+      },
+      agentTurns: room.agentTurns.map((turn) => markTurnStopped(turn, staleReason)),
+      error: "",
+      updatedAt: createTimestamp(),
+    };
+  });
+
+  if (staleRoomIds.size === 0) {
+    return state;
+  }
+
+  const nextAgentStates = Object.fromEntries(
+    Object.entries(state.agentStates).map(([agentId, agentState]) => [
+      agentId,
+      {
+        ...agentState,
+        agentTurns: agentState.agentTurns.map((turn) => (
+          staleRoomIds.has(turn.userMessage.roomId) ? markTurnStopped(turn, staleReason) : turn
+        )),
+        updatedAt: createTimestamp(),
+      },
+    ]),
+  ) as RoomWorkspaceState["agentStates"];
+
+  return {
+    ...state,
+    rooms: nextRooms,
+    agentStates: nextAgentStates,
+  };
+}
+
 export async function loadWorkspaceEnvelope(): Promise<WorkspaceEnvelope> {
   await ensureWorkspaceDir();
   const raw = await readFile(WORKSPACE_FILE, "utf8").catch(() => "");
@@ -68,7 +139,11 @@ export async function loadWorkspaceEnvelope(): Promise<WorkspaceEnvelope> {
   }
 
   try {
-    return normalizeEnvelope(JSON.parse(raw) as unknown);
+    const envelope = normalizeEnvelope(JSON.parse(raw) as unknown);
+    return {
+      ...envelope,
+      state: recoverStaleRunningRooms(envelope.state),
+    };
   } catch {
     return createDefaultEnvelope();
   }

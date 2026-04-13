@@ -185,6 +185,99 @@ test("runRoomSchedulerNow advances multi-agent room work on the server and settl
   assert.equal(nextRoom.agentTurns.length, 2);
 });
 
+test("runRoomSchedulerNow stops after each enabled agent answers the same human message once", async () => {
+  let state = createDefaultWorkspaceState();
+  let room = addAgentParticipantToRoom({ room: state.rooms[0]!, agentId: "researcher" });
+  room = addAgentParticipantToRoom({ room, agentId: "operator" });
+  const inboundMessage = createRoomMessage(room.id, "user", "Give one take each, then stop.", "user", {
+    sender: {
+      id: "local-operator",
+      name: "You",
+      role: "participant",
+    },
+  });
+  room = appendMessageToRoom(room, inboundMessage);
+  state = {
+    ...state,
+    rooms: [room],
+    agentStates: {
+      ...state.agentStates,
+      researcher: createAgentSharedState(),
+      operator: createAgentSharedState(),
+    },
+  };
+
+  const callOrder: string[] = [];
+  const loadWorkspaceEnvelope = async () => ({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    state,
+  });
+  const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+    state = await mutator(state);
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+  };
+
+  await runRoomSchedulerNow(room.id, {
+    loadWorkspaceEnvelope,
+    mutateWorkspace,
+    runRoomTurnNonStreaming: async ({ roomId, agentId, message }) => {
+      callOrder.push(agentId);
+      const emittedMessages = [
+        createRoomMessage(roomId, "assistant", `${agentId} replied to ${message.id}.`, "agent_emit", {
+          sender: {
+            id: agentId,
+            name: agentId,
+            role: "participant",
+          },
+        }),
+      ];
+
+      return {
+        turn: {
+          id: `turn-${agentId}`,
+          agent: {
+            id: agentId,
+            label: agentId,
+          },
+          userMessage: {
+            ...createRoomMessage(roomId, "system", message.content, "system", {
+              sender: message.sender,
+              kind: "system",
+            }),
+            id: message.id,
+          },
+          assistantContent: `${agentId} done`,
+          tools: [],
+          emittedMessages,
+          status: "completed",
+          resolvedModel: "generic/fake-model",
+        },
+        resolvedModel: "generic/fake-model",
+        compatibility: {
+          providerKey: "generic",
+          providerLabel: "Generic",
+          baseUrl: "",
+          chatCompletionsToolStyle: "tools",
+          responsesContinuation: "replay",
+          responsesPayloadMode: "json",
+          notes: [],
+        },
+        emittedMessages,
+        receiptUpdates: [],
+        roomActions: [],
+      } satisfies RunRoomTurnResult;
+    },
+  });
+
+  assert.deepEqual(callOrder, ["concierge", "researcher", "operator"]);
+  assert.equal(state.rooms[0]?.scheduler.status, "idle");
+});
+
 test("runRoomSchedulerNow emits streaming callbacks for each scheduled turn", async () => {
   let state = createDefaultWorkspaceState();
   let room = addAgentParticipantToRoom({ room: state.rooms[0]!, agentId: "researcher" });
@@ -332,6 +425,101 @@ test("runRoomSchedulerNow emits streaming callbacks for each scheduled turn", as
     { agentId: "concierge", roomRunning: true },
     { agentId: "researcher", roomRunning: false },
   ]);
+});
+
+test("runRoomSchedulerNow stops a scheduled turn that times out", async () => {
+  const previousTimeout = process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS;
+  process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS = "20";
+
+  try {
+    let state = createDefaultWorkspaceState();
+    let room = addAgentParticipantToRoom({ room: state.rooms[0]!, agentId: "researcher" });
+    room = appendMessageToRoom(
+      room,
+      createRoomMessage(state.rooms[0]!.id, "user", "Please continue until timeout.", "user", {
+        sender: {
+          id: "local-operator",
+          name: "You",
+          role: "participant",
+        },
+      }),
+    );
+    state = {
+      ...state,
+      rooms: [room],
+      agentStates: {
+        ...state.agentStates,
+        researcher: createAgentSharedState(),
+      },
+    };
+
+    const loadWorkspaceEnvelope = async () => ({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    });
+    const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+      state = await mutator(state);
+      return {
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        state,
+      };
+    };
+
+    await runRoomSchedulerNow(room.id, {
+      loadWorkspaceEnvelope,
+      mutateWorkspace,
+      runRoomTurnNonStreaming: async ({ signal }) => {
+        await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            reject(signal.reason ?? new Error("Aborted"));
+          }, { once: true });
+        });
+        throw new Error("Unreachable");
+      },
+      resolveSettingsWithModelConfig: async (settings) => ({
+        settings,
+        modelConfig: null,
+        modelConfigOverrides: undefined,
+      }),
+      buildPreparedInputFromWorkspace: async ({ roomId, agentId, message, settings, anchorMessageId, turnId, signal }) => ({
+        room: {
+          id: roomId,
+          title: "Room 1",
+        },
+        agent: {
+          id: agentId,
+          label: agentId,
+          instruction: "",
+        },
+        attachedRooms: [],
+        knownAgents: [],
+        roomHistoryById: {},
+        message,
+        settings,
+        anchorMessageId,
+        turnId,
+        signal,
+      }),
+      runPreparedRoomTurn: async (preparedInput) => {
+        await new Promise<never>((_resolve, reject) => {
+          preparedInput.signal?.addEventListener("abort", () => {
+            reject(preparedInput.signal?.reason ?? new Error("Aborted"));
+          }, { once: true });
+        });
+        throw new Error("Unreachable");
+      },
+    });
+
+    assert.equal(state.rooms[0]?.scheduler.status, "idle");
+  } finally {
+    if (typeof previousTimeout === "string") {
+      process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS = previousTimeout;
+    } else {
+      delete process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS;
+    }
+  }
 });
 
 test("runRoomSchedulerNow forwards completed emitted room messages for bound-room delivery", async () => {
@@ -685,6 +873,67 @@ test("stopRoomScheduler forces a running room back to idle and marks running tur
   assert.equal(nextRoom.scheduler.status, "idle");
   assert.equal(nextRoom.scheduler.activeParticipantId, null);
   assert.equal(nextRoom.agentTurns[0]?.status, "error");
+  assert.equal(state.agentStates.concierge.agentTurns[0]?.error, "Stopped for testing.");
+});
+
+test("stopRoomScheduler also stops running agent-state turns that have not been persisted to the room yet", async () => {
+  let state = createDefaultWorkspaceState();
+  const room = state.rooms[0]!;
+  const runningTurn = {
+    id: "stream:agent-state-only-running-turn",
+    agent: {
+      id: "concierge",
+      label: "Harbor Concierge",
+    },
+    userMessage: createRoomMessage(room.id, "system", "Scheduler packet", "system", {
+      sender: {
+        id: "room-scheduler",
+        name: "Room Scheduler",
+        role: "system",
+      },
+      kind: "system",
+    }),
+    assistantContent: "",
+    tools: [],
+    emittedMessages: [],
+    status: "running" as const,
+  };
+  state = {
+    ...state,
+    rooms: [{
+      ...room,
+      scheduler: {
+        ...room.scheduler,
+        status: "running",
+        activeParticipantId: room.participants.find((participant) => participant.runtimeKind === "agent")?.id ?? null,
+      },
+      agentTurns: [],
+    }],
+    agentStates: {
+      ...state.agentStates,
+      concierge: {
+        ...state.agentStates.concierge,
+        agentTurns: [runningTurn],
+      },
+    },
+  };
+  const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+    state = await mutator(state);
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+  };
+
+  await stopRoomScheduler(room.id, "Stopped for testing.", {
+    mutateWorkspace,
+  });
+
+  const nextRoom = state.rooms[0]!;
+  assert.equal(nextRoom.scheduler.status, "idle");
+  assert.equal(nextRoom.agentTurns.length, 0);
+  assert.equal(state.agentStates.concierge.agentTurns[0]?.status, "error");
   assert.equal(state.agentStates.concierge.agentTurns[0]?.error, "Stopped for testing.");
 });
 

@@ -42,6 +42,7 @@ type ResponsesContinuationStrategy = "replay" | "previous_response_id";
 type PayloadRecord = Record<string, unknown>;
 
 const FINAL_ROOM_DELIVERY_SHORT_CIRCUIT_MS = 50;
+const DEFAULT_POST_TOOL_STALL_ABORT_MS = 20_000;
 
 function toPiAgentThinkingLevel(level: ThinkingLevel): PiAgentThinkingLevel {
   // pi-agent-core types lag OpenAI's current `none` effort value, but the
@@ -684,6 +685,12 @@ function shouldShortCircuitAfterFinalRoomDelivery(tool: ToolExecution, currentRo
     && tool.roomMessage.content.trim().length > 0;
 }
 
+function getPostToolStallAbortMs(): number {
+  const raw = process.env.OCEANKING_POST_TOOL_STALL_ABORT_MS?.trim();
+  const parsed = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_POST_TOOL_STALL_ABORT_MS;
+}
+
 async function runConversationAttempt(args: {
   messages: VisibleMessage[];
   resolvedModel: ReturnType<typeof resolvePiModel>;
@@ -787,6 +794,8 @@ async function runConversationAttempt(args: {
   let finalRoomDeliveryShortCircuitArmed = false;
   let shortCircuitedAfterFinalRoomDelivery = false;
   let resolveFinalRoomDeliveryShortCircuit: (() => void) | null = null;
+  let postToolStallAbortTimer: ReturnType<typeof setTimeout> | null = null;
+  let postToolStallAbortMessage = "";
   const finalRoomDeliveryShortCircuitPromise = new Promise<void>((resolve) => {
     resolveFinalRoomDeliveryShortCircuit = resolve;
   });
@@ -799,6 +808,13 @@ async function runConversationAttempt(args: {
     finalRoomDeliveryShortCircuitArmed = false;
   };
 
+  const clearPostToolStallAbort = () => {
+    if (postToolStallAbortTimer !== null) {
+      clearTimeout(postToolStallAbortTimer);
+      postToolStallAbortTimer = null;
+    }
+  };
+
   const armFinalRoomDeliveryShortCircuit = () => {
     clearFinalRoomDeliveryShortCircuit();
     finalRoomDeliveryShortCircuitArmed = true;
@@ -809,9 +825,19 @@ async function runConversationAttempt(args: {
     }, FINAL_ROOM_DELIVERY_SHORT_CIRCUIT_MS);
   };
 
+  const armPostToolStallAbort = (toolEvent: ToolExecution) => {
+    clearPostToolStallAbort();
+    const stallMs = getPostToolStallAbortMs();
+    postToolStallAbortTimer = setTimeout(() => {
+      postToolStallAbortMessage = `Model stalled for ${stallMs} ms after completing tool ${toolEvent.displayName}.`;
+      agent.abort();
+    }, stallMs);
+  };
+
   const unsubscribe = agent.subscribe((event) => {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       clearFinalRoomDeliveryShortCircuit();
+      clearPostToolStallAbort();
       assistantText += event.assistantMessageEvent.delta;
       args.callbacks?.onTextDelta?.(event.assistantMessageEvent.delta);
       return;
@@ -819,6 +845,7 @@ async function runConversationAttempt(args: {
 
     if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_delta") {
       clearFinalRoomDeliveryShortCircuit();
+      clearPostToolStallAbort();
       const contentBlock = event.assistantMessageEvent.partial.content[event.assistantMessageEvent.contentIndex];
       if (contentBlock?.type !== "toolCall") {
         return;
@@ -864,6 +891,7 @@ async function runConversationAttempt(args: {
       } else {
         clearFinalRoomDeliveryShortCircuit();
       }
+      armPostToolStallAbort(numberedToolEvent);
       return;
     }
 
@@ -874,6 +902,7 @@ async function runConversationAttempt(args: {
       }
       if (!hasToolCalls) {
         clearFinalRoomDeliveryShortCircuit();
+        clearPostToolStallAbort();
         return;
       }
 
@@ -898,10 +927,11 @@ async function runConversationAttempt(args: {
       finalRoomDeliveryShortCircuitPromise.then(() => ({ kind: "short_circuited" } as const)),
     ]);
     if (continueOutcome.kind === "error") {
-      throw continueOutcome.error;
+      throw (postToolStallAbortMessage ? new Error(postToolStallAbortMessage) : continueOutcome.error);
     }
   } finally {
     clearFinalRoomDeliveryShortCircuit();
+    clearPostToolStallAbort();
     unsubscribe();
     args.resolvedOptions.signal?.removeEventListener("abort", abortListener);
   }
@@ -914,6 +944,10 @@ async function runConversationAttempt(args: {
 
   if (toolLoopErrorMessage) {
     throw new Error(toolLoopErrorMessage);
+  }
+
+  if (postToolStallAbortMessage) {
+    throw new Error(postToolStallAbortMessage);
   }
 
   if (finalAssistantMessage?.stopReason === "error" || (finalAssistantMessage?.stopReason === "aborted" && !shortCircuitedAfterFinalRoomDelivery)) {

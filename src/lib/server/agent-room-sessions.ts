@@ -115,8 +115,34 @@ const ROOM_KIND_LABELS: Record<RoomMessageEmission["kind"], string> = {
   clarification: "clarification",
 };
 
+const DEFAULT_STALE_ACTIVE_RUN_TIMEOUT_MS = 150_000;
+
 function createTimestamp(): string {
   return new Date().toISOString();
+}
+
+function getStaleActiveRunTimeoutMs(): number {
+  const raw = process.env.OCEANKING_STALE_ACTIVE_RUN_TIMEOUT_MS?.trim();
+  const parsed = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_STALE_ACTIVE_RUN_TIMEOUT_MS;
+}
+
+function getContinuationSourceRun(session: AgentRuntimeSession): AgentRuntimeRun | undefined {
+  const activeRun = session.activeRun;
+  if (!activeRun) {
+    return undefined;
+  }
+
+  const updatedAtMs = Date.parse(session.updatedAt || "");
+  const isStale = Number.isFinite(updatedAtMs) && (Date.now() - updatedAtMs) >= getStaleActiveRunTimeoutMs();
+  if (!activeRun.abortController.signal.aborted && !isStale) {
+    return activeRun;
+  }
+
+  activeRun.abortController.abort(new Error(isStale ? "Cleared stale active room run." : "Cleared aborted active room run."));
+  session.activeRun = undefined;
+  session.updatedAt = createTimestamp();
+  return undefined;
 }
 
 function getOrCreateSession(agentId: RoomAgentId): AgentRuntimeSession {
@@ -136,19 +162,23 @@ function getOrCreateSession(agentId: RoomAgentId): AgentRuntimeSession {
   return created;
 }
 
-function runAgentCompactionTask<T>(agentId: RoomAgentId, task: () => Promise<T>): Promise<T> {
-  const previous = agentCompactionQueues.get(agentId) ?? Promise.resolve();
+function enqueueAgentScopedTask<T>(queue: Map<RoomAgentId, Promise<void>>, agentId: RoomAgentId, task: () => Promise<T>): Promise<T> {
+  const previous = queue.get(agentId) ?? Promise.resolve();
   const result = previous.catch(() => undefined).then(task);
   const tail = result.then(
     () => undefined,
     () => undefined,
   );
-  agentCompactionQueues.set(agentId, tail);
+  queue.set(agentId, tail);
   return result.finally(() => {
-    if (agentCompactionQueues.get(agentId) === tail) {
-      agentCompactionQueues.delete(agentId);
+    if (queue.get(agentId) === tail) {
+      queue.delete(agentId);
     }
   });
+}
+
+function runAgentCompactionTask<T>(agentId: RoomAgentId, task: () => Promise<T>): Promise<T> {
+  return enqueueAgentScopedTask(agentCompactionQueues, agentId, task);
 }
 
 async function syncCompactedHistoryToIdleSession(agentId: RoomAgentId, history: PersistedVisibleMessage[]): Promise<void> {
@@ -210,17 +240,11 @@ async function persistSession(agentId: RoomAgentId): Promise<void> {
 }
 
 function enqueueAgentRunFinalization(agentId: RoomAgentId, task: () => Promise<void>): Promise<void> {
-  const previous = agentRunFinalizationQueues.get(agentId) ?? Promise.resolve();
-  const next = previous
-    .catch(() => undefined)
-    .then(task);
-  agentRunFinalizationQueues.set(agentId, next);
-  void next.finally(() => {
-    if (agentRunFinalizationQueues.get(agentId) === next) {
-      agentRunFinalizationQueues.delete(agentId);
-    }
-  });
-  return next;
+  return enqueueAgentScopedTask(agentRunFinalizationQueues, agentId, task);
+}
+
+function hasPendingAgentRunFinalization(agentId: RoomAgentId): boolean {
+  return agentRunFinalizationQueues.has(agentId);
 }
 
 async function waitForPendingAgentRunFinalization(agentId: RoomAgentId): Promise<void> {
@@ -435,60 +459,47 @@ function toVisibleHistory(history: PersistedVisibleMessage[]): VisibleMessage[] 
   }));
 }
 
-export async function startAgentRoomRun(args: {
+async function appendContinuationSnapshotToSession(args: {
   agentId: RoomAgentId;
+  session: AgentRuntimeSession;
+  previousRun: AgentRuntimeRun;
+  continuationSnapshot: string;
+}): Promise<void> {
+  args.session.history.push({
+    id: createUuid(),
+    role: "assistant",
+    content: args.continuationSnapshot,
+    attachments: [],
+    createdAt: createTimestamp(),
+  });
+  args.session.updatedAt = createTimestamp();
+  await persistSession(args.agentId);
+  await ingestContinuationSnapshot({
+    agentId: args.agentId,
+    requestId: args.previousRun.requestId,
+    snapshotText: args.continuationSnapshot,
+    roomId: args.previousRun.roomId,
+    roomTitle: args.previousRun.roomTitle,
+    userMessageId: args.previousRun.userMessageId,
+    userSender: args.previousRun.userSender,
+    userAttachments: args.previousRun.userAttachments,
+    assistantContent: args.previousRun.assistantContent,
+    tools: args.previousRun.toolEvents,
+    emittedMessages: args.previousRun.emittedMessages,
+    roomActions: args.previousRun.roomActions,
+    createdAt: createTimestamp(),
+  }).catch(() => undefined);
+}
+
+function createIncomingRoomMessage(args: {
   roomId: string;
   roomTitle: string;
-  attachedRooms: AttachedRoomDescriptor[];
   userMessageId: string;
   userSender: RoomSender;
   userContent: string;
   userAttachments: MessageImageAttachment[];
-  requestSignal: AbortSignal;
-}) {
-  const startupStartedAt = performance.now();
-  await waitForPendingAgentRunFinalization(args.agentId);
-  const hydrateStartedAt = performance.now();
-  const session = await hydrateSession(args.agentId);
-  const hydrateMs = performance.now() - hydrateStartedAt;
-  const previousRun = session.activeRun;
-  const continuationSnapshot = previousRun ? buildContinuationSnapshot(previousRun) : undefined;
-  let continuationMs = 0;
-
-  if (previousRun && continuationSnapshot) {
-    const continuationStartedAt = performance.now();
-    session.history.push({
-      id: createUuid(),
-      role: "assistant",
-      content: continuationSnapshot,
-      attachments: [],
-      createdAt: createTimestamp(),
-    });
-    session.updatedAt = createTimestamp();
-    await persistSession(args.agentId);
-    await ingestContinuationSnapshot({
-      agentId: args.agentId,
-      requestId: previousRun.requestId,
-      snapshotText: continuationSnapshot,
-      roomId: previousRun.roomId,
-      roomTitle: previousRun.roomTitle,
-      userMessageId: previousRun.userMessageId,
-      userSender: previousRun.userSender,
-      userAttachments: previousRun.userAttachments,
-      assistantContent: previousRun.assistantContent,
-      tools: previousRun.toolEvents,
-      emittedMessages: previousRun.emittedMessages,
-      roomActions: previousRun.roomActions,
-      createdAt: createTimestamp(),
-    }).catch(() => undefined);
-    continuationMs = performance.now() - continuationStartedAt;
-  }
-
-  const requestId = createUuid();
-  const abortController = new AbortController();
-  const signal = AbortSignal.any([args.requestSignal, abortController.signal]);
-
-  const incomingMessage: PersistedVisibleMessage = {
+}): PersistedVisibleMessage {
+  return {
     id: createUuid(),
     role: "user",
     content: buildIncomingRoomEnvelope(
@@ -502,10 +513,23 @@ export async function startAgentRoomRun(args: {
     attachments: [...args.userAttachments],
     createdAt: createTimestamp(),
   };
+}
 
-  session.history.push(incomingMessage);
-  session.activeRun = {
-    requestId,
+function activateAgentRun(args: {
+  session: AgentRuntimeSession;
+  requestId: string;
+  roomId: string;
+  roomTitle: string;
+  userMessageId: string;
+  userSender: RoomSender;
+  userContent: string;
+  userAttachments: MessageImageAttachment[];
+  abortController: AbortController;
+  incomingMessage: PersistedVisibleMessage;
+}): void {
+  args.session.history.push(args.incomingMessage);
+  args.session.activeRun = {
+    requestId: args.requestId,
     roomId: args.roomId,
     roomTitle: args.roomTitle,
     userMessageId: args.userMessageId,
@@ -516,9 +540,159 @@ export async function startAgentRoomRun(args: {
     toolEvents: [],
     emittedMessages: [],
     roomActions: [],
-    abortController,
+    abortController: args.abortController,
   };
-  session.updatedAt = createTimestamp();
+  args.session.updatedAt = createTimestamp();
+}
+
+function createAssistantHistoryMessage(args: {
+  run: AgentRuntimeRun;
+  assistantText: string;
+  meta?: AssistantMessageMeta;
+}): PersistedVisibleMessage {
+  return {
+    id: createUuid(),
+    role: "assistant",
+    content: buildAssistantHistoryEntry(args.run, args.assistantText),
+    attachments: [],
+    ...(args.meta ? { meta: args.meta } : {}),
+    createdAt: createTimestamp(),
+  };
+}
+
+function completeRunInSession(args: {
+  session: AgentRuntimeSession;
+  assistantMessage: PersistedVisibleMessage;
+  resolvedModel: string;
+  compatibility: ProviderCompatibility;
+}): void {
+  args.session.history.push(args.assistantMessage);
+  args.session.activeRun = undefined;
+  args.session.resolvedModel = args.resolvedModel;
+  args.session.compatibility = args.compatibility;
+  args.session.updatedAt = createTimestamp();
+}
+
+async function finalizeCompletedAgentRun(args: {
+  agentId: RoomAgentId;
+  requestId: string;
+  run: AgentRuntimeRun;
+  assistantText: string;
+  assistantMessage: PersistedVisibleMessage;
+  resolvedModel: string;
+  compatibility: ProviderCompatibility;
+  meta?: AssistantMessageMeta;
+  onTimingPhase?: (phase: string, details?: Record<string, unknown>) => void;
+}): Promise<void> {
+  args.onTimingPhase?.("complete_run_finalize_runtime_start");
+  await finalizePersistedAgentRuntime({
+    agentId: args.agentId,
+    assistantMessage: args.assistantMessage,
+    resolvedModel: args.resolvedModel,
+    compatibility: args.compatibility,
+    onTimingPhase: args.onTimingPhase,
+  });
+  args.onTimingPhase?.("complete_run_finalize_runtime_end");
+
+  args.onTimingPhase?.("complete_run_ingest_completed_run_start");
+  await ingestCompletedRun({
+    agentId: args.agentId,
+    requestId: args.requestId,
+    assistantText: args.assistantText,
+    assistantHistoryEntry: args.assistantMessage.content,
+    roomId: args.run.roomId,
+    roomTitle: args.run.roomTitle,
+    userMessageId: args.run.userMessageId,
+    userSender: args.run.userSender,
+    userAttachments: args.run.userAttachments,
+    emittedMessages: args.run.emittedMessages,
+    roomActions: args.run.roomActions,
+    tools: args.run.toolEvents,
+    resolvedModel: args.resolvedModel,
+    compatibility: args.compatibility,
+    meta: args.meta,
+    createdAt: args.assistantMessage.createdAt,
+    onTimingPhase: args.onTimingPhase,
+  }).catch((error) => {
+    args.onTimingPhase?.("complete_run_ingest_completed_run_error", {
+      error: error instanceof Error ? error.message : "Unknown ingest error.",
+    });
+    return undefined;
+  });
+  args.onTimingPhase?.("complete_run_ingest_completed_run_end");
+
+  scheduleAutomaticAgentCompaction(args.agentId);
+  args.onTimingPhase?.("complete_run_schedule_automatic_compaction");
+}
+
+export async function startAgentRoomRun(args: {
+  agentId: RoomAgentId;
+  roomId: string;
+  roomTitle: string;
+  attachedRooms: AttachedRoomDescriptor[];
+  userMessageId: string;
+  userSender: RoomSender;
+  userContent: string;
+  userAttachments: MessageImageAttachment[];
+  requestSignal: AbortSignal;
+}) {
+  const startupStartedAt = performance.now();
+  const shouldAssembleFromLcm = !hasPendingAgentRunFinalization(args.agentId);
+  const hydrateStartedAt = performance.now();
+  const session = await hydrateSession(args.agentId);
+  const hydrateMs = performance.now() - hydrateStartedAt;
+  const previousRun = getContinuationSourceRun(session);
+  const continuationSnapshot = previousRun ? buildContinuationSnapshot(previousRun) : undefined;
+  let continuationMs = 0;
+
+  if (previousRun && continuationSnapshot) {
+    const continuationStartedAt = performance.now();
+    await appendContinuationSnapshotToSession({
+      agentId: args.agentId,
+      session,
+      previousRun,
+      continuationSnapshot,
+    });
+    continuationMs = performance.now() - continuationStartedAt;
+  }
+
+  const requestId = createUuid();
+  const abortController = new AbortController();
+  const mirrorRequestAbort = () => {
+    abortController.abort(
+      args.requestSignal.reason instanceof Error
+        ? args.requestSignal.reason
+        : new Error("Room run aborted by the scheduler request signal."),
+    );
+  };
+  if (args.requestSignal.aborted) {
+    mirrorRequestAbort();
+  } else {
+    args.requestSignal.addEventListener("abort", mirrorRequestAbort, { once: true });
+  }
+  const signal = AbortSignal.any([args.requestSignal, abortController.signal]);
+
+  const incomingMessage = createIncomingRoomMessage({
+    roomId: args.roomId,
+    roomTitle: args.roomTitle,
+    userMessageId: args.userMessageId,
+    userSender: args.userSender,
+    userContent: args.userContent,
+    userAttachments: args.userAttachments,
+  });
+
+  activateAgentRun({
+    session,
+    requestId,
+    roomId: args.roomId,
+    roomTitle: args.roomTitle,
+    userMessageId: args.userMessageId,
+    userSender: args.userSender,
+    userContent: args.userContent,
+    userAttachments: args.userAttachments,
+    abortController,
+    incomingMessage,
+  });
   const persistAndIngestStartedAt = performance.now();
   await persistSession(args.agentId);
   await ingestIncomingRoomEnvelope({
@@ -536,7 +710,9 @@ export async function startAgentRoomRun(args: {
   }).catch(() => undefined);
   const persistAndIngestMs = performance.now() - persistAndIngestStartedAt;
   const assembleStartedAt = performance.now();
-  const assembledPromptContext = await assembleSessionViewFromLcm(args.agentId).catch(() => null);
+  const assembledPromptContext = shouldAssembleFromLcm
+    ? await assembleSessionViewFromLcm(args.agentId).catch(() => null)
+    : null;
   const assembleMs = performance.now() - assembleStartedAt;
   if (assembledPromptContext) {
     session.history = assembledPromptContext.history;
@@ -616,14 +792,11 @@ export async function completeAgentRoomRun(args: {
   }
 
   const buildAssistantMessageStartedAt = performance.now();
-  const assistantMessage: PersistedVisibleMessage = {
-    id: createUuid(),
-    role: "assistant",
-    content: buildAssistantHistoryEntry(run, args.assistantText),
-    attachments: [],
-    ...(args.meta ? { meta: args.meta } : {}),
-    createdAt: createTimestamp(),
-  };
+  const assistantMessage = createAssistantHistoryMessage({
+    run,
+    assistantText: args.assistantText,
+    meta: args.meta,
+  });
   args.onTimingPhase?.("complete_run_build_assistant_message", {
     durationMs: Math.max(0, performance.now() - buildAssistantMessageStartedAt),
     assistantChars: assistantMessage.content.length,
@@ -631,53 +804,27 @@ export async function completeAgentRoomRun(args: {
     toolCount: run.toolEvents.length,
   });
 
-  session.history.push(assistantMessage);
-  session.activeRun = undefined;
-  session.resolvedModel = args.resolvedModel;
-  session.compatibility = args.compatibility;
-  session.updatedAt = createTimestamp();
+  completeRunInSession({
+    session,
+    assistantMessage,
+    resolvedModel: args.resolvedModel,
+    compatibility: args.compatibility,
+  });
   args.onTimingPhase?.("complete_run_update_in_memory_session", {
     historyCountAfter: session.history.length,
   });
   void enqueueAgentRunFinalization(args.agentId, async () => {
-    args.onTimingPhase?.("complete_run_finalize_runtime_start");
-    await finalizePersistedAgentRuntime({
+    await finalizeCompletedAgentRun({
       agentId: args.agentId,
+      requestId: args.requestId,
+      run,
+      assistantText: args.assistantText,
       assistantMessage,
       resolvedModel: args.resolvedModel,
       compatibility: args.compatibility,
-      onTimingPhase: args.onTimingPhase,
-    });
-    args.onTimingPhase?.("complete_run_finalize_runtime_end");
-    args.onTimingPhase?.("complete_run_ingest_completed_run_start");
-    await ingestCompletedRun({
-      agentId: args.agentId,
-      requestId: args.requestId,
-      assistantText: args.assistantText,
-      assistantHistoryEntry: assistantMessage.content,
-      roomId: run.roomId,
-      roomTitle: run.roomTitle,
-      userMessageId: run.userMessageId,
-      userSender: run.userSender,
-      userAttachments: run.userAttachments,
-      emittedMessages: run.emittedMessages,
-      roomActions: run.roomActions,
-      tools: run.toolEvents,
-      resolvedModel: args.resolvedModel,
-      compatibility: args.compatibility,
       meta: args.meta,
-      createdAt: assistantMessage.createdAt,
       onTimingPhase: args.onTimingPhase,
-    }).catch((error) => {
-      args.onTimingPhase?.("complete_run_ingest_completed_run_error", {
-        error: error instanceof Error ? error.message : "Unknown ingest error.",
-      });
-      return undefined;
     });
-    args.onTimingPhase?.("complete_run_ingest_completed_run_end");
-
-    scheduleAutomaticAgentCompaction(args.agentId);
-    args.onTimingPhase?.("complete_run_schedule_automatic_compaction");
   });
 }
 
@@ -688,6 +835,18 @@ export function clearAgentRoomRun(agentId: RoomAgentId, requestId: string): void
     return;
   }
 
+  session.activeRun = undefined;
+  session.updatedAt = createTimestamp();
+}
+
+export function clearActiveAgentRoomRunForRoom(agentId: RoomAgentId, roomId: string, reason?: string): void {
+  const session = getOrCreateSession(agentId);
+  const run = session.activeRun;
+  if (!run || run.roomId !== roomId) {
+    return;
+  }
+
+  run.abortController.abort(new Error(reason ?? "Agent room run cleared."));
   session.activeRun = undefined;
   session.updatedAt = createTimestamp();
 }

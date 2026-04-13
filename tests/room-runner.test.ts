@@ -6,7 +6,12 @@ import test from "node:test";
 import { createKnownAgentCards } from "@/lib/chat/workspace-domain";
 import type { AssistantMessageMeta, MessageImageAttachment } from "@/lib/chat/types";
 import { closeLcmDatabase } from "@/lib/server/lcm/db";
-import { resetAgentRoomSession } from "@/lib/server/agent-room-sessions";
+import {
+  clearActiveAgentRoomRunForRoom,
+  hasActiveAgentRoomRun,
+  resetAgentRoomSession,
+  startAgentRoomRun,
+} from "@/lib/server/agent-room-sessions";
 import { runPreparedRoomTurn } from "@/lib/server/room-runner";
 
 const TEST_IMAGE_ATTACHMENT: MessageImageAttachment = {
@@ -187,6 +192,103 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
       ["draft-segment", "tool", "room-message", "tool"],
     );
 
+    await resetAgentRoomSession("concierge");
+  });
+});
+
+test("clearing a timed-out active run prevents stale continuation from leaking into the next room", async () => {
+  await withTempCwd(async () => {
+    await resetAgentRoomSession("concierge");
+
+    const firstController = new AbortController();
+    await startAgentRoomRun({
+      agentId: "concierge",
+      roomId: "room-stale",
+      roomTitle: "Stale Room",
+      attachedRooms: [],
+      userMessageId: "stale-user-msg",
+      userSender: {
+        id: "local-user",
+        name: "You",
+        role: "participant",
+      },
+      userContent: "Old unfinished task",
+      userAttachments: [],
+      requestSignal: firstController.signal,
+    });
+
+    assert.equal(hasActiveAgentRoomRun("concierge"), true);
+
+    clearActiveAgentRoomRunForRoom("concierge", "room-stale", "Timed out for test.");
+
+    assert.equal(hasActiveAgentRoomRun("concierge"), false);
+
+    const secondController = new AbortController();
+    const nextRun = await startAgentRoomRun({
+      agentId: "concierge",
+      roomId: "room-fresh",
+      roomTitle: "Fresh Room",
+      attachedRooms: [],
+      userMessageId: "fresh-user-msg",
+      userSender: {
+        id: "local-user",
+        name: "You",
+        role: "participant",
+      },
+      userContent: "New task",
+      userAttachments: [],
+      requestSignal: secondController.signal,
+    });
+
+    assert.equal(nextRun.continuationSnapshot, undefined);
+
+    clearActiveAgentRoomRunForRoom("concierge", "room-fresh", "Cleanup.");
+    await resetAgentRoomSession("concierge");
+  });
+});
+
+test("an externally aborted active run does not leak a continuation snapshot into the next room", async () => {
+  await withTempCwd(async () => {
+    await resetAgentRoomSession("concierge");
+
+    const firstController = new AbortController();
+    await startAgentRoomRun({
+      agentId: "concierge",
+      roomId: "room-aborted",
+      roomTitle: "Aborted Room",
+      attachedRooms: [],
+      userMessageId: "aborted-user-msg",
+      userSender: {
+        id: "local-user",
+        name: "You",
+        role: "participant",
+      },
+      userContent: "Old aborted task",
+      userAttachments: [],
+      requestSignal: firstController.signal,
+    });
+
+    firstController.abort(new Error("Timed out for test."));
+
+    const secondController = new AbortController();
+    const nextRun = await startAgentRoomRun({
+      agentId: "concierge",
+      roomId: "room-fresh-after-abort",
+      roomTitle: "Fresh Room After Abort",
+      attachedRooms: [],
+      userMessageId: "fresh-user-msg-after-abort",
+      userSender: {
+        id: "local-user",
+        name: "You",
+        role: "participant",
+      },
+      userContent: "New task",
+      userAttachments: [],
+      requestSignal: secondController.signal,
+    });
+
+    assert.equal(nextRun.continuationSnapshot, undefined);
+    clearActiveAgentRoomRunForRoom("concierge", "room-fresh-after-abort", "Cleanup.");
     await resetAgentRoomSession("concierge");
   });
 });

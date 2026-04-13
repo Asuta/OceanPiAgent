@@ -19,6 +19,7 @@ import { upsertRoomMessageInTurn } from "@/components/workspace/room-turn-state"
 import { appendDraftDelta, appendTimelineEvent, finalizeLatestDraftSegment, mergeAgentTurns } from "@/components/workspace/agent-turn-state";
 
 const ROOM_MESSAGE_PREVIEW_FLUSH_MS = 75;
+const ROOM_STREAM_IDLE_RECONCILE_MS = 15_000;
 
 type RoomUiTimingEntry = {
   roomId: string;
@@ -203,6 +204,21 @@ function reconcileCompletedStreamTurn(args: {
   return finalTurn;
 }
 
+function isRoomStreamAuthoritativelyRunning(state: RoomWorkspaceState, roomId: string): boolean {
+  const room = state.rooms.find((entry) => entry.id === roomId);
+  if (!room) {
+    return false;
+  }
+
+  if (room.scheduler.status === "running" || room.agentTurns.some((turn) => turn.status === "running")) {
+    return true;
+  }
+
+  return Object.values(state.agentStates).some((agentState) =>
+    agentState.agentTurns.some((turn) => turn.userMessage.roomId === roomId && turn.status === "running"),
+  );
+}
+
 interface SendMessageArgs {
   roomId: string;
   content: string;
@@ -323,6 +339,7 @@ export function useRoomStreamingSend(args: {
       const previewMessageRoomIdById = new Map<string, string>();
       const pendingPreviewMessagesById = new Map<string, RoomMessage>();
       let previewFlushTimer: number | null = null;
+      let idleReconcileTimer: number | null = null;
 
       const flushPreviewMessages = () => {
         if (previewFlushTimer !== null) {
@@ -347,6 +364,36 @@ export function useRoomStreamingSend(args: {
         previewFlushTimer = window.setTimeout(() => {
           flushPreviewMessages();
         }, ROOM_MESSAGE_PREVIEW_FLUSH_MS);
+      };
+
+      const clearIdleReconcileTimer = () => {
+        if (idleReconcileTimer !== null) {
+          window.clearTimeout(idleReconcileTimer);
+          idleReconcileTimer = null;
+        }
+      };
+
+      const scheduleIdleReconcile = () => {
+        clearIdleReconcileTimer();
+        idleReconcileTimer = window.setTimeout(() => {
+          void (async () => {
+            if (requestController.signal.aborted || activeRoomStreamRequestIdsRef.current[roomId] !== localRequestId) {
+              return;
+            }
+
+            const payload = await refreshWorkspaceFromServer().catch(() => null);
+            if (requestController.signal.aborted || activeRoomStreamRequestIdsRef.current[roomId] !== localRequestId) {
+              return;
+            }
+
+            if (payload?.state && !isRoomStreamAuthoritativelyRunning(payload.state, roomId)) {
+              requestController.abort(new Error("Room stream reconciled from workspace state."));
+              return;
+            }
+
+            scheduleIdleReconcile();
+          })();
+        }, ROOM_STREAM_IDLE_RECONCILE_MS);
       };
 
       const clearPreviewMessage = (messageId: string) => {
@@ -377,10 +424,13 @@ export function useRoomStreamingSend(args: {
           throw new Error(payload?.error || "The room stream returned an unknown error.");
         }
 
+        scheduleIdleReconcile();
+
         await readRoomStream({
           response,
           shouldContinue: () => activeRoomStreamRequestIdsRef.current[roomId] === localRequestId,
           onTurnStart: (turn) => {
+            scheduleIdleReconcile();
             activeTurnId = turn.id;
             activeTurnAgentId = turn.agent.id;
             setStreamingAgentIdsByRoomId((current) => ({
@@ -390,6 +440,7 @@ export function useRoomStreamingSend(args: {
             updateAgentTurnsEphemeral(turn.agent.id, (turns) => mergeAgentTurns(turns, [turn]));
           },
           onTextDelta: (delta) => {
+            scheduleIdleReconcile();
             if (!activeTurnId || !activeTurnAgentId) {
               return;
             }
@@ -399,6 +450,7 @@ export function useRoomStreamingSend(args: {
             );
           },
           onTool: (tool) => {
+            scheduleIdleReconcile();
             if (!activeTurnId || !activeTurnAgentId) {
               return;
             }
@@ -420,6 +472,7 @@ export function useRoomStreamingSend(args: {
             );
           },
           onRoomMessagePreview: (message) => {
+            scheduleIdleReconcile();
             if (!firstPreviewLogged) {
               firstPreviewLogged = true;
               recordRoomUiTiming({
@@ -441,6 +494,7 @@ export function useRoomStreamingSend(args: {
             schedulePreviewFlush();
           },
           onRoomMessage: (message) => {
+            scheduleIdleReconcile();
             if (!firstFinalRoomMessageLogged && message.role === "assistant" && message.status === "completed" && message.final) {
               firstFinalRoomMessageLogged = true;
               recordRoomUiTiming({
@@ -468,6 +522,7 @@ export function useRoomStreamingSend(args: {
             );
           },
           onReceiptUpdate: (update) => {
+            scheduleIdleReconcile();
             updateRoomStateEphemeral(update.roomId, (room) => {
               const nextMessages = applyMessageReceiptUpdate(room.roomMessages, update);
               if (nextMessages === room.roomMessages) {
@@ -484,6 +539,7 @@ export function useRoomStreamingSend(args: {
             applyReceiptUpdateToAllAgentConsolesEphemeral(update);
           },
           onDone: (event) => {
+            clearIdleReconcileTimer();
             if (!doneLogged) {
               doneLogged = true;
               recordRoomUiTiming({
@@ -551,6 +607,7 @@ export function useRoomStreamingSend(args: {
           window.clearTimeout(previewFlushTimer);
           previewFlushTimer = null;
         }
+        clearIdleReconcileTimer();
         pendingPreviewMessagesById.clear();
         if (activeRoomStreamControllersRef.current[roomId] === requestController) {
           delete activeRoomStreamControllersRef.current[roomId];
