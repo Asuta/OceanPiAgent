@@ -5,6 +5,7 @@ import type {
   AssistantMessageMeta,
   MessageImageAttachment,
   RoomAgentId,
+  RoomChatStreamEvent,
   RoomMessage,
   RoomMessageReceiptUpdate,
   RoomSession,
@@ -65,6 +66,142 @@ function recordRoomUiTiming(args: {
 type MutableRef<T> = {
   current: T;
 };
+
+type DoneRoomStreamEvent = Extract<RoomChatStreamEvent, { type: "done" }>;
+type UpdateRoomStateEphemeral = (roomId: string, updater: (room: RoomSession) => RoomSession) => void;
+type UpdateAgentTurnsEphemeral = (agentId: RoomAgentId, updater: (turns: AgentRoomTurn[]) => AgentRoomTurn[]) => void;
+type UpdateAgentState = (agentId: RoomAgentId, updater: (state: AgentSharedState) => AgentSharedState) => void;
+
+function flushPendingPreviewMessages(args: {
+  pendingPreviewMessagesById: Map<string, RoomMessage>;
+  activeTurnId: string | null;
+  activeTurnAgentId: RoomAgentId | null;
+  updateRoomStateEphemeral: UpdateRoomStateEphemeral;
+  updateAgentTurnsEphemeral: UpdateAgentTurnsEphemeral;
+}): void {
+  if (args.pendingPreviewMessagesById.size === 0) {
+    return;
+  }
+
+  const pendingPreviewMessages = [...args.pendingPreviewMessagesById.values()];
+  args.pendingPreviewMessagesById.clear();
+  const pendingPreviewMessagesByRoomId = new Map<string, typeof pendingPreviewMessages>();
+
+  for (const message of pendingPreviewMessages) {
+    const roomMessages = pendingPreviewMessagesByRoomId.get(message.roomId);
+    if (roomMessages) {
+      roomMessages.push(message);
+      continue;
+    }
+
+    pendingPreviewMessagesByRoomId.set(message.roomId, [message]);
+  }
+
+  for (const [previewRoomId, messages] of pendingPreviewMessagesByRoomId) {
+    args.updateRoomStateEphemeral(previewRoomId, (room) => {
+      let nextRoom = room;
+      for (const message of messages) {
+        nextRoom = upsertMessageToRoom(nextRoom, message);
+      }
+      return nextRoom;
+    });
+  }
+
+  if (!args.activeTurnId || !args.activeTurnAgentId) {
+    return;
+  }
+
+  args.updateAgentTurnsEphemeral(args.activeTurnAgentId, (turns) =>
+    turns.map((turn) => {
+      if (turn.id !== args.activeTurnId) {
+        return turn;
+      }
+
+      let nextTurn = turn;
+      for (const message of pendingPreviewMessages) {
+        nextTurn = upsertRoomMessageInTurn(nextTurn, message);
+      }
+      return nextTurn;
+    }),
+  );
+}
+
+function removeUnfinalizedPreviewMessages(args: {
+  roomId: string;
+  finalTurn: DoneRoomStreamEvent["turn"];
+  previewMessageIds: Set<string>;
+  previewMessageRoomIdById: Map<string, string>;
+  updateRoomStateEphemeral: UpdateRoomStateEphemeral;
+}): void {
+  const finalizedMessageIds = new Set(args.finalTurn.emittedMessages.map((message) => message.id));
+  for (const previewMessageId of args.previewMessageIds) {
+    if (finalizedMessageIds.has(previewMessageId)) {
+      continue;
+    }
+
+    const previewRoomId = args.previewMessageRoomIdById.get(previewMessageId) ?? args.roomId;
+    args.updateRoomStateEphemeral(previewRoomId, (room) => ({
+      ...room,
+      roomMessages: room.roomMessages.filter((message) => message.id !== previewMessageId),
+      updatedAt: createTimestamp(),
+    }));
+  }
+}
+
+function reconcileCompletedStreamTurn(args: {
+  roomId: string;
+  event: DoneRoomStreamEvent;
+  previewMessageIds: Set<string>;
+  previewMessageRoomIdById: Map<string, string>;
+  updateRoomStateEphemeral: UpdateRoomStateEphemeral;
+  updateAgentTurnsEphemeral: UpdateAgentTurnsEphemeral;
+  updateAgentState: UpdateAgentState;
+}): DoneRoomStreamEvent["turn"] {
+  const finalTurn = args.event.turn;
+  args.updateRoomStateEphemeral(args.roomId, (room) => ({
+    ...room,
+    scheduler: args.event.roomRunning
+      ? room.scheduler
+      : {
+          ...room.scheduler,
+          status: "idle",
+          activeParticipantId: null,
+          roundCount: 0,
+        },
+    roomMessages: room.roomMessages.map((message) =>
+      message.id === finalTurn.userMessage.id ? finalTurn.userMessage : message,
+    ),
+    error: "",
+    updatedAt: createTimestamp(),
+  }));
+
+  removeUnfinalizedPreviewMessages({
+    roomId: args.roomId,
+    finalTurn,
+    previewMessageIds: args.previewMessageIds,
+    previewMessageRoomIdById: args.previewMessageRoomIdById,
+    updateRoomStateEphemeral: args.updateRoomStateEphemeral,
+  });
+
+  args.updateAgentTurnsEphemeral(finalTurn.agent.id, (turns) => {
+    const existingIndex = turns.findIndex((turn) => turn.id === finalTurn.id);
+    if (existingIndex >= 0) {
+      const nextTurns = [...turns];
+      nextTurns[existingIndex] = finalTurn;
+      return nextTurns;
+    }
+
+    return mergeAgentTurns(turns, [finalTurn]);
+  });
+  args.updateAgentState(finalTurn.agent.id, (state) => ({
+    ...state,
+    resolvedModel: args.event.resolvedModel,
+    compatibility: args.event.compatibility,
+    updatedAt: createTimestamp(),
+  }));
+
+  return finalTurn;
+}
 
 interface SendMessageArgs {
   roomId: string;
@@ -193,51 +330,13 @@ export function useRoomStreamingSend(args: {
           previewFlushTimer = null;
         }
 
-        if (pendingPreviewMessagesById.size === 0) {
-          return;
-        }
-
-        const pendingPreviewMessages = [...pendingPreviewMessagesById.values()];
-        pendingPreviewMessagesById.clear();
-        const pendingPreviewMessagesByRoomId = new Map<string, typeof pendingPreviewMessages>();
-
-        for (const message of pendingPreviewMessages) {
-          const roomMessages = pendingPreviewMessagesByRoomId.get(message.roomId);
-          if (roomMessages) {
-            roomMessages.push(message);
-            continue;
-          }
-
-          pendingPreviewMessagesByRoomId.set(message.roomId, [message]);
-        }
-
-        for (const [previewRoomId, messages] of pendingPreviewMessagesByRoomId) {
-          updateRoomStateEphemeral(previewRoomId, (room) => {
-            let nextRoom = room;
-            for (const message of messages) {
-              nextRoom = upsertMessageToRoom(nextRoom, message);
-            }
-            return nextRoom;
-          });
-        }
-
-        if (!activeTurnId || !activeTurnAgentId) {
-          return;
-        }
-
-        updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
-          turns.map((turn) => {
-            if (turn.id !== activeTurnId) {
-              return turn;
-            }
-
-            let nextTurn = turn;
-            for (const message of pendingPreviewMessages) {
-              nextTurn = upsertRoomMessageInTurn(nextTurn, message);
-            }
-            return nextTurn;
-          }),
-        );
+        flushPendingPreviewMessages({
+          pendingPreviewMessagesById,
+          activeTurnId,
+          activeTurnAgentId,
+          updateRoomStateEphemeral,
+          updateAgentTurnsEphemeral,
+        });
       };
 
       const schedulePreviewFlush = () => {
@@ -399,56 +498,17 @@ export function useRoomStreamingSend(args: {
               });
             }
             flushPreviewMessages();
-            const finalTurn = event.turn;
+            const finalTurn = reconcileCompletedStreamTurn({
+              roomId,
+              event,
+              previewMessageIds,
+              previewMessageRoomIdById,
+              updateRoomStateEphemeral,
+              updateAgentTurnsEphemeral,
+              updateAgentState,
+            });
             activeTurnId = finalTurn.id;
             activeTurnAgentId = finalTurn.agent.id;
-            updateRoomStateEphemeral(roomId, (room) => ({
-              ...room,
-              scheduler: event.roomRunning
-                ? room.scheduler
-                : {
-                    ...room.scheduler,
-                    status: "idle",
-                    activeParticipantId: null,
-                    roundCount: 0,
-                  },
-              roomMessages: room.roomMessages.map((message) =>
-                message.id === finalTurn.userMessage.id ? finalTurn.userMessage : message,
-              ),
-              error: "",
-              updatedAt: createTimestamp(),
-            }));
-
-            const finalizedMessageIds = new Set(finalTurn.emittedMessages.map((message) => message.id));
-            for (const previewMessageId of previewMessageIds) {
-              if (finalizedMessageIds.has(previewMessageId)) {
-                continue;
-              }
-
-              const previewRoomId = previewMessageRoomIdById.get(previewMessageId) ?? roomId;
-              updateRoomStateEphemeral(previewRoomId, (room) => ({
-                ...room,
-                roomMessages: room.roomMessages.filter((message) => message.id !== previewMessageId),
-                updatedAt: createTimestamp(),
-              }));
-            }
-
-            updateAgentTurnsEphemeral(finalTurn.agent.id, (turns) => {
-              const existingIndex = turns.findIndex((turn) => turn.id === finalTurn.id);
-              if (existingIndex >= 0) {
-                const nextTurns = [...turns];
-                nextTurns[existingIndex] = finalTurn;
-                return nextTurns;
-              }
-
-              return mergeAgentTurns(turns, [finalTurn]);
-            });
-            updateAgentState(finalTurn.agent.id, (state) => ({
-              ...state,
-              resolvedModel: event.resolvedModel,
-              compatibility: event.compatibility,
-              updatedAt: createTimestamp(),
-            }));
           },
           onMeta: (meta: AssistantMessageMeta) => {
             const normalizedMeta = normalizeAssistantMeta(meta);

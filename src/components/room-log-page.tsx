@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
+import { useRoomCompactionLogs, type CompactionLogEntry } from "./room-log-page-compactions";
 import {
   formatTimestamp,
-  getAgentParticipants,
   getPrimaryRoomAgentId,
   getToolStats,
   useWorkspaceActions,
@@ -57,70 +57,6 @@ interface FullRequestLogEntry {
   createdAt: string;
   agentLabel: string;
   promptText: string;
-}
-
-interface CompactionLogEntry {
-  id: string;
-  createdAt: string;
-  agentLabel: string;
-  trigger: "post_turn" | "post_tool" | "manual";
-  success: boolean;
-  actionTaken: boolean;
-  method: "llm" | "rule_fallback" | "unknown";
-  summary: string;
-  error: string;
-  prunedMessages: number;
-  keptMessages: number;
-  details?: {
-    thresholdTokens: number;
-    contextTokens: number;
-    storedContextTokens: number;
-    promptOverheadTokens: number;
-    totalEstimatedTokens: number;
-    systemPromptTokens: number;
-    toolSchemaTokens: number;
-    attachmentTokens: number;
-    result: string;
-    contextTokensAfter?: number;
-    storedContextTokensAfter?: number;
-    tokensAfter?: number;
-    totalEstimatedTokensAfter?: number;
-  };
-  summaryRef?: {
-    summaryId: string;
-    kind: "leaf" | "condensed";
-    depth: number;
-    tokenCount: number;
-    sourceMessageTokenCount: number;
-    descendantCount: number;
-    descendantTokenCount: number;
-    messageIds: number[];
-    parentIds: string[];
-    childIds: string[];
-    subtree: Array<{
-      summaryId: string;
-      parentSummaryId: string | null;
-      depthFromRoot: number;
-      kind: "leaf" | "condensed";
-      depth: number;
-      tokenCount: number;
-      childCount: number;
-      sourceMessageTokenCount: number;
-    }>;
-    directChildren: Array<{
-      summaryId: string;
-      kind: "leaf" | "condensed";
-      tokenCount: number;
-      preview: string;
-    }>;
-    directMessages: Array<{
-      messageId: number;
-      role: string;
-      tokenCount: number;
-      preview: string;
-    }>;
-    mappingTruncated: boolean;
-  };
 }
 
 interface RoomLogCacheSnapshot {
@@ -330,155 +266,7 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
 
     return fallbackTurns.sort((left, right) => getSortableTime(right.userMessage.createdAt) - getSortableTime(left.userMessage.createdAt));
   }, [agentStates, room]);
-  const [compactionLogs, setCompactionLogs] = useState<CompactionLogEntry[]>([]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    if (!room) {
-      setCompactionLogs([]);
-      return;
-    }
-
-    const agentIds = [...new Set(getAgentParticipants(room).map((participant) => participant.agentId).filter((agentId): agentId is RoomAgentId => Boolean(agentId)))];
-    if (agentIds.length === 0) {
-      setCompactionLogs([]);
-      return;
-    }
-
-    const refreshCompactionLogs = () => {
-      void (async () => {
-        const entries = await Promise.all(
-          agentIds.map(async (agentId) => {
-            const response = await fetch(`/api/agent-runtime/compactions?agentId=${encodeURIComponent(agentId)}`, { cache: "no-store" }).catch(() => null);
-            const payload = response ? (await response.json().catch(() => null)) as { compactions?: Array<Record<string, unknown>> } | null : null;
-            if (!response?.ok || !payload?.compactions) {
-              return [] as CompactionLogEntry[];
-            }
-
-            const agentLabel = getAgentDefinition(agentId).label;
-             return payload.compactions.map((record, index) => ({
-              id: typeof record.id === "string" && record.id ? record.id : `${agentId}-${index}`,
-              createdAt: typeof record.createdAt === "string" ? record.createdAt : "",
-              agentLabel,
-               trigger: (
-                 record.reason === "post_tool"
-                   ? "post_tool"
-                   : record.reason === "post_turn" || record.reason === "automatic"
-                     ? "post_turn"
-                     : "manual"
-               ) as CompactionLogEntry["trigger"],
-              success: typeof record.success === "boolean" ? record.success : true,
-              actionTaken: typeof record.actionTaken === "boolean" ? record.actionTaken : true,
-              method: (record.method === "llm" || record.method === "rule_fallback" || record.method === "unknown" ? record.method : "unknown") as CompactionLogEntry["method"],
-              summary: typeof record.summary === "string" ? record.summary : "",
-                error: typeof record.error === "string" ? record.error : "",
-                prunedMessages: typeof record.prunedMessages === "number" ? record.prunedMessages : 0,
-                keptMessages: typeof record.keptMessages === "number" ? record.keptMessages : 0,
-                ...(record.details && typeof record.details === "object"
-                 ? {
-                     details: {
-                       thresholdTokens: typeof (record.details as { thresholdTokens?: unknown }).thresholdTokens === "number" ? (record.details as { thresholdTokens: number }).thresholdTokens : 0,
-                       contextTokens: typeof (record.details as { contextTokens?: unknown }).contextTokens === "number" ? (record.details as { contextTokens: number }).contextTokens : 0,
-                       storedContextTokens:
-                         typeof (record.details as { storedContextTokens?: unknown }).storedContextTokens === "number"
-                           ? (record.details as { storedContextTokens: number }).storedContextTokens
-                           : 0,
-                       promptOverheadTokens:
-                         typeof (record.details as { promptOverheadTokens?: unknown }).promptOverheadTokens === "number"
-                           ? (record.details as { promptOverheadTokens: number }).promptOverheadTokens
-                           : 0,
-                       totalEstimatedTokens:
-                         typeof (record.details as { totalEstimatedTokens?: unknown }).totalEstimatedTokens === "number"
-                           ? (record.details as { totalEstimatedTokens: number }).totalEstimatedTokens
-                           : 0,
-                       systemPromptTokens:
-                         typeof (record.details as { systemPromptTokens?: unknown }).systemPromptTokens === "number"
-                           ? (record.details as { systemPromptTokens: number }).systemPromptTokens
-                           : 0,
-                       toolSchemaTokens:
-                         typeof (record.details as { toolSchemaTokens?: unknown }).toolSchemaTokens === "number"
-                           ? (record.details as { toolSchemaTokens: number }).toolSchemaTokens
-                           : 0,
-                       attachmentTokens:
-                         typeof (record.details as { attachmentTokens?: unknown }).attachmentTokens === "number"
-                           ? (record.details as { attachmentTokens: number }).attachmentTokens
-                           : 0,
-                       result: typeof (record.details as { result?: unknown }).result === "string" ? (record.details as { result: string }).result : "unknown",
-                       ...(typeof (record.details as { tokensAfter?: unknown }).tokensAfter === "number"
-                         ? { tokensAfter: (record.details as { tokensAfter: number }).tokensAfter }
-                         : {}),
-                       ...(typeof (record.details as { contextTokensAfter?: unknown }).contextTokensAfter === "number"
-                         ? { contextTokensAfter: (record.details as { contextTokensAfter: number }).contextTokensAfter }
-                         : {}),
-                       ...(typeof (record.details as { storedContextTokensAfter?: unknown }).storedContextTokensAfter === "number"
-                         ? { storedContextTokensAfter: (record.details as { storedContextTokensAfter: number }).storedContextTokensAfter }
-                         : {}),
-                       ...(typeof (record.details as { totalEstimatedTokensAfter?: unknown }).totalEstimatedTokensAfter === "number"
-                         ? { totalEstimatedTokensAfter: (record.details as { totalEstimatedTokensAfter: number }).totalEstimatedTokensAfter }
-                         : {}),
-                     },
-                    }
-                  : {}),
-                ...(record.summaryRef && typeof record.summaryRef === "object"
-                  ? {
-                       summaryRef: {
-                         summaryId: typeof (record.summaryRef as { summaryId?: unknown }).summaryId === "string" ? (record.summaryRef as { summaryId: string }).summaryId : "",
-                        kind: (record.summaryRef as { kind?: unknown }).kind === "condensed" ? ("condensed" as const) : ("leaf" as const),
-                        depth: typeof (record.summaryRef as { depth?: unknown }).depth === "number" ? (record.summaryRef as { depth: number }).depth : 0,
-                        tokenCount: typeof (record.summaryRef as { tokenCount?: unknown }).tokenCount === "number" ? (record.summaryRef as { tokenCount: number }).tokenCount : 0,
-                        sourceMessageTokenCount:
-                          typeof (record.summaryRef as { sourceMessageTokenCount?: unknown }).sourceMessageTokenCount === "number"
-                            ? (record.summaryRef as { sourceMessageTokenCount: number }).sourceMessageTokenCount
-                            : 0,
-                        descendantCount:
-                          typeof (record.summaryRef as { descendantCount?: unknown }).descendantCount === "number"
-                            ? (record.summaryRef as { descendantCount: number }).descendantCount
-                            : 0,
-                        descendantTokenCount:
-                          typeof (record.summaryRef as { descendantTokenCount?: unknown }).descendantTokenCount === "number"
-                            ? (record.summaryRef as { descendantTokenCount: number }).descendantTokenCount
-                            : 0,
-                        messageIds: Array.isArray((record.summaryRef as { messageIds?: unknown }).messageIds)
-                          ? ((record.summaryRef as { messageIds: number[] }).messageIds.filter((value) => typeof value === "number"))
-                          : [],
-                        parentIds: Array.isArray((record.summaryRef as { parentIds?: unknown }).parentIds)
-                          ? ((record.summaryRef as { parentIds: string[] }).parentIds.filter((value) => typeof value === "string"))
-                          : [],
-                        childIds: Array.isArray((record.summaryRef as { childIds?: unknown }).childIds)
-                          ? ((record.summaryRef as { childIds: string[] }).childIds.filter((value) => typeof value === "string"))
-                          : [],
-                        subtree: Array.isArray((record.summaryRef as { subtree?: unknown }).subtree)
-                          ? ((record.summaryRef as { subtree: NonNullable<CompactionLogEntry["summaryRef"]>["subtree"] }).subtree)
-                          : [],
-                        directChildren: Array.isArray((record.summaryRef as { directChildren?: unknown }).directChildren)
-                          ? ((record.summaryRef as { directChildren: NonNullable<CompactionLogEntry["summaryRef"]>["directChildren"] }).directChildren)
-                          : [],
-                        directMessages: Array.isArray((record.summaryRef as { directMessages?: unknown }).directMessages)
-                          ? ((record.summaryRef as { directMessages: NonNullable<CompactionLogEntry["summaryRef"]>["directMessages"] }).directMessages)
-                          : [],
-                        mappingTruncated: Boolean((record.summaryRef as { mappingTruncated?: unknown }).mappingTruncated),
-                      },
-                    }
-                  : {}),
-              }));
-          }),
-        );
-
-        if (!cancelled) {
-          setCompactionLogs(entries.flat().sort((left, right) => getSortableTime(right.createdAt) - getSortableTime(left.createdAt)));
-        }
-      })();
-    };
-
-    refreshCompactionLogs();
-    const intervalId = window.setInterval(refreshCompactionLogs, 5000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [getAgentDefinition, room, roomTurns.length]);
+  const compactionLogs = useRoomCompactionLogs({ room: room ?? undefined, getAgentDefinition });
 
   const requestLogs = useMemo<RequestLogEntry[]>(() => {
     return roomTurns.map((turn) => ({
@@ -655,7 +443,6 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
     };
 
     setLogCache(nextCache);
-    setCompactionLogs([]);
     setExpandedCompactionLogIds([]);
   }
 

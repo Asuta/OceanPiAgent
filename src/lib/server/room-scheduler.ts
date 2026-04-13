@@ -177,6 +177,90 @@ function shouldKeepRoomRunningAfterAppliedTurn(room: RoomSession): boolean {
   return false;
 }
 
+function applyTurnResultToWorkspace(args: {
+  workspace: RoomWorkspaceState;
+  roomId: string;
+  targetAgentId: string;
+  result: RunRoomTurnResult;
+  participantId: string;
+  nextAfterParticipantId: string | null;
+  cutoffSeq: number;
+  dispatchedRounds: number;
+  workspaceVersionDetails?: Record<string, unknown>;
+}): {
+  state: RoomWorkspaceState;
+  roomRunningAfterTurn: boolean;
+} {
+  args.result.markTimingPhase?.("scheduler_apply_room_turn_start", args.workspaceVersionDetails);
+  const appliedWorkspace = applyRoomTurnToWorkspace({
+    workspace: args.workspace,
+    agentId: args.targetAgentId,
+    targetRoomId: args.roomId,
+    turn: args.result.turn,
+    resolvedModel: args.result.resolvedModel,
+    compatibility: args.result.compatibility,
+    emittedMessages: args.result.emittedMessages,
+    receiptUpdates: args.result.receiptUpdates,
+    roomActions: args.result.roomActions,
+  });
+  args.result.markTimingPhase?.("scheduler_apply_room_turn_end", {
+    emittedMessageCount: args.result.emittedMessages.length,
+    receiptUpdateCount: args.result.receiptUpdates.length,
+    roomActionCount: args.result.roomActions.length,
+  });
+
+  let roomRunningAfterTurn = args.result.turn.status === "completed";
+  const nextState = updateRoom(appliedWorkspace, args.roomId, (currentRoom) => {
+    const nextRoom: RoomSession = {
+      ...currentRoom,
+      scheduler: {
+        ...currentRoom.scheduler,
+        status: "running",
+        activeParticipantId: null,
+        nextAgentParticipantId: args.nextAfterParticipantId,
+        roundCount: args.dispatchedRounds,
+        agentCursorByParticipantId: {
+          ...currentRoom.scheduler.agentCursorByParticipantId,
+          [args.participantId]: Math.max(
+            currentRoom.scheduler.agentCursorByParticipantId[args.participantId] ?? 0,
+            args.cutoffSeq,
+          ),
+        },
+        agentReceiptRevisionByParticipantId: {
+          ...currentRoom.scheduler.agentReceiptRevisionByParticipantId,
+          [args.participantId]: currentRoom.receiptRevision,
+        },
+      },
+      updatedAt: createTimestamp(),
+    };
+
+    args.result.markTimingPhase?.("scheduler_compute_room_running_start", {
+      nextParticipantId: args.nextAfterParticipantId,
+    });
+    roomRunningAfterTurn = args.result.turn.status === "completed" && shouldKeepRoomRunningAfterAppliedTurn(nextRoom);
+    args.result.markTimingPhase?.("scheduler_compute_room_running_end", {
+      roomRunningAfterTurn,
+    });
+    if (roomRunningAfterTurn) {
+      return nextRoom;
+    }
+
+    return {
+      ...nextRoom,
+      scheduler: {
+        ...nextRoom.scheduler,
+        status: "idle",
+        roundCount: 0,
+      },
+    };
+  });
+
+  return {
+    state: nextState,
+    roomRunningAfterTurn,
+  };
+}
+
 function markTurnStopped(turn: AgentRoomTurn, reason: string): AgentRoomTurn {
   if (turn.status !== "running") {
     return turn;
@@ -566,73 +650,23 @@ export async function runRoomSchedulerNow(
           };
         }
 
-        result.markTimingPhase?.("scheduler_apply_room_turn_start", {
-          workspaceVersion: envelope.version,
-        });
-        const appliedWorkspace = applyRoomTurnToWorkspace({
+        const appliedTurn = applyTurnResultToWorkspace({
           workspace,
-          agentId: targetAgentId,
-          targetRoomId: roomId,
-          turn: result.turn,
-          resolvedModel: result.resolvedModel,
-          compatibility: result.compatibility,
-          emittedMessages: result.emittedMessages,
-          receiptUpdates: result.receiptUpdates,
-          roomActions: result.roomActions,
+          roomId,
+          targetAgentId,
+          result,
+          participantId: roundPlan.participant.id,
+          nextAfterParticipantId: roundPlan.nextAfterParticipantId,
+          cutoffSeq: roundPlan.cutoffSeq,
+          dispatchedRounds,
+          workspaceVersionDetails: {
+            workspaceVersion: envelope.version,
+          },
         });
-        result.markTimingPhase?.("scheduler_apply_room_turn_end", {
-          emittedMessageCount: result.emittedMessages.length,
-          receiptUpdateCount: result.receiptUpdates.length,
-          roomActionCount: result.roomActions.length,
-        });
-
-        const nextState = updateRoom(appliedWorkspace, roomId, (updatedRoom) => {
-          const nextRoom: RoomSession = {
-            ...updatedRoom,
-            scheduler: {
-              ...updatedRoom.scheduler,
-              status: "running",
-              activeParticipantId: null,
-              nextAgentParticipantId: roundPlan.nextAfterParticipantId,
-              roundCount: dispatchedRounds,
-              agentCursorByParticipantId: {
-                ...updatedRoom.scheduler.agentCursorByParticipantId,
-                [roundPlan.participant.id]: Math.max(
-                  updatedRoom.scheduler.agentCursorByParticipantId[roundPlan.participant.id] ?? 0,
-                  roundPlan.cutoffSeq,
-                ),
-              },
-              agentReceiptRevisionByParticipantId: {
-                ...updatedRoom.scheduler.agentReceiptRevisionByParticipantId,
-                [roundPlan.participant.id]: updatedRoom.receiptRevision,
-              },
-            },
-            updatedAt: createTimestamp(),
-          };
-
-          result.markTimingPhase?.("scheduler_compute_room_running_start", {
-            nextParticipantId: roundPlan.nextAfterParticipantId,
-          });
-          roomRunningAfterTurn = result.turn.status === "completed" && shouldKeepRoomRunningAfterAppliedTurn(nextRoom);
-          result.markTimingPhase?.("scheduler_compute_room_running_end", {
-            roomRunningAfterTurn,
-          });
-          if (roomRunningAfterTurn) {
-            return nextRoom;
-          }
-
-          return {
-            ...nextRoom,
-            scheduler: {
-              ...nextRoom.scheduler,
-              status: "idle",
-              roundCount: 0,
-            },
-          };
-        });
+        roomRunningAfterTurn = appliedTurn.roomRunningAfterTurn;
 
         return {
-          state: nextState,
+          state: appliedTurn.state,
           result: {
             roomExistsAfterTurn: true,
             wasSuperseded: false,
@@ -672,70 +706,21 @@ export async function runRoomSchedulerNow(
           latestWorkspaceVersion: latestWorkspace.version,
         });
         await deps.mutateWorkspace((workspace) => {
-          result.markTimingPhase?.("scheduler_apply_room_turn_start", {
-            workspaceVersionHint: latestWorkspace.version,
-          });
-          const appliedWorkspace = applyRoomTurnToWorkspace({
+          const appliedTurn = applyTurnResultToWorkspace({
             workspace,
-            agentId: targetAgentId,
-            targetRoomId: roomId,
-            turn: result.turn,
-            resolvedModel: result.resolvedModel,
-            compatibility: result.compatibility,
-            emittedMessages: result.emittedMessages,
-            receiptUpdates: result.receiptUpdates,
-            roomActions: result.roomActions,
+            roomId,
+            targetAgentId,
+            result,
+            participantId: roundPlan.participant.id,
+            nextAfterParticipantId: roundPlan.nextAfterParticipantId,
+            cutoffSeq: roundPlan.cutoffSeq,
+            dispatchedRounds,
+            workspaceVersionDetails: {
+              workspaceVersionHint: latestWorkspace.version,
+            },
           });
-          result.markTimingPhase?.("scheduler_apply_room_turn_end", {
-            emittedMessageCount: result.emittedMessages.length,
-            receiptUpdateCount: result.receiptUpdates.length,
-            roomActionCount: result.roomActions.length,
-          });
-
-          return updateRoom(appliedWorkspace, roomId, (currentRoom) => {
-            const nextRoom: RoomSession = {
-              ...currentRoom,
-              scheduler: {
-                ...currentRoom.scheduler,
-                status: "running",
-                activeParticipantId: null,
-                nextAgentParticipantId: roundPlan.nextAfterParticipantId,
-                roundCount: dispatchedRounds,
-                agentCursorByParticipantId: {
-                  ...currentRoom.scheduler.agentCursorByParticipantId,
-                  [roundPlan.participant.id]: Math.max(
-                    currentRoom.scheduler.agentCursorByParticipantId[roundPlan.participant.id] ?? 0,
-                    roundPlan.cutoffSeq,
-                  ),
-                },
-                agentReceiptRevisionByParticipantId: {
-                  ...currentRoom.scheduler.agentReceiptRevisionByParticipantId,
-                  [roundPlan.participant.id]: currentRoom.receiptRevision,
-                },
-              },
-              updatedAt: createTimestamp(),
-            };
-
-            result.markTimingPhase?.("scheduler_compute_room_running_start", {
-              nextParticipantId: roundPlan.nextAfterParticipantId,
-            });
-            roomRunningAfterTurn = result.turn.status === "completed" && shouldKeepRoomRunningAfterAppliedTurn(nextRoom);
-            result.markTimingPhase?.("scheduler_compute_room_running_end", {
-              roomRunningAfterTurn,
-            });
-            if (roomRunningAfterTurn) {
-              return nextRoom;
-            }
-
-            return {
-              ...nextRoom,
-              scheduler: {
-                ...nextRoom.scheduler,
-                status: "idle",
-                roundCount: 0,
-              },
-            };
-          });
+          roomRunningAfterTurn = appliedTurn.roomRunningAfterTurn;
+          return appliedTurn.state;
         });
         result.markTimingPhase?.("scheduler_apply_workspace_result_end", {
           roomRunningAfterTurn,
