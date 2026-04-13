@@ -10,16 +10,18 @@ export function useBrowserWorkspaceCache(args: {
   activeRoomId: string;
   selectedConsoleAgentId: RoomAgentId | null;
 }) {
+  const { hydrated, rooms, agentStates, activeRoomId, selectedConsoleAgentId } = args;
+
   useEffect(() => {
-    if (!args.hydrated || args.rooms.length === 0 || !args.activeRoomId) {
+    if (!hydrated || rooms.length === 0 || !activeRoomId) {
       return;
     }
 
     const snapshot = buildWorkspaceStateSnapshot({
-      rooms: args.rooms,
-      agentStates: args.agentStates,
-      activeRoomId: args.activeRoomId,
-      selectedConsoleAgentId: args.selectedConsoleAgentId,
+      rooms,
+      agentStates,
+      activeRoomId,
+      selectedConsoleAgentId,
     });
 
     saveWorkspaceBootstrapToLocalStorage(snapshot);
@@ -30,5 +32,5 @@ export function useBrowserWorkspaceCache(args: {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [args]);
+  }, [activeRoomId, agentStates, hydrated, rooms, selectedConsoleAgentId]);
 }

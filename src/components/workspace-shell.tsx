@@ -206,6 +206,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
     () => agentPromptBaselines.reduce((maxValue, baseline) => Math.max(maxValue, baseline.promptOverheadTokens), 0),
     [agentPromptBaselines],
   );
+  const agentPromptBaselineIds = useMemo(() => agents.map((agent) => agent.id), [agents]);
   const compactionThresholdWarning = useMemo(() => {
     if (typeof globalCompactionThresholdValue !== "number" || maxPromptOverheadTokens <= 0) {
       return "";
@@ -294,15 +295,15 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   }, [globalFreshTrailCountValue]);
 
   useEffect(() => {
-    if (agents.length === 0) {
+    if (agentPromptBaselineIds.length === 0) {
       setAgentPromptBaselines([]);
       return;
     }
 
     let cancelled = false;
     const query = new URLSearchParams();
-    for (const agent of agents) {
-      query.append("agentId", agent.id);
+    for (const agentId of agentPromptBaselineIds) {
+      query.append("agentId", agentId);
     }
 
     void (async () => {
@@ -323,7 +324,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [agentStates, agents]);
+  }, [agentPromptBaselineIds]);
 
   return (
     <div className={`app-shell${sidebarOpen ? " sidebar-open" : ""}`}>

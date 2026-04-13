@@ -17,7 +17,6 @@ import type {
   AgentRoomTurn,
   AgentSharedState,
   ChatSettings,
-  MemoryBackendId,
   MessageImageAttachment,
   ProviderCompatibility,
   RoomAgentDefinition,
@@ -70,12 +69,6 @@ import {
   sortRoomParticipants,
   sortRoomsByUpdatedAt,
 } from "@/lib/chat/workspace-domain";
-import { applyWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
-import {
-  clearPersistedWorkspaceState,
-  fetchWorkspaceEnvelope,
-  postRoomCommand,
-} from "@/components/workspace/persistence";
 import {
   dedupeAgentTurns,
   mergeAgentTurns,
@@ -86,27 +79,13 @@ import { useWorkspaceHydration } from "@/components/workspace/use-workspace-hydr
 import { useWorkspacePersistence } from "@/components/workspace/use-workspace-persistence";
 import { useRoomCommands } from "@/components/workspace/use-room-commands";
 import { useRoomStreamingSend } from "@/components/workspace/use-room-streaming-send";
+import { useWorkspaceRuntimeState } from "@/components/workspace/use-workspace-runtime-state";
 import { useWorkspaceStreamSync } from "@/components/workspace/use-workspace-stream-sync";
-
-type WorkspaceUiTimingEntry = {
-  phase: string;
-  elapsedMs: number;
-  details?: Record<string, string | number | boolean | null>;
-};
-
-declare global {
-  interface Window {
-    __oceankingWorkspaceUiTimingLog?: WorkspaceUiTimingEntry[];
-  }
-}
-
-function recordWorkspaceUiTiming(entry: WorkspaceUiTimingEntry) {
-  if (typeof window === "undefined") {
-    return;
-  }
-  window.__oceankingWorkspaceUiTimingLog = [...(window.__oceankingWorkspaceUiTimingLog ?? []), entry].slice(-200);
-  console.info("[workspace-ui-timing]", entry);
-}
+import {
+  createInitialAgentCompactionFeedback,
+  type AgentCompactionFeedback,
+  useWorkspaceAgentContextActions,
+} from "@/components/workspace/use-workspace-agent-context-actions";
 
 const DEFAULT_AGENT_ID: RoomAgentId = "concierge";
 const DEFAULT_LOCAL_PARTICIPANT_ID = "local-operator";
@@ -175,23 +154,11 @@ interface AgentUpdateInput {
   instruction?: string;
 }
 
-function createInitialAgentCompactionFeedback(agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): Record<RoomAgentId, AgentCompactionFeedback | null> {
-  const definitions = agentDefinitions.length > 0 ? agentDefinitions : [getRoomAgent(DEFAULT_AGENT_ID)];
-  return Object.fromEntries(definitions.map((agent) => [agent.id, null])) as Record<RoomAgentId, AgentCompactionFeedback | null>;
-}
-
 interface SendMessageArgs {
   roomId: string;
   content: string;
   attachments?: MessageImageAttachment[];
   senderId?: string;
-}
-
-export interface AgentCompactionFeedback {
-  status: "success" | "noop" | "error";
-  message: string;
-  summary: string;
-  updatedAt: string;
 }
 
 interface WorkspaceContextValue {
@@ -1796,8 +1763,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [selectedSenderByRoomId, setSelectedSenderByRoomId] = useState<Record<string, string>>({});
   const [draftsByRoomId, setDraftsByRoomId] = useState<Record<string, string>>({});
   const [pendingRoomCommandIds, setPendingRoomCommandIds] = useState<Record<string, boolean>>({});
-  const [resettingAgentContextIds, setResettingAgentContextIds] = useState<Record<string, boolean>>({});
-  const [compactingAgentContextIds, setCompactingAgentContextIds] = useState<Record<string, boolean>>({});
   const [hydrated, setHydrated] = useState(false);
   const agentsRef = useRef<RoomAgentDefinition[]>(ROOM_AGENTS);
   const roomsRef = useRef<RoomSession[]>([]);
@@ -1811,154 +1776,33 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const workspacePersistInFlightRef = useRef(false);
   const workspacePersistNonceRef = useRef(0);
 
-  const applyWorkspaceSnapshot = useCallback(
-    (
-      snapshot: RoomWorkspaceState,
-      version: number,
-      options?: {
-        skipServerPersist?: boolean;
-      },
-    ) => {
-      const applyStartedAt = typeof window === "undefined" ? 0 : performance.now();
-      if (options?.skipServerPersist) {
-        skipNextServerPersistRef.current = true;
-      }
-      const nextRooms = (snapshot.rooms.length > 0 ? snapshot.rooms : [createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current)]).map((room) => ({
-        ...room,
-        roomMessages: dedupeRoomMessages(room.roomMessages),
-      }));
-      const nextAgentStates = ensureAgentStateMap(snapshot.agentStates, agentsRef.current, nextRooms);
-      const nextActiveRoomId =
-        snapshot.activeRoomId && nextRooms.some((room) => room.id === snapshot.activeRoomId)
-          ? snapshot.activeRoomId
-          : nextRooms[0]?.id ?? "";
-      const nextSelectedConsoleAgentId = snapshot.selectedConsoleAgentId ?? getPrimaryRoomAgentId(nextRooms[0]);
-
-      roomsRef.current = nextRooms;
-      agentStatesRef.current = nextAgentStates;
-      activeRoomIdRef.current = nextActiveRoomId;
-      selectedConsoleAgentIdRef.current = nextSelectedConsoleAgentId;
-      workspaceVersionRef.current = version;
-      setRooms(nextRooms);
-      setAgentStates(nextAgentStates);
-      setAgentCompactionFeedback((current) => ensureAgentFeedbackMap(current, agentsRef.current, nextAgentStates));
-      setActiveRoomId(nextActiveRoomId);
-      setSelectedConsoleAgentId(nextSelectedConsoleAgentId);
-      setWorkspaceVersion(version);
-      setHydrated(true);
-      if (typeof window !== "undefined") {
-        recordWorkspaceUiTiming({
-          phase: "workspace_snapshot_applied",
-          elapsedMs: Math.round((performance.now() - applyStartedAt) * 10) / 10,
-          details: {
-            version,
-            roomCount: nextRooms.length,
-            activeRoomId: nextActiveRoomId,
-          },
-        });
-      }
-    },
-    [],
-  );
-
-  const applyWorkspaceEnvelope = useCallback(
-    (envelope: { version?: number; state?: RoomWorkspaceState } | null | undefined) => {
-      if (!envelope?.state || typeof envelope.version !== "number") {
-        throw new Error("Room command did not return a valid workspace snapshot.");
-      }
-
-      applyWorkspaceSnapshot(envelope.state, envelope.version, { skipServerPersist: true });
-      return envelope.state;
-    },
-    [applyWorkspaceSnapshot],
-  );
-
-  const applyWorkspaceStreamEvent = useCallback(
-    (event: WorkspaceStreamEvent) => {
-      if (event.type === "snapshot") {
-        applyWorkspaceSnapshot(event.state, event.version, { skipServerPersist: true });
-        return;
-      }
-
-      const baseState: RoomWorkspaceState = {
-        rooms: roomsRef.current,
-        agentStates: agentStatesRef.current,
-        activeRoomId: activeRoomIdRef.current,
-        ...(selectedConsoleAgentIdRef.current
-          ? {
-              selectedConsoleAgentId: selectedConsoleAgentIdRef.current,
-            }
-          : {}),
-      };
-      const nextState = applyWorkspaceStatePatch(baseState, event.patch);
-      applyWorkspaceSnapshot(nextState, event.version, { skipServerPersist: true });
-    },
-    [applyWorkspaceSnapshot],
-  );
-
-  const runRoomCommandRequest = useCallback(
-    async (
-      payload: Record<string, unknown>,
-      options?: {
-        pendingRoomId?: string;
-      },
-    ) => {
-      if (options?.pendingRoomId) {
-        setPendingRoomCommandIds((current) => ({
-          ...current,
-          [options.pendingRoomId as string]: true,
-        }));
-      }
-
-      try {
-        const response = await postRoomCommand(payload);
-        if (!response?.ok) {
-          throw new Error(response?.error ?? "Room command failed.");
-        }
-
-        return applyWorkspaceEnvelope(response.envelope);
-      } finally {
-        if (options?.pendingRoomId) {
-          setPendingRoomCommandIds((current) => {
-            const nextState = { ...current };
-            delete nextState[options.pendingRoomId as string];
-            return nextState;
-          });
-        }
-      }
-    },
-    [applyWorkspaceEnvelope],
-  );
-
-  const refreshWorkspaceFromServer = useCallback(async () => {
-    const fetchStartedAt = typeof window === "undefined" ? 0 : performance.now();
-    const payload = await fetchWorkspaceEnvelope();
-    if (typeof window !== "undefined") {
-      recordWorkspaceUiTiming({
-        phase: "workspace_fetch_done",
-        elapsedMs: Math.round((performance.now() - fetchStartedAt) * 10) / 10,
-        details: {
-          ok: Boolean(payload?.state),
-          version: typeof payload?.version === "number" ? payload.version : null,
-        },
-      });
-    }
-    if (typeof payload?.version !== "number" || !payload.state) {
-      return null;
-    }
-
-    if (payload.version >= workspaceVersionRef.current) {
-      applyWorkspaceSnapshot(payload.state, payload.version, { skipServerPersist: true });
-    }
-
-    return payload;
-  }, [applyWorkspaceSnapshot]);
-
-  const handleAgentsLoaded = useCallback((nextAgents: RoomAgentDefinition[]) => {
-    setAgents(nextAgents);
-    setAgentStates((current) => ensureAgentStateMap(current, nextAgents, roomsRef.current));
-    setAgentCompactionFeedback((current) => ensureAgentFeedbackMap(current, nextAgents, agentStatesRef.current));
-  }, []);
+  const {
+    applyWorkspaceSnapshot,
+    applyWorkspaceStreamEvent,
+    runRoomCommandRequest,
+    refreshWorkspaceFromServer,
+    handleAgentsLoaded,
+  } = useWorkspaceRuntimeState({
+    defaultAgentId: DEFAULT_AGENT_ID,
+    agentsRef,
+    roomsRef,
+    agentStatesRef,
+    workspaceVersionRef,
+    activeRoomIdRef,
+    selectedConsoleAgentIdRef,
+    skipNextServerPersistRef,
+    setAgents,
+    setRooms,
+    setAgentStates,
+    setAgentCompactionFeedback,
+    setActiveRoomId,
+    setSelectedConsoleAgentId,
+    setWorkspaceVersion,
+    setHydrated,
+    setPendingRoomCommandIds,
+    ensureAgentStateMap,
+    ensureAgentFeedbackMap,
+  });
 
   useWorkspaceHydration({
     agentsRef,
@@ -1990,12 +1834,23 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, [activeRoomId, hydrated, rooms]);
 
+  const activeRooms = useMemo(() => getActiveRooms(rooms), [rooms]);
+  const archivedRooms = useMemo(() => getArchivedRooms(rooms), [rooms]);
+  const activeRoom = useMemo(
+    () => activeRooms.find((room) => room.id === activeRoomId) ?? activeRooms[0] ?? null,
+    [activeRoomId, activeRooms],
+  );
+  const effectiveSelectedConsoleAgentId = useMemo(
+    () => selectedConsoleAgentId ?? (activeRoom ? getPrimaryRoomAgentId(activeRoom) : null),
+    [activeRoom, selectedConsoleAgentId],
+  );
+
   useBrowserWorkspaceCache({
     hydrated,
     rooms,
     agentStates,
     activeRoomId,
-    selectedConsoleAgentId,
+    selectedConsoleAgentId: effectiveSelectedConsoleAgentId,
   });
 
   useEffect(() => {
@@ -2007,8 +1862,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [activeRoomId]);
 
   useEffect(() => {
-    selectedConsoleAgentIdRef.current = selectedConsoleAgentId;
-  }, [selectedConsoleAgentId]);
+    selectedConsoleAgentIdRef.current = effectiveSelectedConsoleAgentId;
+  }, [effectiveSelectedConsoleAgentId]);
 
   useEffect(() => {
     agentsRef.current = agents;
@@ -2025,7 +1880,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     rooms,
     agentStates,
     activeRoomId,
-    selectedConsoleAgentId,
+    selectedConsoleAgentId: effectiveSelectedConsoleAgentId,
     roomsRef,
     agentStatesRef,
     activeRoomIdRef,
@@ -2054,14 +1909,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     agentStatesRef.current = agentStates;
   }, [agentStates]);
-
-  useEffect(() => {
-    activeRoomIdRef.current = activeRoomId;
-  }, [activeRoomId]);
-
-  useEffect(() => {
-    selectedConsoleAgentIdRef.current = selectedConsoleAgentId ?? null;
-  }, [selectedConsoleAgentId]);
 
   const updateAgentState = useCallback((agentId: RoomAgentId, updater: (state: AgentSharedState) => AgentSharedState) => {
     setAgentStates((current) => {
@@ -2178,19 +2025,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return getRoomAgent(agentId, agentsRef.current);
   }, []);
 
-  const activeRooms = useMemo(() => getActiveRooms(rooms), [rooms]);
-  const archivedRooms = useMemo(() => getArchivedRooms(rooms), [rooms]);
-  const activeRoom = useMemo(
-    () => activeRooms.find((room) => room.id === activeRoomId) ?? activeRooms[0] ?? null,
-    [activeRoomId, activeRooms],
-  );
-
-  useEffect(() => {
-    if (selectedConsoleAgentId === null && activeRoom) {
-      setSelectedConsoleAgentId(getPrimaryRoomAgentId(activeRoom));
-    }
-  }, [activeRoom, selectedConsoleAgentId]);
-
   const setSelectedSender = useCallback((roomId: string, participantId: string) => {
     setSelectedSenderByRoomId((current) => ({
       ...current,
@@ -2273,198 +2107,28 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
     return nextState;
   }, [rooms, streamingAgentIdsByRoomId]);
-
-  const clearAllWorkspace = useCallback(async () => {
-    const initialRoom = createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current);
-    const initialAgentStates = createInitialAgentStates(agentsRef.current);
-
-    roomsRef.current = [initialRoom];
-    agentStatesRef.current = initialAgentStates;
-
-    setRooms([initialRoom]);
-    setAgentStates(initialAgentStates);
-    setAgentCompactionFeedback(createInitialAgentCompactionFeedback(agentsRef.current));
-    setActiveRoomId(initialRoom.id);
-    setSelectedConsoleAgentId(initialRoom.agentId);
-    setSelectedSenderByRoomId({});
-    setDraftsByRoomId({});
-    setResettingAgentContextIds({});
-    setCompactingAgentContextIds({});
-
-    await clearPersistedWorkspaceState();
-
-    await Promise.allSettled(
-      agentsRef.current.map((agent) =>
-        fetch("/api/agent-memory/reset", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ agentId: agent.id }),
-        }),
-      ),
-    );
-  }, []);
-
-  const clearAgentConsole = useCallback(
-    (agentId: RoomAgentId) => {
-      if (runningAgentRequestIds[agentId]) {
-        return;
-      }
-
-      updateAgentState(agentId, (state) => ({
-        ...state,
-        agentTurns: [],
-        updatedAt: createTimestamp(),
-      }));
-    },
-    [runningAgentRequestIds, updateAgentState],
-  );
-
-  const resetAgentContext = useCallback(
-    async (agentId: RoomAgentId) => {
-      if (runningAgentRequestIds[agentId] || resettingAgentContextIds[agentId]) {
-        return;
-      }
-
-      setResettingAgentContextIds((current) => ({
-        ...current,
-        [agentId]: true,
-      }));
-
-      try {
-        const response = await fetch("/api/agent-memory/reset", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ agentId }),
-        });
-
-        if (!response.ok) {
-          throw new Error("Failed to reset agent context.");
-        }
-
-        updateAgentState(agentId, (state) => ({
-          ...state,
-          agentTurns: [],
-          updatedAt: createTimestamp(),
-        }));
-      } finally {
-        setResettingAgentContextIds((current) => {
-          const next = { ...current };
-          delete next[agentId];
-          return next;
-        });
-      }
-    },
-    [resettingAgentContextIds, runningAgentRequestIds, updateAgentState],
-  );
-
-  const compactAgentContext = useCallback(
-    async (agentId: RoomAgentId) => {
-      if (runningAgentRequestIds[agentId] || compactingAgentContextIds[agentId]) {
-        return;
-      }
-
-      setCompactingAgentContextIds((current) => ({
-        ...current,
-        [agentId]: true,
-      }));
-
-      try {
-        const response = await fetch("/api/agent-memory/compact", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ agentId }),
-        });
-
-        const payload = (await response.json().catch(() => null)) as
-          | {
-              compacted?: boolean;
-              record?: {
-                summary?: string;
-                prunedMessages?: number;
-                charsBefore?: number;
-                charsAfter?: number;
-              } | null;
-              error?: string;
-            }
-          | null;
-
-        if (!response.ok) {
-          throw new Error(payload?.error || "Failed to compact agent context.");
-        }
-
-        const summary = payload?.record?.summary?.trim() || "";
-        const feedback: AgentCompactionFeedback = payload?.compacted
-          ? {
-              status: "success",
-              message:
-                typeof payload.record?.prunedMessages === "number"
-                  ? `已压缩 ${payload.record.prunedMessages} 条隐藏历史消息。`
-                  : "已压缩隐藏上下文。",
-              summary,
-              updatedAt: createTimestamp(),
-            }
-          : {
-              status: "noop",
-              message: "当前没有足够的隐藏上下文可压缩。",
-              summary,
-              updatedAt: createTimestamp(),
-            };
-
-        setAgentCompactionFeedback((current) => ({
-          ...current,
-          [agentId]: feedback,
-        }));
-
-        updateAgentState(agentId, (state) => ({
-          ...state,
-          updatedAt: createTimestamp(),
-        }));
-      } catch (error) {
-        setAgentCompactionFeedback((current) => ({
-          ...current,
-          [agentId]: {
-            status: "error",
-            message: error instanceof Error ? error.message : "压缩隐藏上下文时发生未知错误。",
-            summary: "",
-            updatedAt: createTimestamp(),
-          },
-        }));
-      } finally {
-        setCompactingAgentContextIds((current) => {
-          const next = { ...current };
-          delete next[agentId];
-          return next;
-        });
-      }
-    },
-    [compactingAgentContextIds, runningAgentRequestIds, updateAgentState],
-  );
-
-  const updateAgentSettings = useCallback(
-    (agentId: RoomAgentId, patch: Partial<ChatSettings>) => {
-      updateAgentState(agentId, (state) => ({
-        ...state,
-        settings: {
-          ...state.settings,
-          ...patch,
-          memoryBackend: "sqlite-fts" as MemoryBackendId,
-          compactionTokenThreshold: coerceCompactionTokenThreshold(patch.compactionTokenThreshold ?? state.settings.compactionTokenThreshold),
-          compactionFreshTailCount: coerceCompactionFreshTailCount(patch.compactionFreshTailCount ?? state.settings.compactionFreshTailCount),
-          maxToolLoopSteps: coerceMaxToolLoopSteps(patch.maxToolLoopSteps ?? state.settings.maxToolLoopSteps),
-          thinkingLevel: coerceThinkingLevel(patch.thinkingLevel ?? state.settings.thinkingLevel),
-          enabledSkillIds: coerceSkillIds(patch.enabledSkillIds ?? state.settings.enabledSkillIds),
-        },
-        updatedAt: createTimestamp(),
-      }));
-    },
-    [updateAgentState],
-  );
+  const {
+    compactingAgentContextIds,
+    clearAllWorkspace,
+    clearAgentConsole,
+    resetAgentContext,
+    compactAgentContext,
+    updateAgentSettings,
+  } = useWorkspaceAgentContextActions({
+    defaultAgentId: DEFAULT_AGENT_ID,
+    agentsRef,
+    roomsRef,
+    agentStatesRef,
+    runningAgentRequestIds,
+    updateAgentState,
+    setRooms,
+    setAgentStates,
+    setAgentCompactionFeedback,
+    setActiveRoomId,
+    setSelectedConsoleAgentId,
+    setSelectedSenderByRoomId,
+    setDraftsByRoomId,
+  });
 
   const createAgentDefinition = useCallback(async (input: AgentMutationInput) => {
     const agent = await createAgentDefinitionRequest({
@@ -2566,9 +2230,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       agentStates,
       agentCompactionFeedback,
       runningAgentRequestIds,
-      selectedConsoleAgentId,
+      selectedConsoleAgentId: effectiveSelectedConsoleAgentId,
     }),
-    [agents, agentCompactionFeedback, agentStates, runningAgentRequestIds, selectedConsoleAgentId],
+    [agents, agentCompactionFeedback, agentStates, effectiveSelectedConsoleAgentId, runningAgentRequestIds],
   );
 
   const actionsContextValue = useMemo<WorkspaceActionsContextValue>(
