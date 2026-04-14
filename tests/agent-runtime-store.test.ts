@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 
 type RuntimeStoreModule = typeof import("../src/lib/server/agent-runtime-store");
 type AgentCompactionModule = typeof import("../src/lib/server/agent-compaction");
+type ModelConfigStoreModule = typeof import("../src/lib/server/model-config-store");
 type WorkspaceStoreModule = typeof import("../src/lib/server/workspace-store");
 
 const TEST_IMAGE_ATTACHMENT = {
@@ -22,7 +23,13 @@ const TEST_IMAGE_ATTACHMENT = {
 const repoRoot = process.cwd();
 
 async function withRuntimeModules(
-  run: (runtimeStore: RuntimeStoreModule, agentCompaction: AgentCompactionModule, workspaceStore: WorkspaceStoreModule, tempDir: string) => Promise<void>,
+  run: (
+    runtimeStore: RuntimeStoreModule,
+    agentCompaction: AgentCompactionModule,
+    workspaceStore: WorkspaceStoreModule,
+    tempDir: string,
+    modelConfigStore: ModelConfigStoreModule,
+  ) => Promise<void>,
 ) {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "oceanking-agent-runtime-test-"));
   const previousCwd = process.cwd();
@@ -31,14 +38,16 @@ async function withRuntimeModules(
   const runtimeStoreUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/agent-runtime-store.ts")).href;
   const agentCompactionUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/agent-compaction.ts")).href;
   const workspaceStoreUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/workspace-store.ts")).href;
+  const modelConfigStoreUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/model-config-store.ts")).href;
 
   try {
-    const [runtimeStore, agentCompaction, workspaceStore] = await Promise.all([
+    const [runtimeStore, agentCompaction, workspaceStore, modelConfigStore] = await Promise.all([
       import(`${runtimeStoreUrl}?test=${Date.now()}-${Math.random()}`) as Promise<RuntimeStoreModule>,
       import(`${agentCompactionUrl}?test=${Date.now()}-${Math.random()}`) as Promise<AgentCompactionModule>,
       import(`${workspaceStoreUrl}?test=${Date.now()}-${Math.random()}`) as Promise<WorkspaceStoreModule>,
+      import(`${modelConfigStoreUrl}?test=${Date.now()}-${Math.random()}`) as Promise<ModelConfigStoreModule>,
     ]);
-    await run(runtimeStore, agentCompaction, workspaceStore, tempDir);
+    await run(runtimeStore, agentCompaction, workspaceStore, tempDir, modelConfigStore);
   } finally {
     process.chdir(previousCwd);
     await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
@@ -151,7 +160,12 @@ async function seedLongConversation(runtimeStore: RuntimeStoreModule, agentId: "
 async function setAgentCompactionSettings(
   workspaceStore: WorkspaceStoreModule,
   agentId: "concierge" | "researcher" | "operator",
-  patch: { compactionTokenThreshold?: number; compactionFreshTailCount?: number; systemPrompt?: string },
+  patch: {
+    compactionTokenThreshold?: number;
+    compactionFreshTailCount?: number;
+    systemPrompt?: string;
+    modelConfigId?: string | null;
+  },
 ) {
   const workspace = await workspaceStore.loadWorkspaceEnvelope();
   await workspaceStore.saveWorkspaceState({
@@ -171,6 +185,99 @@ async function setAgentCompactionSettings(
     },
   });
 }
+
+test("compactPersistedAgentRuntime uses the current agent model config for compaction summaries", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore, _tempDir, modelConfigStore) => {
+    const agentId = "concierge";
+    const structuredSummary = [
+      "## 关键结论",
+      "- 当前 agent 配置应该驱动压缩摘要模型。",
+      "",
+      "## 待办事项",
+      "- 无",
+      "",
+      "## 约束与规则",
+      "- 无",
+      "",
+      "## 用户仍在等待的问题",
+      "- 无",
+      "",
+      "## 精确标识符",
+      "- room-alpha",
+    ].join("\n");
+    let capturedArgs:
+      | {
+          resolvedModel: string;
+          settings?: {
+            modelConfigId: string | null;
+            apiFormat: string;
+            model: string;
+            providerMode: string;
+          };
+          modelConfigOverrides?: {
+            baseUrl?: string;
+            apiKey?: string;
+          };
+        }
+      | undefined;
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async (args) => {
+      capturedArgs = {
+        resolvedModel: args.resolvedModel,
+        settings: args.settings
+          ? {
+              modelConfigId: args.settings.modelConfigId,
+              apiFormat: args.settings.apiFormat,
+              model: args.settings.model,
+              providerMode: args.settings.providerMode,
+            }
+          : undefined,
+        modelConfigOverrides: args.modelConfigOverrides,
+      };
+      return structuredSummary;
+    });
+
+    const modelConfig = await modelConfigStore.createModelConfig({
+      name: "Compaction Summary Model",
+      kind: "openai_compatible",
+      model: "custom-compaction-model",
+      apiFormat: "responses",
+      baseUrl: "https://example.test/v1",
+      providerMode: "generic",
+      apiKey: "summary-key",
+    });
+
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionFreshTailCount: 0,
+      modelConfigId: modelConfig.id,
+    });
+    await seedConversation(runtimeStore, agentId);
+
+    const runtime = await runtimeStore.loadPersistedAgentRuntime(agentId);
+    await runtimeStore.savePersistedAgentRuntime({
+      ...runtime,
+      resolvedModel: "right_codes/RightCode",
+    });
+
+    const result = await runtimeStore.compactPersistedAgentRuntime({
+      agentId,
+      reason: "manual",
+      force: true,
+    });
+
+    assert.equal(result.compacted, true);
+    assert.ok(capturedArgs);
+    assert.equal(capturedArgs?.resolvedModel, "right_codes/RightCode");
+    assert.equal(capturedArgs?.settings?.modelConfigId, modelConfig.id);
+    assert.equal(capturedArgs?.settings?.model, "custom-compaction-model");
+    assert.equal(capturedArgs?.settings?.apiFormat, "responses");
+    assert.equal(capturedArgs?.settings?.providerMode, "generic");
+    assert.equal(capturedArgs?.modelConfigOverrides?.baseUrl, "https://example.test/v1");
+    assert.equal(capturedArgs?.modelConfigOverrides?.apiKey, "summary-key");
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
 
 test("compactPersistedAgentRuntime stores an LLM-style structured summary when available", async () => {
   await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {

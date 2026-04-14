@@ -2,8 +2,8 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { estimateAgentPromptTokens } from "./agent-prompt-token-estimate";
 import { generateCompactionSummary } from "./agent-compaction";
+import { resolveAgentCompactionSettingsSelection } from "./agent-compaction-settings";
 import { clearAgentMemory } from "./agent-memory-store";
-import { loadWorkspaceEnvelope } from "./workspace-store";
 import {
   appendAgentLcmMessage,
   assembleAgentLcmContext,
@@ -17,10 +17,6 @@ import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runt
 import {
   type AssistantHistoryAssistantMessage,
   type AssistantHistoryMessage,
-  DEFAULT_COMPACTION_FRESH_TAIL_COUNT,
-  DEFAULT_COMPACTION_TOKEN_THRESHOLD,
-  coerceCompactionFreshTailCount,
-  coerceCompactionTokenThreshold,
 } from "@/lib/chat/types";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
@@ -636,18 +632,6 @@ async function assembleLcmPersistedHistory(agentId: RoomAgentId): Promise<Persis
   }));
 }
 
-async function resolveAgentCompactionSettings(agentId: RoomAgentId): Promise<{
-  thresholdTokens: number;
-  freshTailCount: number;
-}> {
-  const workspace = await loadWorkspaceEnvelope().catch(() => null);
-  const settings = workspace?.state.agentStates[agentId]?.settings;
-  return {
-    thresholdTokens: coerceCompactionTokenThreshold(settings?.compactionTokenThreshold ?? DEFAULT_COMPACTION_TOKEN_THRESHOLD),
-    freshTailCount: coerceCompactionFreshTailCount(settings?.compactionFreshTailCount ?? DEFAULT_COMPACTION_FRESH_TAIL_COUNT),
-  };
-}
-
 async function saveStoredRuntime(runtime: PersistedAgentRuntime): Promise<void> {
   await ensureRuntimeDir();
   await writeFile(
@@ -755,8 +739,11 @@ export async function compactPersistedAgentRuntime(args: {
 }): Promise<CompactRuntimeResult> {
   const runtimeBefore = await readStoredRuntime(args.agentId);
   const charsBefore = estimateHistoryChars(runtimeBefore.history);
-  const { thresholdTokens: compactionTokenThreshold, freshTailCount: compactionFreshTailCount } = await resolveAgentCompactionSettings(args.agentId);
-  const summaryModel = runtimeBefore.resolvedModel.trim() || undefined;
+  const {
+    thresholdTokens: compactionTokenThreshold,
+    freshTailCount: compactionFreshTailCount,
+    modelSelection,
+  } = await resolveAgentCompactionSettingsSelection(args.agentId, runtimeBefore.resolvedModel.trim() || undefined);
   const assembledPromptContext = await assembleAgentLcmContext(args.agentId, 20_000).catch(() => null);
   const storedContextTokens = await getAgentLcmStoredContextTokenCount(args.agentId).catch(() => null);
   const promptTokenEstimate = await estimatePromptTokensWithFallback({
@@ -773,7 +760,7 @@ export async function compactPersistedAgentRuntime(args: {
     args.agentId,
     compactionTokenThreshold,
     args.force,
-    summaryModel,
+    modelSelection,
     comparisonExtraTokens,
     compactionFreshTailCount,
   ).then(
@@ -901,7 +888,10 @@ export async function compactPromptHistoryAfterToolBatch(args: {
 }): Promise<PromptCompactionTransformResult> {
   const charsBefore = estimateSnapshotHistoryChars(args.historyDelta);
   const contextTokens = estimateSnapshotHistoryContextTokens(args.historyDelta);
-  const { thresholdTokens, freshTailCount } = await resolveAgentCompactionSettings(args.agentId);
+  const { thresholdTokens, freshTailCount, modelSelection } = await resolveAgentCompactionSettingsSelection(
+    args.agentId,
+    args.resolvedModel,
+  );
   const keptStartIndex = determinePostToolKeptStartIndex(args.historyDelta, freshTailCount);
   const promptTokenEstimate = await estimatePromptTokensWithFallback({
     agentId: args.agentId,
@@ -986,7 +976,9 @@ export async function compactPromptHistoryAfterToolBatch(args: {
     const summaryText = await generateCompactionSummary({
       agentId: args.agentId,
       messages: compactionMessages,
-      resolvedModel: args.resolvedModel,
+      resolvedModel: modelSelection.resolvedModel,
+      settings: modelSelection.settings,
+      modelConfigOverrides: modelSelection.modelConfigOverrides,
     });
     const method = detectCompactionMethod(summaryText);
     const compactedSnapshots: AssistantHistoryMessage[] = [
@@ -995,7 +987,7 @@ export async function compactPromptHistoryAfterToolBatch(args: {
         content: [{ type: "text", text: summaryText }],
         api: "internal",
         provider: "internal",
-        model: args.resolvedModel || "internal/post_tool_compaction",
+        model: modelSelection.resolvedModel || "internal/post_tool_compaction",
         usage: {
           input: 0,
           output: 0,

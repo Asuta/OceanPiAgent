@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { generateCompactionSummary } from "@/lib/server/agent-compaction";
+import type { CompactionModelSelection } from "@/lib/server/agent-compaction-settings";
 import { extractFileIdsFromContent } from "./large-files";
 import { estimateTokens } from "./estimate-tokens";
 import type { ConversationStore, CreateMessagePartInput } from "./conversation-store";
@@ -53,6 +54,13 @@ const DEFAULT_LEAF_CHUNK_TOKENS = 20_000;
 const FALLBACK_MAX_CHARS = 512 * 4;
 const CONDENSED_MIN_INPUT_RATIO = 0.1;
 const MEDIA_PATH_RE = /^MEDIA:\/.+$/;
+
+function getSummaryModelLabel(selection?: CompactionModelSelection): string | undefined {
+  if (!selection) {
+    return undefined;
+  }
+  return selection.resolvedModel.trim() || selection.settings.model.trim() || undefined;
+}
 
 function shortTzAbbr(value: Date, timezone: string): string {
   try {
@@ -126,11 +134,11 @@ export class CompactionEngine {
     return { shouldCompact: false, reason: "none", currentTokens, threshold };
   }
 
-  async compact(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string; comparisonExtraTokens?: number }): Promise<CompactionResult> {
+  async compact(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModelSelection?: CompactionModelSelection; comparisonExtraTokens?: number }): Promise<CompactionResult> {
     return this.compactFullSweep(input);
   }
 
-  async compactLeaf(input: { conversationId: number; tokenBudget: number; force?: boolean; previousSummaryContent?: string; summaryModel?: string; comparisonExtraTokens?: number }): Promise<CompactionResult> {
+  async compactLeaf(input: { conversationId: number; tokenBudget: number; force?: boolean; previousSummaryContent?: string; summaryModelSelection?: CompactionModelSelection; comparisonExtraTokens?: number }): Promise<CompactionResult> {
     const tokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
 
     if (this.isBelowThreshold({ force: input.force, storedTokens: tokensBefore, comparisonExtraTokens: input.comparisonExtraTokens })) {
@@ -143,7 +151,7 @@ export class CompactionEngine {
     }
 
     const previousSummaryContent = input.previousSummaryContent ?? await this.resolvePriorLeafSummaryContext(input.conversationId, leafChunk.items);
-    const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModel);
+    const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModelSelection);
     if (!leafResult) {
       return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false, skipReason: "leaf_pass_failed" };
     }
@@ -174,7 +182,7 @@ export class CompactionEngine {
         }
 
         const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-        const condenseResult = await this.condensedPass(input.conversationId, chunk.items, targetDepth, input.summaryModel);
+        const condenseResult = await this.condensedPass(input.conversationId, chunk.items, targetDepth, input.summaryModelSelection);
         if (!condenseResult) {
           break;
         }
@@ -209,7 +217,7 @@ export class CompactionEngine {
     };
   }
 
-  async compactFullSweep(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string; comparisonExtraTokens?: number }): Promise<CompactionResult> {
+  async compactFullSweep(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModelSelection?: CompactionModelSelection; comparisonExtraTokens?: number }): Promise<CompactionResult> {
     const tokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
 
     if (this.isBelowThreshold({ force: input.force, storedTokens: tokensBefore, comparisonExtraTokens: input.comparisonExtraTokens })) {
@@ -235,7 +243,7 @@ export class CompactionEngine {
       }
 
       const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-      const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModel);
+      const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModelSelection);
       if (!leafResult) {
         return {
           actionTaken,
@@ -288,7 +296,7 @@ export class CompactionEngine {
       }
 
       const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-      const condenseResult = await this.condensedPass(input.conversationId, candidate.chunk.items, candidate.targetDepth, input.summaryModel);
+      const condenseResult = await this.condensedPass(input.conversationId, candidate.chunk.items, candidate.targetDepth, input.summaryModelSelection);
       if (!condenseResult) {
         break;
       }
@@ -330,7 +338,7 @@ export class CompactionEngine {
     };
   }
 
-  async compactUntilUnder(input: { conversationId: number; tokenBudget: number; targetTokens?: number; currentTokens?: number; summaryModel?: string }): Promise<{ success: boolean; rounds: number; finalTokens: number }> {
+  async compactUntilUnder(input: { conversationId: number; tokenBudget: number; targetTokens?: number; currentTokens?: number; summaryModelSelection?: CompactionModelSelection }): Promise<{ success: boolean; rounds: number; finalTokens: number }> {
     const targetTokens = typeof input.targetTokens === "number" && Number.isFinite(input.targetTokens) && input.targetTokens > 0 ? Math.floor(input.targetTokens) : input.tokenBudget;
     const storedTokens = await this.summaryStore.getContextTokenCount(input.conversationId);
     const liveTokens = typeof input.currentTokens === "number" && Number.isFinite(input.currentTokens) && input.currentTokens > 0 ? Math.floor(input.currentTokens) : 0;
@@ -345,7 +353,7 @@ export class CompactionEngine {
         conversationId: input.conversationId,
         tokenBudget: input.tokenBudget,
         force: true,
-        summaryModel: input.summaryModel,
+        summaryModelSelection: input.summaryModelSelection,
       });
 
       if (result.tokensAfter <= targetTokens) {
@@ -662,7 +670,11 @@ export class CompactionEngine {
     return `${textWithoutPaths} [with media attachment]`;
   }
 
-  private async summarizeMessages(agentId: string, messages: Array<{ id: string; role: "user" | "assistant"; content: string; createdAt: string }>, summaryModel?: string): Promise<string> {
+  private async summarizeMessages(
+    agentId: string,
+    messages: Array<{ id: string; role: "user" | "assistant"; content: string; createdAt: string }>,
+    summaryModelSelection?: CompactionModelSelection,
+  ): Promise<string> {
     const summary = await generateCompactionSummary({
       agentId: agentId as never,
       messages: messages.map((message) => ({
@@ -672,12 +684,23 @@ export class CompactionEngine {
         attachments: [],
         createdAt: message.createdAt,
       })),
-      resolvedModel: summaryModel ?? "unknown",
+      resolvedModel: getSummaryModelLabel(summaryModelSelection) ?? "unknown",
+      ...(summaryModelSelection
+        ? {
+            settings: summaryModelSelection.settings,
+            modelConfigOverrides: summaryModelSelection.modelConfigOverrides,
+          }
+        : {}),
     });
     return summary.trim();
   }
 
-  private async leafPass(conversationId: number, messageItems: ContextItemRecord[], previousSummaryContent?: string, summaryModel?: string): Promise<{ summaryId: string; level: CompactionLevel; content: string } | null> {
+  private async leafPass(
+    conversationId: number,
+    messageItems: ContextItemRecord[],
+    previousSummaryContent?: string,
+    summaryModelSelection?: CompactionModelSelection,
+  ): Promise<{ summaryId: string; level: CompactionLevel; content: string } | null> {
     const messageContents: { messageId: number; role: "user" | "assistant"; content: string; createdAt: Date; tokenCount: number }[] = [];
     for (const item of messageItems) {
       if (item.messageId == null) {
@@ -708,7 +731,7 @@ export class CompactionEngine {
           content: `${previousSummaryContent ? `[Previous running summary]\n${previousSummaryContent}\n\n` : ""}${message.content}`,
           createdAt: message.createdAt.toISOString(),
         })),
-        summaryModel,
+        summaryModelSelection,
       );
     } catch {
       const fallback = this.buildDeterministicFallback(concatenated);
@@ -736,7 +759,7 @@ export class CompactionEngine {
       descendantCount: 0,
       descendantTokenCount: 0,
       sourceMessageTokenCount: messageContents.reduce((sum, message) => sum + Math.max(0, Math.floor(message.tokenCount)), 0),
-      model: summaryModel,
+      model: getSummaryModelLabel(summaryModelSelection),
     });
 
     const messageIds = messageContents.map((message) => message.messageId);
@@ -751,7 +774,12 @@ export class CompactionEngine {
     return { summaryId, level, content: summaryContent };
   }
 
-  private async condensedPass(conversationId: number, summaryItems: ContextItemRecord[], targetDepth: number, summaryModel?: string): Promise<PassResult | null> {
+  private async condensedPass(
+    conversationId: number,
+    summaryItems: ContextItemRecord[],
+    targetDepth: number,
+    summaryModelSelection?: CompactionModelSelection,
+  ): Promise<PassResult | null> {
     const summaryRecords: SummaryRecord[] = [];
     for (const item of summaryItems) {
       if (item.summaryId == null) {
@@ -786,7 +814,7 @@ export class CompactionEngine {
           content: `${previousSummaryContent ? `[Previous running summary]\n${previousSummaryContent}\n\n` : ""}${summary.content}`,
           createdAt: summary.createdAt.toISOString(),
         })),
-        summaryModel,
+        summaryModelSelection,
       );
     } catch {
       const fallback = this.buildDeterministicFallback(concatenated);
@@ -814,7 +842,7 @@ export class CompactionEngine {
       descendantCount: summaryRecords.reduce((count, summary) => count + Math.max(0, summary.descendantCount) + 1, 0),
       descendantTokenCount: summaryRecords.reduce((count, summary) => count + Math.max(0, Math.floor(summary.tokenCount)) + Math.max(0, summary.descendantTokenCount), 0),
       sourceMessageTokenCount: summaryRecords.reduce((count, summary) => count + Math.max(0, summary.sourceMessageTokenCount), 0),
-      model: summaryModel,
+      model: getSummaryModelLabel(summaryModelSelection),
     });
 
     await this.summaryStore.linkSummaryToParents(summaryId, summaryRecords.map((summary) => summary.summaryId));

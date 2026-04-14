@@ -1073,6 +1073,7 @@ export async function runTextPrompt(args: {
   settings: ChatSettings;
   systemPrompt?: string;
   signal?: AbortSignal;
+  modelConfigOverrides?: ModelConfigExecutionOverrides;
 }): Promise<RunTextPromptResult> {
   throwIfAborted(args.signal);
   ensureGlobalProxyDispatcherInstalled();
@@ -1081,7 +1082,7 @@ export async function runTextPrompt(args: {
     settings: args.settings,
     toolScope: "default",
   });
-  const resolvedModel = resolvePiModel(effectiveSettings);
+  const resolvedModel = resolvePiModel(effectiveSettings, args.modelConfigOverrides);
   const sessionId = buildStableSessionId({
     resolvedModel,
   });

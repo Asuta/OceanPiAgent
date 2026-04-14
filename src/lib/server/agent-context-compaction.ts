@@ -5,6 +5,7 @@ import {
   type AgentContextItemRecord,
 } from "./agent-context-store";
 import { generateCompactionSummary } from "./agent-compaction";
+import { resolveAgentCompactionSettingsSelection } from "./agent-compaction-settings";
 import type { PersistedVisibleMessage } from "./agent-runtime-store";
 import type { RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
@@ -159,10 +160,13 @@ export async function compactAgentContext(args: {
   const compactionMessages = prunedItems
     .map((item) => itemToCompactionMessage(item))
     .filter((item): item is PersistedVisibleMessage => Boolean(item));
+  const { modelSelection } = await resolveAgentCompactionSettingsSelection(args.agentId, args.resolvedModel);
   const summary = await generateCompactionSummary({
     agentId: args.agentId,
     messages: compactionMessages,
-    resolvedModel: args.resolvedModel,
+    resolvedModel: modelSelection.resolvedModel,
+    settings: modelSelection.settings,
+    modelConfigOverrides: modelSelection.modelConfigOverrides,
   });
   const summaryId = createUuid();
   const summaryKind = prunedItems.some((item) => item.itemType === "summary") ? "condensed" : "leaf";

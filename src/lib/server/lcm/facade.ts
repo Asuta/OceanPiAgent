@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { DEFAULT_COMPACTION_FRESH_TAIL_COUNT, DEFAULT_COMPACTION_TOKEN_THRESHOLD } from "@/lib/chat/types";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId, RoomMessageEmission, RoomSender, RoomToolActionUnion, ToolExecution } from "@/lib/chat/types";
+import type { CompactionModelSelection } from "@/lib/server/agent-compaction-settings";
 import { getLcmDatabase } from "./db";
 import { getLcmDbFeatures } from "./features";
 import { formatToolOutputReference, generateExplorationSummary } from "./large-files";
@@ -267,7 +268,7 @@ export async function compactAgentLcmContext(
   agentId: RoomAgentId,
   tokenThreshold: number,
   force?: boolean,
-  summaryModel?: string,
+  summaryModelSelection?: CompactionModelSelection,
   comparisonExtraTokens?: number,
   freshTailCount?: number,
 ) {
@@ -280,7 +281,7 @@ export async function compactAgentLcmContext(
     conversationId: conversation.conversationId,
     tokenBudget: tokenThreshold,
     force,
-    summaryModel,
+    summaryModelSelection,
     ...(typeof comparisonExtraTokens === "number" ? { comparisonExtraTokens } : {}),
   });
 }

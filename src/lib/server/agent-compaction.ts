@@ -1,4 +1,10 @@
-import { DEFAULT_COMPACTION_TOKEN_THRESHOLD, DEFAULT_MAX_TOOL_LOOP_STEPS, type ChatSettings, type RoomAgentId } from "@/lib/chat/types";
+import {
+  DEFAULT_COMPACTION_TOKEN_THRESHOLD,
+  DEFAULT_MAX_TOOL_LOOP_STEPS,
+  type ChatSettings,
+  type ModelConfigExecutionOverrides,
+  type RoomAgentId,
+} from "@/lib/chat/types";
 import { formatMessageForTranscript, summarizeImageAttachments } from "@/lib/chat/message-attachments";
 import type { PersistedVisibleMessage } from "./agent-runtime-store";
 
@@ -17,6 +23,8 @@ type GenerateCompactionSummaryArgs = {
   agentId: RoomAgentId;
   messages: PersistedVisibleMessage[];
   resolvedModel: string;
+  settings?: ChatSettings;
+  modelConfigOverrides?: ModelConfigExecutionOverrides;
   signal?: AbortSignal;
 };
 
@@ -283,6 +291,7 @@ function buildCompactionPrompt(args: {
 
 async function summarizeChunk(args: {
   settings: ChatSettings;
+  modelConfigOverrides?: ModelConfigExecutionOverrides;
   chunk: PersistedVisibleMessage[];
   previousSummary?: string;
   signal?: AbortSignal;
@@ -295,6 +304,7 @@ async function summarizeChunk(args: {
   for (let attempt = 0; attempt < MAX_SUMMARY_ATTEMPTS; attempt += 1) {
     const result = await runTextPrompt({
       settings: args.settings,
+      modelConfigOverrides: args.modelConfigOverrides,
       systemPrompt: [
         "你负责把较早的隐藏 agent 历史压缩成可复用的共享记忆。",
         "摘要必须简洁、准确、偏事实，不要扩写。",
@@ -324,13 +334,14 @@ async function summarizeChunk(args: {
 }
 
 async function generateStructuredCompactionSummary(args: GenerateCompactionSummaryArgs): Promise<string> {
-  const settings = createCompactionSettings(args.resolvedModel);
+  const settings = args.settings ?? createCompactionSettings(args.resolvedModel);
   const chunks = splitMessagesIntoChunks(args.messages);
   let summary = "";
 
   for (const chunk of chunks) {
     summary = await summarizeChunk({
       settings,
+      modelConfigOverrides: args.modelConfigOverrides,
       chunk,
       previousSummary: summary || undefined,
       signal: args.signal,
