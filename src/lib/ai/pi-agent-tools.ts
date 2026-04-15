@@ -12,6 +12,16 @@ const CRON_DELIVERY_POLICY_ENUM = StringEnum(["silent", "only_on_result", "alway
 const CRON_JOB_STATUS_ENUM = StringEnum(["idle", "queued", "running", "error"]);
 const CRON_RUN_STATUS_ENUM = StringEnum(["running", "completed", "failed"]);
 
+function buildAttachedRoomIdSchema(roomToolContext: RoomToolContext | undefined, description: string) {
+  const attachedRoomIds = roomToolContext?.attachedRooms
+    .map((room) => room.id)
+    .filter((roomId) => roomId.trim().length > 0) ?? [];
+
+  return attachedRoomIds.length > 0
+    ? StringEnum(attachedRoomIds, { description })
+    : Type.String({ description });
+}
+
 export interface PiToolResultDetails {
   toolEvent: ToolExecution;
 }
@@ -154,7 +164,7 @@ function buildRoomTools(scope: ToolScope, roomToolContext?: RoomToolContext) {
       label: "Send Message To Room",
       description: "Deliver user-visible content into any attached room, whether you are sending in the current room or relaying into another room. Reuse the same optional messageKey if one visible room bubble should stream and grow over time.",
       parameters: Type.Object({
-        roomId: Type.String({ description: "Target attached room id." }),
+        roomId: buildAttachedRoomIdSchema(roomToolContext, "Target attached room id."),
         messageKey: Type.Optional(Type.String({ description: "Stable key to keep updating the same visible room bubble across repeated calls." })),
         content: Type.String({ description: "Exact user-visible content to send." }),
         kind: Type.Optional(ROOM_MESSAGE_KIND_ENUM),
