@@ -565,3 +565,217 @@ test("compactPromptHistoryAfterToolBatch compresses only the prefix before the l
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });
 });
+
+test("compactPromptHistoryAfterToolBatch preserves visible room deliveries from tool results in the compaction summary", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionTokenThreshold: 1_000,
+      compactionFreshTailCount: 0,
+    });
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async (args) =>
+      agentCompaction.__testing.buildRuleBasedCompactionSummary(args.messages)
+    );
+
+    const result = await runtimeStore.compactPromptHistoryAfterToolBatch({
+      agentId,
+      resolvedModel: "fake-provider/fake-model",
+      historyDelta: [
+        {
+          role: "user",
+          content: "Earlier room request: " + "context ".repeat(220),
+          timestamp: 1,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "tool-1", name: "send_message_to_room", arguments: { roomId: "room-1" } }],
+          api: "responses",
+          provider: "openai",
+          model: "fake-model",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "toolUse",
+          timestamp: 2,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool-1",
+          toolName: "send_message_to_room",
+          content: [{ type: "text", text: "Sent a room message (progress/completed/non-final)." }],
+          details: {
+            toolEvent: {
+              id: "tool-1",
+              sequence: 1,
+              toolName: "send_message_to_room",
+              displayName: "Send Message To Room",
+              inputSummary: "",
+              inputText: "",
+              resultPreview: "Sent a room message (progress/completed/non-final).",
+              outputText: "Sent a room message (progress/completed/non-final).",
+              status: "success",
+              durationMs: 1,
+              roomMessage: {
+                roomId: "room-1",
+                content: "I will check the latest update.",
+                kind: "progress",
+                status: "completed",
+                final: false,
+              },
+            },
+          },
+          isError: false,
+          timestamp: 3,
+        },
+        {
+          role: "user",
+          content: "Follow-up request: " + "latest updates ".repeat(220),
+          timestamp: 4,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "tool-2", name: "web_fetch", arguments: { url: "https://example.com" } }],
+          api: "responses",
+          provider: "openai",
+          model: "fake-model",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "toolUse",
+          timestamp: 5,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool-2",
+          toolName: "web_fetch",
+          content: [{ type: "text", text: "fetched current result" }],
+          isError: false,
+          timestamp: 6,
+        },
+      ],
+    });
+
+    assert.equal(result.compacted, true);
+    assert.match(result.summaryText ?? "", /已经发出到房间的内容：\n- to room room-1: \[progress \/ completed\] I will check the latest update\./);
+    assert.match(result.summaryText ?? "", /值得保留的工具结论：\n- Send Message To Room: Sent a room message \(progress\/completed\/non-final\)\./);
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
+test("compactPromptHistoryAfterToolBatch keeps only the latest open room request in the fallback summary", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionTokenThreshold: 1_000,
+      compactionFreshTailCount: 0,
+    });
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async (args) =>
+      agentCompaction.__testing.buildRuleBasedCompactionSummary(args.messages)
+    );
+
+    const result = await runtimeStore.compactPromptHistoryAfterToolBatch({
+      agentId,
+      resolvedModel: "fake-provider/fake-model",
+      historyDelta: [
+        {
+          role: "user",
+          content: [
+            "[Incoming Chat Room message]",
+            "Room ID: room-a",
+            "Room Title: Alpha Room",
+            "Message ID: msg-a",
+            "Sender ID: room-scheduler",
+            "Sender Name: Room Scheduler",
+            "Sender Role: system",
+            "Visible room message:",
+            "[Room scheduler sync packet]",
+            "Latest messageId: msg-a",
+            "Unseen messages:",
+            "- You: Need Jackie Chan updates.",
+          ].join("\n"),
+          timestamp: 1,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "tool-1", name: "send_message_to_room", arguments: { roomId: "room-a" } }],
+          api: "responses",
+          provider: "openai",
+          model: "fake-model",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "toolUse",
+          timestamp: 2,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool-1",
+          toolName: "send_message_to_room",
+          content: [{ type: "text", text: "Sent a room message (progress/completed/non-final)." }],
+          details: {
+            toolEvent: {
+              id: "tool-1",
+              sequence: 1,
+              toolName: "send_message_to_room",
+              displayName: "Send Message To Room",
+              inputSummary: "",
+              inputText: "",
+              resultPreview: "Sent a room message (progress/completed/non-final).",
+              outputText: "Sent a room message (progress/completed/non-final).",
+              status: "success",
+              durationMs: 1,
+              roomMessage: {
+                roomId: "room-a",
+                content: "I will check the latest Jackie Chan updates.",
+                kind: "progress",
+                status: "completed",
+                final: false,
+              },
+            },
+          },
+          isError: false,
+          timestamp: 3,
+        },
+        {
+          role: "user",
+          content: [
+            "[Incoming Chat Room message]",
+            "Room ID: room-b",
+            "Room Title: Beta Room",
+            "Message ID: msg-b",
+            "Sender ID: room-scheduler",
+            "Sender Name: Room Scheduler",
+            "Sender Role: system",
+            "Visible room message:",
+            "[Room scheduler sync packet]",
+            "Latest messageId: msg-b",
+            "Unseen messages:",
+            "- You: Need Donnie Yen updates.",
+          ].join("\n"),
+          timestamp: 4,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "tool-2", name: "web_fetch", arguments: { url: "https://example.com" } }],
+          api: "responses",
+          provider: "openai",
+          model: "fake-model",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "toolUse",
+          timestamp: 5,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool-2",
+          toolName: "web_fetch",
+          content: [{ type: "text", text: "fetched current result" }],
+          isError: false,
+          timestamp: 6,
+        },
+      ],
+    });
+
+    const importantRequestsBlock = result.summaryText?.match(/重要历史请求：\n([\s\S]*?)\n\n已经发出到房间的内容：/)?.[1] ?? "";
+
+    assert.equal(result.compacted, true);
+    assert.match(importantRequestsBlock, /Need Donnie Yen updates\./);
+    assert.doesNotMatch(importantRequestsBlock, /Need Jackie Chan updates\./);
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});

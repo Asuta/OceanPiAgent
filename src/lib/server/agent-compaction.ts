@@ -54,17 +54,41 @@ function truncateLine(value: string, maxLength: number): string {
   return `${normalized.slice(0, maxLength).trim()}...`;
 }
 
-function extractRoomEnvelopeDetail(message: PersistedVisibleMessage): { roomLabel?: string; visibleMessage?: string } {
+function extractRoomEnvelopeDetail(message: PersistedVisibleMessage): { roomId?: string; roomLabel?: string; visibleMessage?: string } {
   const roomIdMatch = message.content.match(/Room ID:\s*(.+)/);
   const roomTitleMatch = message.content.match(/Room Title:\s*(.+)/);
   const visibleMessageMatch = message.content.match(/Visible room message:\n([\s\S]+)$/);
+  const roomId = roomIdMatch?.[1]?.trim();
   return {
+    roomId,
     roomLabel:
-      roomTitleMatch?.[1]?.trim() && roomIdMatch?.[1]?.trim()
-        ? `${roomTitleMatch[1].trim()} (${roomIdMatch[1].trim()})`
-        : roomIdMatch?.[1]?.trim(),
+      roomTitleMatch?.[1]?.trim() && roomId
+        ? `${roomTitleMatch[1].trim()} (${roomId})`
+        : roomId,
     visibleMessage: visibleMessageMatch?.[1]?.trim(),
   };
+}
+
+function extractRoomIdFromDeliveryLine(line: string): string | null {
+  const match = /^- to room ([^:]+): \[[^\]]+\]/.exec(line.trim());
+  return match?.[1]?.trim() || null;
+}
+
+function isResolvingDeliveryLine(line: string): boolean {
+  const match = /^- to room [^:]+: \[([^\]]+)\]/.exec(line.trim());
+  if (!match?.[1]) {
+    return false;
+  }
+
+  const labels = match[1].split("/").map((label) => label.trim().toLowerCase());
+  const kind = labels[0] ?? "";
+  const status = labels[1] ?? "";
+  return labels.includes("final") || (kind === "answer" && status === "completed");
+}
+
+function extractRoomIdFromActionLine(line: string): string | null {
+  const match = /for room ([^,\s]+)/.exec(line.trim());
+  return match?.[1]?.trim() || null;
 }
 
 function collectSectionLines(content: string, heading: string): string[] {
@@ -81,38 +105,78 @@ function collectSectionLines(content: string, heading: string): string[] {
 
 export function buildRuleBasedCompactionSummary(messages: PersistedVisibleMessage[]): string {
   const rooms = new Set<string>();
-  const userRequests: string[] = [];
   const deliveries: string[] = [];
   const toolFindings: string[] = [];
   const roomActions: string[] = [];
+  const standaloneRequests: Array<{ line: string; index: number }> = [];
+  const openRoomRequests = new Map<string, { line: string; index: number }>();
 
-  for (const message of messages) {
+  for (const [index, message] of messages.entries()) {
     if (message.role === "user") {
       const detail = extractRoomEnvelopeDetail(message);
       if (detail.roomLabel) {
         rooms.add(detail.roomLabel);
       }
-      if (detail.visibleMessage) {
-        userRequests.push(`- ${truncateLine(detail.visibleMessage, 220)}`);
-      } else if (message.attachments.length > 0) {
-        userRequests.push(`- ${truncateLine(formatMessageForTranscript(message.content, message.attachments), 220)}`);
+      const requestLine = detail.visibleMessage
+        ? `- ${truncateLine(detail.visibleMessage, 220)}`
+        : message.attachments.length > 0
+          ? `- ${truncateLine(formatMessageForTranscript(message.content, message.attachments), 220)}`
+          : `- ${truncateLine(message.content, 220)}`;
+
+      if (detail.roomId) {
+        openRoomRequests.set(detail.roomId, { line: requestLine, index });
       } else {
-        userRequests.push(`- ${truncateLine(message.content, 220)}`);
+        standaloneRequests.push({ line: requestLine, index });
       }
+
       continue;
     }
 
-    deliveries.push(...collectSectionLines(message.content, "Visible room deliveries").slice(0, 4));
-    roomActions.push(...collectSectionLines(message.content, "Room actions").slice(0, 4));
+    const deliveryLines = collectSectionLines(message.content, "Visible room deliveries").slice(0, 4);
+    deliveries.push(...deliveryLines);
+    for (const deliveryLine of deliveryLines) {
+      const roomId = extractRoomIdFromDeliveryLine(deliveryLine);
+      if (!roomId || !openRoomRequests.has(roomId)) {
+        continue;
+      }
+
+      if (isResolvingDeliveryLine(deliveryLine)) {
+        openRoomRequests.delete(roomId);
+      }
+    }
+
+    const actionLines = collectSectionLines(message.content, "Room actions").slice(0, 4);
+    roomActions.push(...actionLines);
+    for (const actionLine of actionLines) {
+      if (!actionLine.includes("read_no_reply")) {
+        continue;
+      }
+
+      const roomId = extractRoomIdFromActionLine(actionLine);
+      if (roomId) {
+        openRoomRequests.delete(roomId);
+      }
+    }
+
     toolFindings.push(...collectSectionLines(message.content, "Tool results used").slice(0, 4));
   }
+
+  const latestOpenRoomRequest = [...openRoomRequests.values()]
+    .sort((left, right) => left.index - right.index)
+    .at(-1);
+  const importantRequests = latestOpenRoomRequest
+    ? [latestOpenRoomRequest.line]
+    : standaloneRequests
+        .sort((left, right) => left.index - right.index)
+        .slice(-3)
+        .map((entry) => entry.line);
 
   const sections = [
     RULE_FALLBACK_MARKER,
     rooms.size > 0 ? `涉及房间：${[...rooms].join(", ")}` : "涉及房间：未知",
     "",
     "重要历史请求：",
-    ...(userRequests.slice(-6).length > 0 ? userRequests.slice(-6) : ["- 无记录"]),
+    ...(importantRequests.length > 0 ? importantRequests : ["- 无记录"]),
     "",
     "已经发出到房间的内容：",
     ...(deliveries.slice(-6).length > 0 ? deliveries.slice(-6) : ["- 无记录"]),

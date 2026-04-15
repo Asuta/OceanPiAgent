@@ -13,6 +13,7 @@ import { deliverBoundRoomMessages } from "@/lib/server/channel-outbound-service"
 import { abortRoomStream, combineAbortSignals } from "@/lib/server/room-stream-control";
 import {
   buildPreparedInputFromWorkspace,
+  createRunRoomTurnResultFromError,
   extractAssistantMetaFromRoomTurnError,
   runPreparedRoomTurn,
   runRoomTurnNonStreaming,
@@ -660,16 +661,27 @@ export async function runRoomSchedulerNow(
       });
     } catch (error) {
       if (isAbortLike(error, currentTurnSignal)) {
-        clearActiveAgentRoomRunForRoom(targetAgentId, roomId, getAbortReason(currentTurnSignal, "Room scheduler stopped."));
-        await deps.mutateWorkspace((workspace) => applyStoppedStateToWorkspace(workspace, roomId, getAbortReason(currentTurnSignal, "Room scheduler stopped.")));
+        const abortReason = getAbortReason(currentTurnSignal, "Room scheduler stopped.");
+        if (hooks.onError && /timed out/i.test(abortReason)) {
+          await hooks.onError(
+            currentTurnSignal.reason instanceof Error ? currentTurnSignal.reason : new Error(abortReason),
+          );
+        }
+        clearActiveAgentRoomRunForRoom(targetAgentId, roomId, abortReason);
+        await deps.mutateWorkspace((workspace) => applyStoppedStateToWorkspace(workspace, roomId, abortReason));
         return;
       }
 
-      const meta = extractAssistantMetaFromRoomTurnError(error);
-      if (hooks.onError) {
-        await hooks.onError(error, meta);
+      const recoveredResult = createRunRoomTurnResultFromError(error);
+      if (recoveredResult) {
+        result = recoveredResult;
+      } else {
+        const meta = extractAssistantMetaFromRoomTurnError(error);
+        if (hooks.onError) {
+          await hooks.onError(error, meta);
+        }
+        throw error;
       }
-      throw error;
     } finally {
       turnTimeout.cancel();
     }

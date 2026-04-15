@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { roomWorkspaceStateSchema } from "@/lib/chat/schemas";
 import type { AgentRoomTurn, RoomWorkspaceState } from "@/lib/chat/types";
 import { createWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
@@ -14,6 +15,8 @@ export interface WorkspaceEnvelope {
 const WORKSPACE_ROOT = path.join(process.cwd(), ".oceanking", "workspace");
 const WORKSPACE_FILE = path.join(WORKSPACE_ROOT, "state.json");
 const DEFAULT_STALE_RUNNING_ROOM_TIMEOUT_MS = 150_000;
+const WORKSPACE_READ_RETRY_ATTEMPTS = 4;
+const WORKSPACE_READ_RETRY_DELAY_MS = 15;
 
 declare global {
   var __oceankingWorkspaceWriteQueue: Promise<void> | undefined;
@@ -133,20 +136,32 @@ function recoverStaleRunningRooms(state: RoomWorkspaceState, now = Date.now()): 
 
 export async function loadWorkspaceEnvelope(): Promise<WorkspaceEnvelope> {
   await ensureWorkspaceDir();
-  const raw = await readFile(WORKSPACE_FILE, "utf8").catch(() => "");
-  if (!raw.trim()) {
-    return createDefaultEnvelope();
+  for (let attempt = 0; attempt <= WORKSPACE_READ_RETRY_ATTEMPTS; attempt += 1) {
+    const raw = await readFile(WORKSPACE_FILE, "utf8").catch(() => "");
+    if (!raw.trim()) {
+      if (attempt < WORKSPACE_READ_RETRY_ATTEMPTS) {
+        await delay(WORKSPACE_READ_RETRY_DELAY_MS);
+        continue;
+      }
+      return createDefaultEnvelope();
+    }
+
+    try {
+      const envelope = normalizeEnvelope(JSON.parse(raw) as unknown);
+      return {
+        ...envelope,
+        state: recoverStaleRunningRooms(envelope.state),
+      };
+    } catch {
+      if (attempt < WORKSPACE_READ_RETRY_ATTEMPTS) {
+        await delay(WORKSPACE_READ_RETRY_DELAY_MS);
+        continue;
+      }
+      return createDefaultEnvelope();
+    }
   }
 
-  try {
-    const envelope = normalizeEnvelope(JSON.parse(raw) as unknown);
-    return {
-      ...envelope,
-      state: recoverStaleRunningRooms(envelope.state),
-    };
-  } catch {
-    return createDefaultEnvelope();
-  }
+  return createDefaultEnvelope();
 }
 
 async function writeWorkspaceEnvelope(envelope: WorkspaceEnvelope): Promise<void> {

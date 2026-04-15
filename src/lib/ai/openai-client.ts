@@ -7,6 +7,11 @@ import {
 } from "@/lib/ai/provider-compat";
 import { ensureOpenAiFetchCompatibility } from "@/lib/ai/openai-fetch-compat";
 import { shouldApplyPostToolBatchCompaction } from "@/lib/ai/post-tool-compaction";
+import {
+  createPostToolCompactionTimeoutController,
+  createPostToolStallAbortController,
+  createToolCallStallAbortController,
+} from "@/lib/ai/post-tool-stall";
 import { extractRoomMessagePreviewFromToolCallBlock } from "@/lib/ai/room-message-preview";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { resolvePiModel } from "@/lib/ai/pi-model-resolver";
@@ -42,8 +47,6 @@ type ResponsesContinuationStrategy = "replay" | "previous_response_id";
 type PayloadRecord = Record<string, unknown>;
 
 const FINAL_ROOM_DELIVERY_SHORT_CIRCUIT_MS = 50;
-const DEFAULT_POST_TOOL_STALL_ABORT_MS = 20_000;
-
 function toPiAgentThinkingLevel(level: ThinkingLevel): PiAgentThinkingLevel {
   // pi-agent-core types lag OpenAI's current `none` effort value, but the
   // runtime forwards any non-`off` string as provider reasoning effort.
@@ -224,6 +227,22 @@ function buildProviderSessionKey(sessionId: string | undefined): string | undefi
 
   const digest = createHash("sha1").update(normalized).digest("hex").slice(0, 16);
   return `${normalized.slice(0, 47)}:${digest}`;
+}
+
+function getToolCallProgressSignature(args: {
+  name: string;
+  arguments: unknown;
+  partialJson?: unknown;
+}): string {
+  if (typeof args.partialJson === "string") {
+    return `${args.name}:${args.partialJson}`;
+  }
+
+  try {
+    return `${args.name}:${JSON.stringify(args.arguments)}`;
+  } catch {
+    return `${args.name}:${String(args.arguments)}`;
+  }
 }
 
 function createHistoricalAssistantMessage(message: VisibleMessage, model: Model<Api>, timestamp: number): AssistantMessage {
@@ -685,12 +704,6 @@ function shouldShortCircuitAfterFinalRoomDelivery(tool: ToolExecution, currentRo
     && tool.roomMessage.content.trim().length > 0;
 }
 
-function getPostToolStallAbortMs(): number {
-  const raw = process.env.OCEANKING_POST_TOOL_STALL_ABORT_MS?.trim();
-  const parsed = raw ? Number(raw) : Number.NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_POST_TOOL_STALL_ABORT_MS;
-}
-
 async function runConversationAttempt(args: {
   messages: VisibleMessage[];
   resolvedModel: ReturnType<typeof resolvePiModel>;
@@ -716,6 +729,12 @@ async function runConversationAttempt(args: {
       }
     : args.resolvedModel.model;
   let pendingPostToolBatchCompaction = false;
+  const postToolStallAbort = createPostToolStallAbortController({
+    abort: () => agent.abort(),
+  });
+  const toolCallStallAbort = createToolCallStallAbortController({
+    abort: () => agent.abort(),
+  });
 
   const agent = new Agent({
     initialState: {
@@ -758,28 +777,50 @@ async function runConversationAttempt(args: {
         return messages;
       }
 
-      const compaction = await postToolBatchCompaction({
-        historyDelta,
-        resolvedModel: args.resolvedModel.resolvedModelRef,
-        signal,
-      });
-      if (!compaction || !compaction.summaryText.trim()) {
-        return messages;
-      }
+      // Post-tool compaction can consume most of the stall budget on its own, so
+      // pause the watchdog and re-arm it only once the follow-up model request is
+      // actually ready to continue.
+      postToolStallAbort.pause();
+      let shouldResumePostToolStallAbort = true;
+      const postToolCompactionTimeout = createPostToolCompactionTimeoutController({ signal });
+      try {
+        const compaction = await postToolBatchCompaction({
+          historyDelta,
+          resolvedModel: args.resolvedModel.resolvedModelRef,
+          signal: postToolCompactionTimeout.signal,
+        });
+        if (postToolCompactionTimeout.timedOut()) {
+          return messages;
+        }
+        if (!compaction || !compaction.summaryText.trim()) {
+          return messages;
+        }
 
-      const keptStartIndex = Math.max(0, Math.min(messages.length, compaction.keptStartIndex));
-      if (keptStartIndex <= 0 || keptStartIndex >= messages.length) {
-        return messages;
-      }
+        const keptStartIndex = Math.max(0, Math.min(messages.length, compaction.keptStartIndex));
+        if (keptStartIndex <= 0 || keptStartIndex >= messages.length) {
+          return messages;
+        }
 
-      return [
-        createSyntheticSummaryMessage({
-          summaryText: compaction.summaryText,
-          resolvedModel: args.resolvedModel,
-          timestamp: messages[keptStartIndex - 1]?.timestamp ?? Date.now(),
-        }),
-        ...messages.slice(keptStartIndex),
-      ];
+        return [
+          createSyntheticSummaryMessage({
+            summaryText: compaction.summaryText,
+            resolvedModel: args.resolvedModel,
+            timestamp: messages[keptStartIndex - 1]?.timestamp ?? Date.now(),
+          }),
+          ...messages.slice(keptStartIndex),
+        ];
+      } catch (error) {
+        if (postToolCompactionTimeout.timedOut()) {
+          return messages;
+        }
+        shouldResumePostToolStallAbort = false;
+        throw error;
+      } finally {
+        postToolCompactionTimeout.clear();
+        if (shouldResumePostToolStallAbort && !finalRoomDeliveryShortCircuitArmed) {
+          postToolStallAbort.resume();
+        }
+      }
     },
   });
 
@@ -789,13 +830,12 @@ async function runConversationAttempt(args: {
   let toolTurnCount = 0;
   let toolLoopErrorMessage = "";
   const lastRoomMessagePreviewByToolCallId = new Map<string, string>();
+  const lastToolCallProgressById = new Map<string, string>();
   const currentRoomId = args.resolvedOptions.toolContext?.currentRoomId?.trim();
   let finalRoomDeliveryShortCircuitTimer: ReturnType<typeof setTimeout> | null = null;
   let finalRoomDeliveryShortCircuitArmed = false;
   let shortCircuitedAfterFinalRoomDelivery = false;
   let resolveFinalRoomDeliveryShortCircuit: (() => void) | null = null;
-  let postToolStallAbortTimer: ReturnType<typeof setTimeout> | null = null;
-  let postToolStallAbortMessage = "";
   const finalRoomDeliveryShortCircuitPromise = new Promise<void>((resolve) => {
     resolveFinalRoomDeliveryShortCircuit = resolve;
   });
@@ -808,13 +848,6 @@ async function runConversationAttempt(args: {
     finalRoomDeliveryShortCircuitArmed = false;
   };
 
-  const clearPostToolStallAbort = () => {
-    if (postToolStallAbortTimer !== null) {
-      clearTimeout(postToolStallAbortTimer);
-      postToolStallAbortTimer = null;
-    }
-  };
-
   const armFinalRoomDeliveryShortCircuit = () => {
     clearFinalRoomDeliveryShortCircuit();
     finalRoomDeliveryShortCircuitArmed = true;
@@ -825,19 +858,11 @@ async function runConversationAttempt(args: {
     }, FINAL_ROOM_DELIVERY_SHORT_CIRCUIT_MS);
   };
 
-  const armPostToolStallAbort = (toolEvent: ToolExecution) => {
-    clearPostToolStallAbort();
-    const stallMs = getPostToolStallAbortMs();
-    postToolStallAbortTimer = setTimeout(() => {
-      postToolStallAbortMessage = `Model stalled for ${stallMs} ms after completing tool ${toolEvent.displayName}.`;
-      agent.abort();
-    }, stallMs);
-  };
-
   const unsubscribe = agent.subscribe((event) => {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       clearFinalRoomDeliveryShortCircuit();
-      clearPostToolStallAbort();
+      postToolStallAbort.clear();
+      toolCallStallAbort.clear();
       assistantText += event.assistantMessageEvent.delta;
       args.callbacks?.onTextDelta?.(event.assistantMessageEvent.delta);
       return;
@@ -845,7 +870,7 @@ async function runConversationAttempt(args: {
 
     if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_delta") {
       clearFinalRoomDeliveryShortCircuit();
-      clearPostToolStallAbort();
+      postToolStallAbort.clear();
       const contentBlock = event.assistantMessageEvent.partial.content[event.assistantMessageEvent.contentIndex];
       if (contentBlock?.type !== "toolCall") {
         return;
@@ -860,6 +885,19 @@ async function runConversationAttempt(args: {
           ? { partialJson: previewSource.partialJson }
           : {}),
       });
+      const progressSignature = preview
+        ? JSON.stringify(preview)
+        : getToolCallProgressSignature({
+            name: contentBlock.name,
+            arguments: contentBlock.arguments,
+            ...(typeof previewSource.partialJson === "string"
+              ? { partialJson: previewSource.partialJson }
+              : {}),
+          });
+      if (lastToolCallProgressById.get(contentBlock.id) !== progressSignature) {
+        lastToolCallProgressById.set(contentBlock.id, progressSignature);
+        toolCallStallAbort.arm(contentBlock.name);
+      }
       if (!preview) {
         return;
       }
@@ -875,11 +913,13 @@ async function runConversationAttempt(args: {
     }
 
     if (event.type === "tool_execution_end") {
+      toolCallStallAbort.clear();
       const toolEvent = extractToolExecution(event);
       if (!toolEvent) {
         return;
       }
 
+      lastToolCallProgressById.delete(toolEvent.id);
       const numberedToolEvent = {
         ...toolEvent,
         sequence: toolEvents.length + 1,
@@ -891,7 +931,7 @@ async function runConversationAttempt(args: {
       } else {
         clearFinalRoomDeliveryShortCircuit();
       }
-      armPostToolStallAbort(numberedToolEvent);
+      postToolStallAbort.arm(numberedToolEvent);
       return;
     }
 
@@ -902,7 +942,8 @@ async function runConversationAttempt(args: {
       }
       if (!hasToolCalls) {
         clearFinalRoomDeliveryShortCircuit();
-        clearPostToolStallAbort();
+        postToolStallAbort.clear();
+        toolCallStallAbort.clear();
         return;
       }
 
@@ -927,11 +968,15 @@ async function runConversationAttempt(args: {
       finalRoomDeliveryShortCircuitPromise.then(() => ({ kind: "short_circuited" } as const)),
     ]);
     if (continueOutcome.kind === "error") {
-      throw (postToolStallAbortMessage ? new Error(postToolStallAbortMessage) : continueOutcome.error);
+      if (toolCallStallAbort.getMessage()) {
+        throw new Error(toolCallStallAbort.getMessage());
+      }
+      throw (postToolStallAbort.getMessage() ? new Error(postToolStallAbort.getMessage()) : continueOutcome.error);
     }
   } finally {
     clearFinalRoomDeliveryShortCircuit();
-    clearPostToolStallAbort();
+    postToolStallAbort.clear();
+    toolCallStallAbort.clear();
     unsubscribe();
     args.resolvedOptions.signal?.removeEventListener("abort", abortListener);
   }
@@ -946,8 +991,12 @@ async function runConversationAttempt(args: {
     throw new Error(toolLoopErrorMessage);
   }
 
-  if (postToolStallAbortMessage) {
-    throw new Error(postToolStallAbortMessage);
+  if (toolCallStallAbort.getMessage()) {
+    throw new Error(toolCallStallAbort.getMessage());
+  }
+
+  if (postToolStallAbort.getMessage()) {
+    throw new Error(postToolStallAbort.getMessage());
   }
 
   if (finalAssistantMessage?.stopReason === "error" || (finalAssistantMessage?.stopReason === "aborted" && !shortCircuitedAfterFinalRoomDelivery)) {

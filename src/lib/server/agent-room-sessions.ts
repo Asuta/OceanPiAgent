@@ -32,6 +32,7 @@ interface AgentRuntimeRun {
   roomId: string;
   roomTitle: string;
   userMessageId: string;
+  incomingMessageContent: string;
   userSender: RoomSender;
   userContent: string;
   userAttachments: MessageImageAttachment[];
@@ -51,6 +52,7 @@ interface AttachedRoomDescriptor {
 interface AgentRuntimeSession {
   history: PersistedVisibleMessage[];
   activeRun?: AgentRuntimeRun;
+  skipNextLcmAssemble?: boolean;
   resolvedModel: string;
   compatibility: ProviderCompatibility | null;
   updatedAt: string;
@@ -533,6 +535,7 @@ function activateAgentRun(args: {
     roomId: args.roomId,
     roomTitle: args.roomTitle,
     userMessageId: args.userMessageId,
+    incomingMessageContent: args.incomingMessage.content,
     userSender: args.userSender,
     userContent: args.userContent,
     userAttachments: [...args.userAttachments],
@@ -543,6 +546,17 @@ function activateAgentRun(args: {
     abortController: args.abortController,
   };
   args.session.updatedAt = createTimestamp();
+}
+
+function removeRunIncomingMessage(session: AgentRuntimeSession, run: AgentRuntimeRun): void {
+  const historyIndex = session.history.findLastIndex((message) => (
+    message.role === "user" && message.content === run.incomingMessageContent
+  ));
+  if (historyIndex < 0) {
+    return;
+  }
+
+  session.history.splice(historyIndex, 1);
 }
 
 function createAssistantHistoryMessage(args: {
@@ -637,10 +651,10 @@ export async function startAgentRoomRun(args: {
   requestSignal: AbortSignal;
 }) {
   const startupStartedAt = performance.now();
-  const shouldAssembleFromLcm = !hasPendingAgentRunFinalization(args.agentId);
   const hydrateStartedAt = performance.now();
   const session = await hydrateSession(args.agentId);
   const hydrateMs = performance.now() - hydrateStartedAt;
+  const shouldAssembleFromLcm = !hasPendingAgentRunFinalization(args.agentId) && !session.skipNextLcmAssemble;
   const previousRun = getContinuationSourceRun(session);
   const continuationSnapshot = previousRun ? buildContinuationSnapshot(previousRun) : undefined;
   let continuationMs = 0;
@@ -717,6 +731,7 @@ export async function startAgentRoomRun(args: {
   if (assembledPromptContext) {
     session.history = assembledPromptContext.history;
   }
+  session.skipNextLcmAssemble = false;
 
   previousRun?.abortController.abort(new Error("Superseded by a newer room message."));
 
@@ -839,6 +854,20 @@ export function clearAgentRoomRun(agentId: RoomAgentId, requestId: string): void
   session.updatedAt = createTimestamp();
 }
 
+export async function discardAgentRoomRun(agentId: RoomAgentId, requestId: string): Promise<void> {
+  const session = getOrCreateSession(agentId);
+  const run = session.activeRun;
+  if (!run || run.requestId !== requestId) {
+    return;
+  }
+
+  removeRunIncomingMessage(session, run);
+  session.activeRun = undefined;
+  session.skipNextLcmAssemble = true;
+  session.updatedAt = createTimestamp();
+  await persistSession(agentId).catch(() => undefined);
+}
+
 export function clearActiveAgentRoomRunForRoom(agentId: RoomAgentId, roomId: string, reason?: string): void {
   const session = getOrCreateSession(agentId);
   const run = session.activeRun;
@@ -847,7 +876,9 @@ export function clearActiveAgentRoomRunForRoom(agentId: RoomAgentId, roomId: str
   }
 
   run.abortController.abort(new Error(reason ?? "Agent room run cleared."));
+  removeRunIncomingMessage(session, run);
   session.activeRun = undefined;
+  session.skipNextLcmAssemble = true;
   session.updatedAt = createTimestamp();
 }
 

@@ -4,8 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createKnownAgentCards } from "@/lib/chat/workspace-domain";
-import type { AssistantMessageMeta, MessageImageAttachment } from "@/lib/chat/types";
+import { __testing as agentCompactionTesting } from "@/lib/server/agent-compaction";
+import type { AssistantHistoryMessage, AssistantMessageMeta, MessageImageAttachment } from "@/lib/chat/types";
 import { closeLcmDatabase } from "@/lib/server/lcm/db";
+import { loadWorkspaceEnvelope, saveWorkspaceState } from "@/lib/server/workspace-store";
 import {
   clearActiveAgentRoomRunForRoom,
   hasActiveAgentRoomRun,
@@ -69,6 +71,7 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
           maxToolLoopSteps: 4,
           thinkingLevel: "off",
           enabledSkillIds: [],
+          memoryBackend: "sqlite-fts",
         },
         room: {
           id: "room-1",
@@ -196,6 +199,151 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
   });
 });
 
+test("runPreparedRoomTurn forwards the active turn abort signal into post-tool compaction", async () => {
+  await withTempCwd(async () => {
+    let capturedSignal: AbortSignal | undefined;
+    agentCompactionTesting.setGenerateCompactionSummaryOverride(async (args) => {
+      capturedSignal = args.signal;
+      if (!args.signal?.aborted) {
+        throw new Error("expected aborted compaction signal");
+      }
+      throw args.signal.reason instanceof Error ? args.signal.reason : new Error("aborted");
+    });
+
+    try {
+      const largeContent = "Earlier request ".repeat(2_000);
+      const workspace = await loadWorkspaceEnvelope();
+      await saveWorkspaceState({
+        expectedVersion: workspace.version,
+        state: {
+          ...workspace.state,
+          agentStates: {
+            ...workspace.state.agentStates,
+            concierge: {
+              ...workspace.state.agentStates.concierge,
+              settings: {
+                ...workspace.state.agentStates.concierge.settings,
+                compactionTokenThreshold: 1000,
+                compactionFreshTailCount: 0,
+              },
+            },
+          },
+        },
+      });
+
+      const result = await runPreparedRoomTurn({
+        message: {
+          id: "user-msg-compaction-signal",
+          content: "Please keep going",
+          attachments: [],
+          sender: {
+            id: "local-user",
+            name: "You",
+            role: "participant",
+          },
+        },
+        settings: {
+          modelConfigId: null,
+          apiFormat: "chat_completions",
+          model: "fake-model",
+          systemPrompt: "",
+          providerMode: "auto",
+          maxToolLoopSteps: 4,
+          thinkingLevel: "off",
+          enabledSkillIds: [],
+          memoryBackend: "sqlite-fts",
+        },
+        room: {
+          id: "room-compaction-signal",
+          title: "Compaction Signal Room",
+        },
+        attachedRooms: [],
+        knownAgents: createKnownAgentCards(),
+        roomHistoryById: {
+          "room-compaction-signal": [],
+        },
+        agent: {
+          id: "concierge",
+          label: "Harbor Concierge",
+          instruction: "Keep it short.",
+        },
+        conversationRunner: async (_messages, _settings, _callbacks, options) => {
+          const controller = new AbortController();
+          controller.abort(new Error("post-tool compaction aborted for test"));
+          const historyDelta: AssistantHistoryMessage[] = [
+            {
+              role: "user",
+              content: largeContent,
+              timestamp: Date.now() - 10_000,
+            },
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "toolCall",
+                  id: "tool-call-1",
+                  name: "memory_search",
+                  arguments: {},
+                },
+              ],
+              api: "responses",
+              provider: "openai",
+              model: "gpt-5.4",
+              usage: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                totalTokens: 0,
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+              },
+              stopReason: "toolUse",
+              timestamp: Date.now() - 5_000,
+            },
+            {
+              role: "toolResult",
+              toolCallId: "tool-call-1",
+              toolName: "memory_search",
+              content: [{ type: "text", text: "memory hit" }],
+              isError: false,
+              timestamp: Date.now() - 4_000,
+            },
+          ];
+          await options?.postToolBatchCompaction?.({
+            historyDelta,
+            resolvedModel: "gpt-5.4",
+            signal: controller.signal,
+          });
+
+          assert.equal(controller.signal.aborted, true);
+
+          return {
+            assistantText: "Done after skipped compaction.",
+            toolEvents: [],
+            resolvedModel: "fake-provider/fake-model",
+            compatibility: {
+              providerKey: "generic",
+              providerLabel: "Generic",
+              baseUrl: "https://example.test/v1",
+              chatCompletionsToolStyle: "tools",
+              responsesContinuation: "replay",
+              responsesPayloadMode: "json",
+              notes: [],
+            },
+            actualApiFormat: "chat_completions",
+          };
+        },
+      });
+
+      assert.equal(result.turn.status, "completed");
+      assert.equal(capturedSignal?.aborted, true);
+    } finally {
+      agentCompactionTesting.setGenerateCompactionSummaryOverride(undefined);
+      await resetAgentRoomSession("concierge");
+    }
+  });
+});
+
 test("clearing a timed-out active run prevents stale continuation from leaking into the next room", async () => {
   await withTempCwd(async () => {
     await resetAgentRoomSession("concierge");
@@ -293,6 +441,116 @@ test("an externally aborted active run does not leak a continuation snapshot int
   });
 });
 
+test("a failed room run does not leak its unresolved incoming envelope into the next turn history", async () => {
+  await withTempCwd(async () => {
+    await resetAgentRoomSession("concierge");
+
+    await assert.rejects(() => runPreparedRoomTurn({
+      message: {
+        id: "failed-user-msg",
+        content: "Old failed task",
+        attachments: [],
+        sender: {
+          id: "local-user",
+          name: "You",
+          role: "participant",
+        },
+      },
+      settings: {
+        modelConfigId: null,
+        apiFormat: "responses",
+        model: "fake-model",
+        systemPrompt: "",
+        providerMode: "auto",
+        maxToolLoopSteps: 4,
+        thinkingLevel: "off",
+        enabledSkillIds: [],
+        memoryBackend: "sqlite-fts",
+      },
+      room: {
+        id: "room-1",
+        title: "Primary Room",
+      },
+      attachedRooms: [],
+      knownAgents: createKnownAgentCards(),
+      roomHistoryById: {
+        "room-1": [],
+      },
+      agent: {
+        id: "concierge",
+        label: "Harbor Concierge",
+        instruction: "Keep it short.",
+      },
+      conversationRunner: async () => {
+        throw new Error("Model stalled for 20000 ms after completing tool Send Message To Room.");
+      },
+    }));
+
+    let replayedMessages: ReplayedMessage[] | null = null;
+    await runPreparedRoomTurn({
+      message: {
+        id: "fresh-user-msg",
+        content: "Fresh task",
+        attachments: [],
+        sender: {
+          id: "local-user",
+          name: "You",
+          role: "participant",
+        },
+      },
+      settings: {
+        modelConfigId: null,
+        apiFormat: "responses",
+        model: "fake-model",
+        systemPrompt: "",
+        providerMode: "auto",
+        maxToolLoopSteps: 4,
+        thinkingLevel: "off",
+        enabledSkillIds: [],
+        memoryBackend: "sqlite-fts",
+      },
+      room: {
+        id: "room-1",
+        title: "Primary Room",
+      },
+      attachedRooms: [],
+      knownAgents: createKnownAgentCards(),
+      roomHistoryById: {
+        "room-1": [],
+      },
+      agent: {
+        id: "concierge",
+        label: "Harbor Concierge",
+        instruction: "Keep it short.",
+      },
+      conversationRunner: async (messages: ReplayedMessage[]) => {
+        replayedMessages = messages;
+        return {
+          assistantText: "Handled the fresh task.",
+          toolEvents: [],
+          resolvedModel: "generic/fake-model",
+          compatibility: {
+            providerKey: "generic",
+            providerLabel: "Generic",
+            baseUrl: "https://example.test/v1",
+            chatCompletionsToolStyle: "tools",
+            responsesContinuation: "replay",
+            responsesPayloadMode: "json",
+            notes: [],
+          },
+          actualApiFormat: "responses",
+        };
+      },
+    });
+
+    assert.ok(replayedMessages);
+    const replayedMessagesList = replayedMessages as ReplayedMessage[];
+    assert.equal(replayedMessagesList.some((message) => message.content.includes("Old failed task")), false);
+    assert.equal(replayedMessagesList.some((message) => message.content.includes("Fresh task")), true);
+    await resetAgentRoomSession("concierge");
+  });
+});
+
 test("runPreparedRoomTurn keeps repeated send_message calls as separate bubbles even with the same message key", async () => {
   await withTempCwd(async () => {
     const seenMessages: string[] = [];
@@ -317,6 +575,7 @@ test("runPreparedRoomTurn keeps repeated send_message calls as separate bubbles 
           maxToolLoopSteps: 4,
           thinkingLevel: "off",
           enabledSkillIds: [],
+          memoryBackend: "sqlite-fts",
         },
         room: {
           id: "room-1",
@@ -449,6 +708,7 @@ test("runPreparedRoomTurn splits draft segments when tool calls interrupt genera
         maxToolLoopSteps: 4,
         thinkingLevel: "off",
         enabledSkillIds: [],
+        memoryBackend: "sqlite-fts",
       },
       room: {
         id: "room-1",
@@ -553,6 +813,7 @@ test("runPreparedRoomTurn keeps preview and final send_message room bubbles on t
           maxToolLoopSteps: 4,
           thinkingLevel: "off",
           enabledSkillIds: [],
+          memoryBackend: "sqlite-fts",
         },
         room: {
           id: "room-1",
@@ -667,6 +928,7 @@ test("runPreparedRoomTurn keeps separate send_message calls as separate ordered 
           maxToolLoopSteps: 4,
           thinkingLevel: "off",
           enabledSkillIds: [],
+          memoryBackend: "sqlite-fts",
         },
         room: {
           id: "room-1",
@@ -809,6 +1071,7 @@ test("runPreparedRoomTurn does not bridge ordinary assistant text into a send_me
           maxToolLoopSteps: 4,
           thinkingLevel: "off",
           enabledSkillIds: [],
+          memoryBackend: "sqlite-fts",
         },
         room: {
           id: "room-1",
@@ -931,6 +1194,7 @@ test("runPreparedRoomTurn keeps image attachments in persisted agent history", a
         maxToolLoopSteps: 4,
         thinkingLevel: "off",
         enabledSkillIds: [],
+        memoryBackend: "sqlite-fts",
       },
       room: {
         id: "room-1",
@@ -1014,6 +1278,7 @@ test("runPreparedRoomTurn keeps image attachments in persisted agent history", a
         maxToolLoopSteps: 4,
         thinkingLevel: "off",
         enabledSkillIds: [],
+        memoryBackend: "sqlite-fts",
       },
       room: {
         id: "room-1",
@@ -1110,6 +1375,7 @@ test("runPreparedRoomTurn preserves assistant response metadata for future repla
         maxToolLoopSteps: 4,
         thinkingLevel: "off",
         enabledSkillIds: [],
+        memoryBackend: "sqlite-fts",
       },
       room: {
         id: "room-1",
@@ -1279,6 +1545,7 @@ test("runPreparedRoomTurn preserves assistant response metadata for future repla
         maxToolLoopSteps: 4,
         thinkingLevel: "off",
         enabledSkillIds: [],
+        memoryBackend: "sqlite-fts",
       },
       room: {
         id: "room-1",

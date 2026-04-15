@@ -3,7 +3,7 @@ import test from "node:test";
 import { createSchedulerPacket } from "@/lib/chat/room-scheduler";
 import { addAgentParticipantToRoom } from "@/lib/chat/room-actions";
 import { appendMessageToRoom, createAgentOwnedRoomSession, createAgentSharedState, createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
-import type { RunRoomTurnResult } from "@/lib/server/room-runner";
+import { runPreparedRoomTurn as executePreparedRoomTurn, type RunRoomTurnResult } from "@/lib/server/room-runner";
 import {
   enqueueRoomScheduler,
   getRoomSchedulerQueueSnapshotForTest,
@@ -427,6 +427,107 @@ test("runRoomSchedulerNow emits streaming callbacks for each scheduled turn", as
   ]);
 });
 
+test("runRoomSchedulerNow settles idle after a streaming room turn fails with partial tool output", async () => {
+  let state = createDefaultWorkspaceState();
+  const room = appendMessageToRoom(
+    state.rooms[0]!,
+    createRoomMessage(state.rooms[0]!.id, "user", "Please acknowledge this and continue.", "user", {
+      sender: {
+        id: "local-operator",
+        name: "You",
+        role: "participant",
+      },
+    }),
+  );
+  state = {
+    ...state,
+    rooms: [room],
+  };
+
+  const streamedDone: Array<{ status: string; roomRunning: boolean }> = [];
+  const loadWorkspaceEnvelope = async () => ({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    state,
+  });
+  const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+    state = await mutator(state);
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+  };
+
+  await runRoomSchedulerNow(room.id, {
+    loadWorkspaceEnvelope,
+    mutateWorkspace,
+    resolveSettingsWithModelConfig: async (settings) => ({
+      settings,
+      modelConfig: null,
+      modelConfigOverrides: undefined,
+    }),
+    buildPreparedInputFromWorkspace: async ({ roomId, agentId, message, settings, anchorMessageId, turnId, signal }) => ({
+      room: {
+        id: roomId,
+        title: "Room 1",
+      },
+      agent: {
+        id: agentId,
+        label: agentId,
+        instruction: "",
+      },
+      attachedRooms: [],
+      knownAgents: [],
+      roomHistoryById: {},
+      message,
+      settings,
+      anchorMessageId,
+      turnId,
+      signal,
+    }),
+    runPreparedRoomTurn: async (preparedInput, callbacks) => executePreparedRoomTurn(
+      {
+        ...preparedInput,
+        conversationRunner: async (_messages, _settings, innerCallbacks) => {
+          innerCallbacks?.onTool?.({
+            id: "tool-1",
+            sequence: 1,
+            toolName: "send_message_to_room",
+            displayName: "Send Message To Room",
+            inputSummary: "send",
+            inputText: "{}",
+            resultPreview: "sent",
+            outputText: "sent",
+            status: "success",
+            durationMs: 1,
+            roomMessage: {
+              roomId: preparedInput.room.id,
+              content: "Visible progress update",
+              kind: "progress",
+              status: "completed",
+              final: false,
+            },
+          });
+          throw new Error("Model stalled for 20000 ms after completing tool Send Message To Room.");
+        },
+      },
+      callbacks,
+    ),
+    onTurnDone: (result, roomRunning) => {
+      streamedDone.push({ status: result.turn.status, roomRunning });
+    },
+  });
+
+  const nextRoom = state.rooms[0]!;
+  const latestTurn = nextRoom.agentTurns.at(-1);
+  assert.equal(nextRoom.scheduler.status, "idle");
+  assert.equal(latestTurn?.status, "error");
+  assert.match(latestTurn?.error ?? "", /Model stalled for 20000 ms after completing tool Send Message To Room\./);
+  assert.equal(nextRoom.roomMessages.some((message) => message.content === "Visible progress update"), true);
+  assert.deepEqual(streamedDone, [{ status: "error", roomRunning: false }]);
+});
+
 test("runRoomSchedulerNow stops a scheduled turn that times out", async () => {
   const previousTimeout = process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS;
   process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS = "20";
@@ -466,6 +567,7 @@ test("runRoomSchedulerNow stops a scheduled turn that times out", async () => {
         state,
       };
     };
+    const streamedErrors: string[] = [];
 
     await runRoomSchedulerNow(room.id, {
       loadWorkspaceEnvelope,
@@ -510,9 +612,13 @@ test("runRoomSchedulerNow stops a scheduled turn that times out", async () => {
         });
         throw new Error("Unreachable");
       },
+      onError: (error) => {
+        streamedErrors.push(error instanceof Error ? error.message : String(error));
+      },
     });
 
     assert.equal(state.rooms[0]?.scheduler.status, "idle");
+    assert.match(streamedErrors[0] ?? "", /Room scheduler turn timed out after 20 ms\./);
   } finally {
     if (typeof previousTimeout === "string") {
       process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS = previousTimeout;

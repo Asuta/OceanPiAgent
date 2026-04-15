@@ -1875,7 +1875,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setAgentCompactionFeedback((current) => ensureAgentFeedbackMap(current, agents, agentStatesRef.current));
   }, [agents]);
 
-  useWorkspacePersistence({
+  const { flushWorkspacePersistence } = useWorkspacePersistence({
     hydrated,
     rooms,
     agentStates,
@@ -1911,14 +1911,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [agentStates]);
 
   const updateAgentState = useCallback((agentId: RoomAgentId, updater: (state: AgentSharedState) => AgentSharedState) => {
-    setAgentStates((current) => {
-      const nextState = {
-        ...current,
-        [agentId]: updater(current[agentId] ?? createAgentSharedState()),
-      };
-      agentStatesRef.current = nextState;
-      return nextState;
-    });
+    const currentState = agentStatesRef.current;
+    const nextEntry = updater(currentState[agentId] ?? createAgentSharedState());
+    const nextState = {
+      ...currentState,
+      [agentId]: nextEntry,
+    };
+
+    // Keep the mutable snapshot in sync immediately so same-tick persistence reads current settings.
+    agentStatesRef.current = nextState;
+    setAgentStates(nextState);
   }, []);
 
   const updateRoomStateEphemeral = useCallback(
@@ -2052,6 +2054,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     roomsRef,
     runRoomCommandRequest,
     refreshWorkspaceFromServer,
+    flushWorkspacePersistence,
     clearDraftForRoom,
     setActiveRoomId,
     setSelectedSender,

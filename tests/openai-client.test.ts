@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { shouldApplyPostToolBatchCompaction } from "@/lib/ai/post-tool-compaction";
+import { __testing as postToolStallTesting } from "@/lib/ai/post-tool-stall";
 import { extractRoomMessagePreviewFromToolArgs, extractRoomMessagePreviewFromToolCallBlock } from "@/lib/ai/room-message-preview";
 import { roomMessageArgsSchema } from "@/lib/ai/tools/shared";
 
@@ -108,4 +109,72 @@ test("shouldApplyPostToolBatchCompaction still allows normal post-tool compactio
     }),
     true,
   );
+});
+
+test("post-tool stall watchdog pauses during compaction and resumes afterward", async () => {
+  let abortCount = 0;
+  const stallAbort = postToolStallTesting.createPostToolStallAbortController({
+    abort: () => {
+      abortCount += 1;
+    },
+    getStallMs: () => 25,
+  });
+
+  stallAbort.arm({
+    id: "tool-1",
+    sequence: 1,
+    toolName: "send_message_to_room",
+    displayName: "Send Message To Room",
+    inputSummary: "",
+    inputText: "",
+    resultPreview: "",
+    outputText: "",
+    status: "success",
+    durationMs: 1,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  stallAbort.pause();
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.equal(abortCount, 0);
+  assert.equal(stallAbort.getMessage(), "");
+
+  stallAbort.resume();
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.equal(abortCount, 1);
+  assert.match(stallAbort.getMessage(), /Model stalled for 25 ms after completing tool Send Message To Room\./);
+
+  stallAbort.clear();
+});
+
+test("tool-call stall watchdog aborts when a tool call stops streaming", async () => {
+  let abortCount = 0;
+  const stallAbort = postToolStallTesting.createToolCallStallAbortController({
+    abort: () => {
+      abortCount += 1;
+    },
+    getStallMs: () => 25,
+  });
+
+  stallAbort.arm("send_message_to_room");
+  await new Promise((resolve) => setTimeout(resolve, 35));
+
+  assert.equal(abortCount, 1);
+  assert.match(stallAbort.getMessage(), /Model stalled for 25 ms while streaming tool Send Message To Room\./);
+
+  stallAbort.clear();
+});
+
+test("post-tool compaction timeout controller aborts the nested compaction request", async () => {
+  const timeout = postToolStallTesting.createPostToolCompactionTimeoutController({
+    getTimeoutMs: () => 25,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 35));
+
+  assert.equal(timeout.signal.aborted, true);
+  assert.equal(timeout.timedOut(), true);
+  assert.match(timeout.getMessage(), /Post-tool compaction timed out after 25 ms\./);
+
+  timeout.clear();
 });

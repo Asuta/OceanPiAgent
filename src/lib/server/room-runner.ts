@@ -29,7 +29,7 @@ import type {
 } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 import {
-  clearAgentRoomRun,
+  discardAgentRoomRun,
   completeAgentRoomRun,
   isCurrentAgentRun,
   recordAgentTextDelta,
@@ -504,6 +504,7 @@ export interface RoomTurnCallbacks {
 class RoomTurnExecutionError extends Error {
   assistantMeta?: AssistantMessageMeta;
   partial: {
+    turnId?: string;
     agent: AgentRoomTurn["agent"];
     roomId: string;
     userMessageId: string;
@@ -567,6 +568,43 @@ export async function buildPreparedInputFromWorkspace(args: RunRoomTurnInput): P
 
 export function extractAssistantMetaFromRoomTurnError(error: unknown): AssistantMessageMeta | undefined {
   return error instanceof RoomTurnExecutionError ? error.assistantMeta : undefined;
+}
+
+export function createRunRoomTurnResultFromError(error: unknown): RunRoomTurnResult | null {
+  if (!(error instanceof RoomTurnExecutionError)) {
+    return null;
+  }
+
+  return {
+    turn: createTurn(
+      error.partial.turnId,
+      error.partial.agent,
+      error.partial.roomId,
+      error.partial.userMessageId,
+      error.partial.userSender,
+      error.partial.userContent,
+      error.partial.userAttachments,
+      error.partial.anchorMessageId,
+      error.partial.currentUserReceipts,
+      error.partial.currentUserReceiptStatus,
+      error.partial.currentUserReceiptUpdatedAt,
+      "",
+      error.partial.draftSegments,
+      error.partial.timeline,
+      error.partial.toolEvents,
+      error.partial.emittedMessages,
+      error.assistantMeta,
+      error.partial.resolvedModel,
+      "error",
+      error.partial.continuationSnapshot,
+      error.message,
+    ),
+    resolvedModel: error.partial.resolvedModel,
+    compatibility: getFallbackCompatibility(error.assistantMeta),
+    emittedMessages: error.partial.emittedMessages,
+    receiptUpdates: error.partial.receiptUpdates,
+    roomActions: error.partial.toolEvents.flatMap((tool) => (tool.roomAction ? [tool.roomAction] : [])),
+  };
 }
 
 export async function runPreparedRoomTurn(
@@ -735,7 +773,6 @@ export async function runPreparedRoomTurn(
         toolContext,
         modelConfigOverrides: args.modelConfigOverrides,
         postToolBatchCompaction: async ({ historyDelta, resolvedModel, signal }) => {
-          void signal;
           if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
             return null;
           }
@@ -744,6 +781,7 @@ export async function runPreparedRoomTurn(
             agentId: args.agent.id,
             historyDelta,
             resolvedModel,
+            signal,
           });
           if (!compaction.compacted || !compaction.summaryText || typeof compaction.keptStartIndex !== "number") {
             return null;
@@ -842,12 +880,15 @@ export async function runPreparedRoomTurn(
       markTimingPhase: (phase, details) => tailTrace.mark(phase, details),
     };
   } catch (error) {
-    clearAgentRoomRun(args.agent.id, runContext.requestId);
+    await discardAgentRoomRun(args.agent.id, runContext.requestId);
     const message = error instanceof Error ? error.message : "Unknown server error.";
     const errorPartial = accumulator.getErrorPartial();
     throw new RoomTurnExecutionError(
       message,
-      errorPartial,
+      {
+        turnId: args.turnId,
+        ...errorPartial,
+      },
       extractConversationErrorMeta(error),
     );
   }
@@ -857,39 +898,11 @@ export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<R
   try {
     return await runPreparedRoomTurn(await buildPreparedInputFromWorkspace(args));
   } catch (error) {
-    if (!(error instanceof RoomTurnExecutionError)) {
-      throw error;
+    const result = createRunRoomTurnResultFromError(error);
+    if (result) {
+      return result;
     }
 
-    return {
-      turn: createTurn(
-        args.turnId,
-        error.partial.agent,
-        error.partial.roomId,
-        error.partial.userMessageId,
-        error.partial.userSender,
-        error.partial.userContent,
-        error.partial.userAttachments,
-        error.partial.anchorMessageId,
-        error.partial.currentUserReceipts,
-        error.partial.currentUserReceiptStatus,
-        error.partial.currentUserReceiptUpdatedAt,
-        "",
-        error.partial.draftSegments,
-        error.partial.timeline,
-        error.partial.toolEvents,
-        error.partial.emittedMessages,
-        error.assistantMeta,
-        error.partial.resolvedModel,
-        "error",
-        error.partial.continuationSnapshot,
-        error.message,
-      ),
-      resolvedModel: error.partial.resolvedModel,
-      compatibility: getFallbackCompatibility(error.assistantMeta),
-      emittedMessages: error.partial.emittedMessages,
-      receiptUpdates: error.partial.receiptUpdates,
-      roomActions: error.partial.toolEvents.flatMap((tool) => (tool.roomAction ? [tool.roomAction] : [])),
-    };
+    throw error;
   }
 }

@@ -275,6 +275,32 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
     },
     [agents, updateAgentSettings],
   );
+  const commitGlobalCompactionThresholdInput = useCallback(() => {
+    const parsedValue = parseCompactionThresholdInput(compactionThresholdInput);
+    if (parsedValue == null) {
+      setCompactionThresholdInput(
+        globalCompactionThresholdValue === MIXED_COMPACTION_THRESHOLD_VALUE
+          ? ""
+          : formatCompactionThreshold(globalCompactionThresholdValue),
+      );
+      return;
+    }
+
+    handleGlobalCompactionThresholdChange(parsedValue);
+  }, [compactionThresholdInput, globalCompactionThresholdValue, handleGlobalCompactionThresholdChange]);
+  const commitGlobalFreshTrailCountInput = useCallback(() => {
+    const parsedValue = parseFreshTrailCountInput(freshTrailCountInput);
+    if (parsedValue == null) {
+      setFreshTrailCountInput(
+        globalFreshTrailCountValue === MIXED_FRESH_TRAIL_COUNT_VALUE
+          ? ""
+          : formatFreshTrailCount(globalFreshTrailCountValue),
+      );
+      return;
+    }
+
+    handleGlobalFreshTrailCountChange(parsedValue);
+  }, [freshTrailCountInput, globalFreshTrailCountValue, handleGlobalFreshTrailCountChange]);
 
   useEffect(() => {
     if (globalCompactionThresholdValue === MIXED_COMPACTION_THRESHOLD_VALUE) {
@@ -495,18 +521,14 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
                 value={compactionThresholdInput}
                 placeholder={globalCompactionThresholdValue === MIXED_COMPACTION_THRESHOLD_VALUE ? "当前不一致" : "例如 200K"}
                 onChange={(event) => setCompactionThresholdInput(event.target.value)}
-                onBlur={() => {
-                  const parsedValue = parseCompactionThresholdInput(compactionThresholdInput);
-                  if (parsedValue == null) {
-                    setCompactionThresholdInput(
-                      globalCompactionThresholdValue === MIXED_COMPACTION_THRESHOLD_VALUE
-                        ? ""
-                        : formatCompactionThreshold(globalCompactionThresholdValue),
-                    );
+                onBlur={commitGlobalCompactionThresholdInput}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") {
                     return;
                   }
 
-                  handleGlobalCompactionThresholdChange(parsedValue);
+                  event.currentTarget.blur();
+                  commitGlobalCompactionThresholdInput();
                 }}
               />
               {compactionThresholdWarning ? <span className="topbar-inline-warning">{compactionThresholdWarning}</span> : null}
@@ -520,18 +542,14 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
                 value={freshTrailCountInput}
                 placeholder={globalFreshTrailCountValue === MIXED_FRESH_TRAIL_COUNT_VALUE ? "当前不一致" : "0 表示不保留"}
                 onChange={(event) => setFreshTrailCountInput(event.target.value)}
-                onBlur={() => {
-                  const parsedValue = parseFreshTrailCountInput(freshTrailCountInput);
-                  if (parsedValue == null) {
-                    setFreshTrailCountInput(
-                      globalFreshTrailCountValue === MIXED_FRESH_TRAIL_COUNT_VALUE
-                        ? ""
-                        : formatFreshTrailCount(globalFreshTrailCountValue),
-                    );
+                onBlur={commitGlobalFreshTrailCountInput}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") {
                     return;
                   }
 
-                  handleGlobalFreshTrailCountChange(parsedValue);
+                  event.currentTarget.blur();
+                  commitGlobalFreshTrailCountInput();
                 }}
               />
             </label>

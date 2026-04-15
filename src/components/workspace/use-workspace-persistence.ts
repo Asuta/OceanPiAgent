@@ -59,13 +59,6 @@ export function useWorkspacePersistence(args: {
 
     workspacePersistInFlightRef.current = true;
     let scheduledDelayedRetry = false;
-    const getCurrentWorkspaceSnapshot = () =>
-      buildWorkspaceStateSnapshot({
-        rooms: roomsRef.current,
-        agentStates: agentStatesRef.current,
-        activeRoomId: activeRoomIdRef.current,
-        selectedConsoleAgentId: selectedConsoleAgentIdRef.current,
-      });
 
     try {
       while (pendingWorkspacePersistRef.current) {
@@ -79,7 +72,12 @@ export function useWorkspacePersistence(args: {
         });
 
         if (!response) {
-          pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? getCurrentWorkspaceSnapshot();
+          pendingWorkspacePersistRef.current = pendingWorkspacePersistRef.current ?? buildWorkspaceStateSnapshot({
+            rooms: roomsRef.current,
+            agentStates: agentStatesRef.current,
+            activeRoomId: activeRoomIdRef.current,
+            selectedConsoleAgentId: selectedConsoleAgentIdRef.current,
+          });
           window.setTimeout(() => {
             void persistWorkspaceSnapshot();
           }, 1000);
@@ -112,7 +110,12 @@ export function useWorkspacePersistence(args: {
         }
 
         const requestIsLatest = requestNonce === workspacePersistNonceRef.current && pendingWorkspacePersistRef.current === null;
-        const latestSnapshot = getCurrentWorkspaceSnapshot();
+        const latestSnapshot = buildWorkspaceStateSnapshot({
+          rooms: roomsRef.current,
+          agentStates: agentStatesRef.current,
+          activeRoomId: activeRoomIdRef.current,
+          selectedConsoleAgentId: selectedConsoleAgentIdRef.current,
+        });
         const localStateChangedSinceRequest = !workspaceStatesEqual(latestSnapshot, payload);
         const localPersistStillQueued = workspacePersistTimerRef.current !== null;
 
@@ -153,6 +156,36 @@ export function useWorkspacePersistence(args: {
     workspacePersistNonceRef,
     workspacePersistTimerRef,
     workspaceVersionRef,
+  ]);
+
+  const flushWorkspacePersistence = useCallback(async () => {
+    if (!hydrated) {
+      return;
+    }
+
+    if (workspacePersistTimerRef.current !== null) {
+      window.clearTimeout(workspacePersistTimerRef.current);
+      workspacePersistTimerRef.current = null;
+    }
+
+    workspacePersistNonceRef.current += 1;
+    pendingWorkspacePersistRef.current = buildWorkspaceStateSnapshot({
+      rooms: roomsRef.current,
+      agentStates: agentStatesRef.current,
+      activeRoomId: activeRoomIdRef.current,
+      selectedConsoleAgentId: selectedConsoleAgentIdRef.current,
+    });
+    await persistWorkspaceSnapshot();
+  }, [
+    activeRoomIdRef,
+    agentStatesRef,
+    hydrated,
+    pendingWorkspacePersistRef,
+    persistWorkspaceSnapshot,
+    roomsRef,
+    selectedConsoleAgentIdRef,
+    workspacePersistNonceRef,
+    workspacePersistTimerRef,
   ]);
 
   useEffect(() => {
@@ -197,4 +230,8 @@ export function useWorkspacePersistence(args: {
     workspacePersistNonceRef,
     workspacePersistTimerRef,
   ]);
+
+  return {
+    flushWorkspacePersistence,
+  };
 }

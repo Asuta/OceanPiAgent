@@ -17,10 +17,21 @@ import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runt
 import {
   type AssistantHistoryAssistantMessage,
   type AssistantHistoryMessage,
+  type RoomMessageEmission,
+  type RoomToolActionUnion,
+  type ToolExecution,
 } from "@/lib/chat/types";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 import { estimateTokens } from "./lcm/estimate-tokens";
+
+const ROOM_KIND_LABELS: Record<RoomMessageEmission["kind"], string> = {
+  answer: "answer",
+  progress: "progress",
+  warning: "warning",
+  error: "error",
+  clarification: "clarification",
+};
 
 export type CompactionMethod = "llm" | "rule_fallback" | "unknown";
 
@@ -490,6 +501,81 @@ function contentToText(content: unknown): string {
   return JSON.stringify(content);
 }
 
+function truncateToolResultSummary(value: string, maxLength = 260): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength).trim()}...`;
+}
+
+function extractToolEventFromSnapshotDetails(details: unknown): ToolExecution | null {
+  if (!details || typeof details !== "object") {
+    return null;
+  }
+
+  const toolEvent = (details as { toolEvent?: unknown }).toolEvent;
+  if (!toolEvent || typeof toolEvent !== "object") {
+    return null;
+  }
+
+  if (
+    typeof (toolEvent as { toolName?: unknown }).toolName !== "string"
+    || typeof (toolEvent as { displayName?: unknown }).displayName !== "string"
+  ) {
+    return null;
+  }
+
+  return toolEvent as ToolExecution;
+}
+
+function formatRoomActionForCompaction(action: RoomToolActionUnion): string {
+  if (action.type === "read_no_reply") {
+    return `${action.type} for room ${action.roomId}, message ${action.messageId}`;
+  }
+
+  if (action.type === "create_room") {
+    return `${action.type} created room ${action.roomId} (${action.title}) with agents ${action.agentIds.join(", ") || "none"}`;
+  }
+
+  if (action.type === "add_agents_to_room") {
+    return `${action.type} for room ${action.roomId}, agents ${action.agentIds.join(", ") || "none"}`;
+  }
+
+  if (action.type === "remove_room_participant") {
+    return `${action.type} for room ${action.roomId}, participant ${action.participantId}`;
+  }
+
+  return `${action.type} for room ${action.roomId}`;
+}
+
+function buildPersistedToolResultSummary(toolEvent: ToolExecution): string {
+  const sections: string[] = ["[Shared agent room action summary]"];
+
+  if (toolEvent.roomMessage) {
+    sections.push(
+      [
+        "Visible room deliveries:",
+        `- to room ${toolEvent.roomMessage.roomId}: [${ROOM_KIND_LABELS[toolEvent.roomMessage.kind]} / ${toolEvent.roomMessage.status}${toolEvent.roomMessage.final ? " / final" : ""}] ${toolEvent.roomMessage.content}`,
+      ].join("\n"),
+    );
+  }
+
+  if (toolEvent.roomAction) {
+    sections.push(["Room actions:", `- ${formatRoomActionForCompaction(toolEvent.roomAction)}`].join("\n"));
+  }
+
+  sections.push(
+    [
+      "Tool results used:",
+      `- ${toolEvent.displayName}: ${truncateToolResultSummary(toolEvent.resultPreview || toolEvent.outputText || toolEvent.inputSummary || toolEvent.toolName)}`,
+    ].join("\n"),
+  );
+
+  return sections.join("\n\n").trim();
+}
+
 function estimateSnapshotContentTokens(message: AssistantHistoryMessage): number {
   return estimateTokens(JSON.stringify(message.content));
 }
@@ -545,10 +631,13 @@ function snapshotToPersistedVisibleMessage(message: AssistantHistoryMessage): Pe
     };
   }
 
+  const toolEvent = extractToolEventFromSnapshotDetails(message.details);
   return {
     id: createUuid(),
     role: "assistant",
-    content: `[Tool Result] ${message.toolName}\n${contentToText(message.content)}`,
+    content: toolEvent
+      ? buildPersistedToolResultSummary(toolEvent)
+      : `[Tool Result] ${message.toolName}\n${contentToText(message.content)}`,
     attachments: [],
     createdAt: new Date(message.timestamp).toISOString(),
   };
@@ -885,6 +974,7 @@ export async function compactPromptHistoryAfterToolBatch(args: {
   agentId: RoomAgentId;
   historyDelta: AssistantHistoryMessage[];
   resolvedModel: string;
+  signal?: AbortSignal;
 }): Promise<PromptCompactionTransformResult> {
   const charsBefore = estimateSnapshotHistoryChars(args.historyDelta);
   const contextTokens = estimateSnapshotHistoryContextTokens(args.historyDelta);
@@ -979,6 +1069,7 @@ export async function compactPromptHistoryAfterToolBatch(args: {
       resolvedModel: modelSelection.resolvedModel,
       settings: modelSelection.settings,
       modelConfigOverrides: modelSelection.modelConfigOverrides,
+      signal: args.signal,
     });
     const method = detectCompactionMethod(summaryText);
     const compactedSnapshots: AssistantHistoryMessage[] = [

@@ -236,6 +236,7 @@ export function useRoomStreamingSend(args: {
     },
   ) => Promise<RoomWorkspaceState | null | undefined>;
   refreshWorkspaceFromServer: () => Promise<{ version?: number; state?: RoomWorkspaceState } | null>;
+  flushWorkspacePersistence?: () => Promise<void>;
   clearDraftForRoom: (roomId: string) => void;
   setActiveRoomId: (roomId: string) => void;
   setSelectedSender: (roomId: string, participantId: string) => void;
@@ -251,6 +252,7 @@ export function useRoomStreamingSend(args: {
     roomsRef,
     runRoomCommandRequest,
     refreshWorkspaceFromServer,
+    flushWorkspacePersistence,
     clearDraftForRoom,
     setActiveRoomId,
     setSelectedSender,
@@ -405,6 +407,8 @@ export function useRoomStreamingSend(args: {
       };
 
       try {
+        await flushWorkspacePersistence?.();
+
         const response = await fetch("/api/rooms/stream", {
           method: "POST",
           headers: {
@@ -639,6 +643,7 @@ export function useRoomStreamingSend(args: {
       clearDraftForRoom,
       defaultLocalParticipantId,
       normalizeAssistantMeta,
+      flushWorkspacePersistence,
       refreshWorkspaceFromServer,
       roomsRef,
       setActiveRoomId,
