@@ -316,13 +316,13 @@ test("compactPersistedAgentRuntime stores an LLM-style structured summary when a
     assert.equal(result.history[0]?.role, "assistant");
     assert.equal(result.history[0]?.content, structuredSummary);
     assert.equal(result.history.length >= 1, true);
-    assert.equal(persisted.compactions.length, 1);
-    assert.equal(persisted.compactions[0]?.summary, structuredSummary);
-    assert.equal(persisted.compactions[0]?.success, true);
-    assert.equal(persisted.compactions[0]?.method, "llm");
-    assert.equal(typeof persisted.compactions[0]?.createdSummaryId, "string");
-    assert.equal(persisted.compactions[0]?.details?.result, "compacted");
-    assert.ok((persisted.compactions[0]?.details?.totalEstimatedTokens ?? 0) > 0);
+    assert.equal(persisted.compactions.length >= 1, true);
+    assert.equal(persisted.compactions.at(-1)?.summary, structuredSummary);
+    assert.equal(persisted.compactions.at(-1)?.success, true);
+    assert.equal(persisted.compactions.at(-1)?.method, "llm");
+    assert.equal(typeof persisted.compactions.at(-1)?.createdSummaryId, "string");
+    assert.equal(persisted.compactions.at(-1)?.details?.result, "compacted");
+    assert.ok((persisted.compactions.at(-1)?.details?.totalEstimatedTokens ?? 0) > 0);
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });
@@ -509,6 +509,8 @@ test("compactPersistedAgentRuntime keeps compressing raw history after crossing 
 test("compactPromptHistoryAfterToolBatch compresses only the prefix before the latest tool batch", async () => {
   await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
     const agentId = "concierge";
+    const lcmFacadeUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/lcm/facade.ts")).href;
+    const lcmFacade = await import(`${lcmFacadeUrl}?test=${Date.now()}-${Math.random()}`) as typeof import("../src/lib/server/lcm/facade");
     await setAgentCompactionSettings(workspaceStore, agentId, {
       compactionTokenThreshold: 1_000,
       compactionFreshTailCount: 0,
@@ -561,6 +563,12 @@ test("compactPromptHistoryAfterToolBatch compresses only the prefix before the l
     assert.match(result.summaryText ?? "", /^## 关键结论/m);
     assert.ok(persisted.compactions.some((record) => record.reason === "post_tool"));
     assert.equal(persisted.compactions.at(-1)?.details?.result, "compacted");
+    assert.equal(typeof persisted.compactions.at(-1)?.createdSummaryId, "string");
+
+    const described = await lcmFacade.getAgentLcmRetrieval(agentId)
+      .then(({ retrieval }) => retrieval.describe(persisted.compactions.at(-1)?.createdSummaryId ?? ""));
+    assert.equal(described?.type, "summary");
+    assert.equal(described?.summary?.content, result.summaryText);
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });
@@ -775,6 +783,67 @@ test("compactPromptHistoryAfterToolBatch keeps only the latest open room request
     assert.equal(result.compacted, true);
     assert.match(importantRequestsBlock, /Need Donnie Yen updates\./);
     assert.doesNotMatch(importantRequestsBlock, /Need Jackie Chan updates\./);
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
+test("compactPromptHistoryAfterToolBatch stops when the post-tool compaction signal aborts", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionTokenThreshold: 1_000,
+      compactionFreshTailCount: 0,
+    });
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride((args) => new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => resolve("too slow"), 1_000);
+      args.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(new Error("aborted"));
+      }, { once: true });
+    }));
+
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(new Error("post-tool timeout")), 10);
+    const result = await runtimeStore.compactPromptHistoryAfterToolBatch({
+      agentId,
+      resolvedModel: "fake-provider/fake-model",
+      signal: controller.signal,
+      historyDelta: [
+        {
+          role: "user",
+          content: "Earlier room request: " + "context ".repeat(220),
+          timestamp: 1,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "tool-1", name: "web_fetch", arguments: { url: "https://example.com" } }],
+          api: "responses",
+          provider: "openai",
+          model: "fake-model",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "toolUse",
+          timestamp: 2,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool-1",
+          toolName: "web_fetch",
+          content: [{ type: "text", text: "tool output " + "result ".repeat(140) }],
+          isError: false,
+          timestamp: 3,
+        },
+      ],
+    });
+    clearTimeout(abortTimer);
+
+    assert.equal(result.compacted, false);
+    assert.ok(result.record);
+    assert.equal(result.record?.success, true);
+    assert.equal(result.record?.reason, "post_tool");
+    assert.equal(result.record?.details?.result, "aborted");
+    assert.equal(result.record?.error, undefined);
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });

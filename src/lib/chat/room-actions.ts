@@ -57,6 +57,7 @@ export function applyOutgoingUserMessage(args: {
   attachments?: MessageImageAttachment[];
   sender: RoomParticipant;
   nextTitle: string;
+  messageId?: string;
 }): RoomSession {
   const roomUserMessage = createRoomMessage(args.room.id, "user", args.content, "user", {
     seq: getNextRoomMessageSeq(args.room),
@@ -66,6 +67,9 @@ export function applyOutgoingUserMessage(args: {
     status: "completed",
     final: true,
   });
+  if (args.messageId?.trim()) {
+    roomUserMessage.id = args.messageId.trim();
+  }
 
   const roomWithHumanMembership =
     args.sender.runtimeKind === "human" && !args.room.participants.some((participant) => participant.id === args.sender.id)

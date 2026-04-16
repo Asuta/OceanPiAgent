@@ -1,7 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { estimateAgentPromptTokens } from "./agent-prompt-token-estimate";
-import { generateCompactionSummary } from "./agent-compaction";
 import { resolveAgentCompactionSettingsSelection } from "./agent-compaction-settings";
 import { clearAgentMemory } from "./agent-memory-store";
 import {
@@ -9,6 +8,7 @@ import {
   assembleAgentLcmContext,
   clearAgentLcmConversation,
   compactAgentLcmContext,
+  compactScratchAgentLcmMessages,
   getAgentLcmStoredContextTokenCount,
   getAgentLcmRetrieval,
   getOrCreateAgentConversation,
@@ -46,6 +46,7 @@ export interface CompactionRecordDetails {
   attachmentTokens: number;
   result:
     | "compacted"
+    | "aborted"
     | "below_threshold"
     | "empty_context"
     | "no_eligible_leaf_chunk"
@@ -224,6 +225,7 @@ function normalizeCompactionRecord(value: unknown): CompactionRecord | null {
             attachmentTokens: typeof value.details.attachmentTokens === "number" ? Math.max(0, Math.round(value.details.attachmentTokens)) : 0,
             result:
               value.details.result === "compacted"
+              || value.details.result === "aborted"
               || value.details.result === "below_threshold"
               || value.details.result === "empty_context"
               || value.details.result === "no_eligible_leaf_chunk"
@@ -253,6 +255,8 @@ function formatCompactionSkipReason(reason: CompactionRecordDetails["result"]): 
   switch (reason) {
     case "below_threshold":
       return "未超过压缩阈值";
+    case "aborted":
+      return "压缩被中止";
     case "empty_context":
       return "当前没有可压缩上下文";
     case "no_eligible_leaf_chunk":
@@ -1063,14 +1067,44 @@ export async function compactPromptHistoryAfterToolBatch(args: {
   }
 
   try {
-    const summaryText = await generateCompactionSummary({
+    const scratchCompaction = await compactScratchAgentLcmMessages({
       agentId: args.agentId,
-      messages: compactionMessages,
-      resolvedModel: modelSelection.resolvedModel,
-      settings: modelSelection.settings,
-      modelConfigOverrides: modelSelection.modelConfigOverrides,
+      messages: compactionMessages.map((message) => ({
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+      })),
+      summaryModelSelection: {
+        resolvedModel: modelSelection.resolvedModel,
+        settings: modelSelection.settings,
+        modelConfigOverrides: modelSelection.modelConfigOverrides,
+      },
       signal: args.signal,
     });
+    if (!scratchCompaction?.summaryText.trim() && args.signal?.aborted) {
+      const record = createSkippedCompactionRecord({
+        reason: "post_tool",
+        result: "aborted",
+        summaryPrefix: "tool 批次后压缩检查结果",
+        thresholdTokens,
+        promptTokenEstimate,
+        keptMessages: args.historyDelta.length,
+        charsBefore,
+        charsAfter: charsBefore,
+        baseDetails,
+        tokensAfter: promptTokenEstimate.contextTokens,
+        contextTokensAfter: promptTokenEstimate.contextTokens,
+        storedContextTokensAfter: promptTokenEstimate.contextTokens,
+        totalEstimatedTokensAfter: promptTokenEstimate.totalTokens,
+        includePromptOverhead: true,
+      });
+      await appendCompactionRecord(args.agentId, record);
+      return { compacted: false, record };
+    }
+    if (!scratchCompaction?.summaryText.trim()) {
+      throw new Error("Scratch LCM post-tool compaction did not produce a summary.");
+    }
+    const summaryText = scratchCompaction.summaryText;
     const method = detectCompactionMethod(summaryText);
     const compactedSnapshots: AssistantHistoryMessage[] = [
       {
@@ -1104,6 +1138,7 @@ export async function compactPromptHistoryAfterToolBatch(args: {
       success: true,
       actionTaken: true,
       method,
+      createdSummaryId: scratchCompaction.summaryId,
       summary: summaryText,
       prunedMessages: prunedSnapshots.length,
       keptMessages: compactedSnapshots.length,
@@ -1112,9 +1147,9 @@ export async function compactPromptHistoryAfterToolBatch(args: {
       details: withCompactionOutcomeDetails({
         baseDetails,
         result: "compacted",
-        tokensAfter: contextTokensAfter,
+        tokensAfter: scratchCompaction.tokensAfter,
         contextTokensAfter,
-        storedContextTokensAfter: contextTokensAfter,
+        storedContextTokensAfter: scratchCompaction.tokensAfter,
         totalEstimatedTokensAfter: promptTokenEstimateAfter?.totalTokens ?? contextTokensAfter,
       }),
     });

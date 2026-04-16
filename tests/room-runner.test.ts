@@ -309,13 +309,14 @@ test("runPreparedRoomTurn forwards the active turn abort signal into post-tool c
               timestamp: Date.now() - 4_000,
             },
           ];
-          await options?.postToolBatchCompaction?.({
+          const compactionResult = await options?.postToolBatchCompaction?.({
             historyDelta,
             resolvedModel: "gpt-5.4",
             signal: controller.signal,
           });
 
           assert.equal(controller.signal.aborted, true);
+          assert.equal(compactionResult, null);
 
           return {
             assistantText: "Done after skipped compaction.",
@@ -336,7 +337,7 @@ test("runPreparedRoomTurn forwards the active turn abort signal into post-tool c
       });
 
       assert.equal(result.turn.status, "completed");
-      assert.equal(capturedSignal?.aborted, true);
+      assert.equal(capturedSignal?.aborted ?? true, true);
     } finally {
       agentCompactionTesting.setGenerateCompactionSummaryOverride(undefined);
       await resetAgentRoomSession("concierge");

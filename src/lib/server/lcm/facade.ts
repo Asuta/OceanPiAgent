@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DEFAULT_COMPACTION_FRESH_TAIL_COUNT, DEFAULT_COMPACTION_TOKEN_THRESHOLD } from "@/lib/chat/types";
 import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId, RoomMessageEmission, RoomSender, RoomToolActionUnion, ToolExecution } from "@/lib/chat/types";
 import type { CompactionModelSelection } from "@/lib/server/agent-compaction-settings";
@@ -284,6 +284,82 @@ export async function compactAgentLcmContext(
     summaryModelSelection,
     ...(typeof comparisonExtraTokens === "number" ? { comparisonExtraTokens } : {}),
   });
+}
+
+export async function compactScratchAgentLcmMessages(args: {
+  agentId: RoomAgentId;
+  messages: Array<{
+    role: "user" | "assistant";
+    content: string;
+    createdAt?: string;
+  }>;
+  summaryModelSelection?: CompactionModelSelection;
+  signal?: AbortSignal;
+}): Promise<{
+  summaryId: string;
+  summaryText: string;
+  tokensAfter: number;
+} | null> {
+  if (args.signal?.aborted) {
+    return null;
+  }
+
+  const normalizedMessages = args.messages
+    .map((message) => ({
+      ...message,
+      content: message.content.trim(),
+    }))
+    .filter((message) => message.content.length > 0);
+  if (normalizedMessages.length === 0) {
+    return null;
+  }
+
+  const { conversationStore, summaryStore, compaction, retrieval } = await getLcmStores(1, 0);
+  const conversation = await conversationStore.getOrCreateConversation(
+    `${getAgentSessionId(args.agentId)}:post_tool:${randomUUID()}`,
+    { title: `Agent ${args.agentId} post tool scratch compaction` },
+  );
+
+  const createdMessages = await conversationStore.createMessagesBulk(
+    normalizedMessages.map((message, index) => ({
+      conversationId: conversation.conversationId,
+      seq: index + 1,
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+    })),
+  );
+  for (const message of createdMessages) {
+    await summaryStore.appendContextMessage(conversation.conversationId, message.messageId, message.createdAt.toISOString());
+  }
+  await conversationStore.markConversationBootstrapped(conversation.conversationId);
+
+  const result = await compaction.compact({
+    conversationId: conversation.conversationId,
+    tokenBudget: 1,
+    force: true,
+    hardTrigger: true,
+    summaryModelSelection: args.summaryModelSelection,
+    signal: args.signal,
+  });
+  if (args.signal?.aborted) {
+    return null;
+  }
+  if (!result.actionTaken || !result.createdSummaryId) {
+    return null;
+  }
+
+  const described = await retrieval.describe(result.createdSummaryId);
+  const summaryText = described?.summary?.content?.trim();
+  if (!summaryText) {
+    return null;
+  }
+
+  return {
+    summaryId: result.createdSummaryId,
+    summaryText,
+    tokensAfter: result.tokensAfter,
+  };
 }
 
 export async function getAgentLcmStoredContextTokenCount(agentId: RoomAgentId): Promise<number | null> {

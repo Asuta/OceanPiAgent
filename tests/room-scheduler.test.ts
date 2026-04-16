@@ -943,6 +943,15 @@ test("stopRoomScheduler forces a running room back to idle and marks running tur
     emittedMessages: [],
     status: "running" as const,
   };
+  const streamingAgentTurn = {
+    ...runningTurn,
+    draftSegments: [{
+      id: "draft-1",
+      sequence: 1,
+      content: "Still streaming",
+      status: "streaming" as const,
+    }],
+  };
   state = {
     ...state,
     rooms: [{
@@ -975,11 +984,16 @@ test("stopRoomScheduler forces a running room back to idle and marks running tur
     mutateWorkspace,
   });
 
-  const nextRoom = state.rooms[0]!;
+  const nextRoom = state.rooms.find((entry) => entry.id === room.id);
+  assert.ok(nextRoom);
+  const nextRoomTurn = nextRoom.agentTurns.find((turn) => turn.id === runningTurn.id);
+  assert.ok(nextRoomTurn);
+  const nextAgentTurn = state.agentStates.concierge.agentTurns.find((turn) => turn.id === streamingAgentTurn.id);
+  assert.ok(nextAgentTurn);
   assert.equal(nextRoom.scheduler.status, "idle");
   assert.equal(nextRoom.scheduler.activeParticipantId, null);
-  assert.equal(nextRoom.agentTurns[0]?.status, "error");
-  assert.equal(state.agentStates.concierge.agentTurns[0]?.error, "Stopped for testing.");
+  assert.equal(nextRoomTurn.status, "error");
+  assert.equal(nextAgentTurn.error, "Stopped for testing.");
 });
 
 test("stopRoomScheduler also stops running agent-state turns that have not been persisted to the room yet", async () => {
@@ -1002,7 +1016,22 @@ test("stopRoomScheduler also stops running agent-state turns that have not been 
     assistantContent: "",
     tools: [],
     emittedMessages: [],
+    draftSegments: [{
+      id: "draft-1",
+      sequence: 1,
+      content: "Still streaming",
+      status: "streaming" as const,
+    }],
     status: "running" as const,
+  };
+  const streamingAgentTurn = {
+    ...runningTurn,
+    draftSegments: [{
+      id: "draft-1",
+      sequence: 1,
+      content: "Still streaming",
+      status: "streaming" as const,
+    }],
   };
   state = {
     ...state,
@@ -1019,7 +1048,7 @@ test("stopRoomScheduler also stops running agent-state turns that have not been 
       ...state.agentStates,
       concierge: {
         ...state.agentStates.concierge,
-        agentTurns: [runningTurn],
+        agentTurns: [streamingAgentTurn],
       },
     },
   };
@@ -1041,6 +1070,7 @@ test("stopRoomScheduler also stops running agent-state turns that have not been 
   assert.equal(nextRoom.agentTurns.length, 0);
   assert.equal(state.agentStates.concierge.agentTurns[0]?.status, "error");
   assert.equal(state.agentStates.concierge.agentTurns[0]?.error, "Stopped for testing.");
+  assert.equal(state.agentStates.concierge.agentTurns[0]?.draftSegments?.[0]?.status, "completed");
 });
 
 test("enqueueRoomScheduler merges queued overrides with the active run overrides", async () => {

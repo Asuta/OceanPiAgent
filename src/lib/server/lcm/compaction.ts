@@ -134,11 +134,11 @@ export class CompactionEngine {
     return { shouldCompact: false, reason: "none", currentTokens, threshold };
   }
 
-  async compact(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModelSelection?: CompactionModelSelection; comparisonExtraTokens?: number }): Promise<CompactionResult> {
+  async compact(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModelSelection?: CompactionModelSelection; comparisonExtraTokens?: number; signal?: AbortSignal }): Promise<CompactionResult> {
     return this.compactFullSweep(input);
   }
 
-  async compactLeaf(input: { conversationId: number; tokenBudget: number; force?: boolean; previousSummaryContent?: string; summaryModelSelection?: CompactionModelSelection; comparisonExtraTokens?: number }): Promise<CompactionResult> {
+  async compactLeaf(input: { conversationId: number; tokenBudget: number; force?: boolean; previousSummaryContent?: string; summaryModelSelection?: CompactionModelSelection; comparisonExtraTokens?: number; signal?: AbortSignal }): Promise<CompactionResult> {
     const tokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
 
     if (this.isBelowThreshold({ force: input.force, storedTokens: tokensBefore, comparisonExtraTokens: input.comparisonExtraTokens })) {
@@ -151,7 +151,7 @@ export class CompactionEngine {
     }
 
     const previousSummaryContent = input.previousSummaryContent ?? await this.resolvePriorLeafSummaryContext(input.conversationId, leafChunk.items);
-    const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModelSelection);
+    const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModelSelection, input.signal);
     if (!leafResult) {
       return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false, skipReason: "leaf_pass_failed" };
     }
@@ -182,7 +182,7 @@ export class CompactionEngine {
         }
 
         const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-        const condenseResult = await this.condensedPass(input.conversationId, chunk.items, targetDepth, input.summaryModelSelection);
+        const condenseResult = await this.condensedPass(input.conversationId, chunk.items, targetDepth, input.summaryModelSelection, input.signal);
         if (!condenseResult) {
           break;
         }
@@ -217,7 +217,7 @@ export class CompactionEngine {
     };
   }
 
-  async compactFullSweep(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModelSelection?: CompactionModelSelection; comparisonExtraTokens?: number }): Promise<CompactionResult> {
+  async compactFullSweep(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModelSelection?: CompactionModelSelection; comparisonExtraTokens?: number; signal?: AbortSignal }): Promise<CompactionResult> {
     const tokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
 
     if (this.isBelowThreshold({ force: input.force, storedTokens: tokensBefore, comparisonExtraTokens: input.comparisonExtraTokens })) {
@@ -243,7 +243,7 @@ export class CompactionEngine {
       }
 
       const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-      const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModelSelection);
+      const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModelSelection, input.signal);
       if (!leafResult) {
         return {
           actionTaken,
@@ -296,7 +296,7 @@ export class CompactionEngine {
       }
 
       const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-      const condenseResult = await this.condensedPass(input.conversationId, candidate.chunk.items, candidate.targetDepth, input.summaryModelSelection);
+      const condenseResult = await this.condensedPass(input.conversationId, candidate.chunk.items, candidate.targetDepth, input.summaryModelSelection, input.signal);
       if (!condenseResult) {
         break;
       }
@@ -338,7 +338,7 @@ export class CompactionEngine {
     };
   }
 
-  async compactUntilUnder(input: { conversationId: number; tokenBudget: number; targetTokens?: number; currentTokens?: number; summaryModelSelection?: CompactionModelSelection }): Promise<{ success: boolean; rounds: number; finalTokens: number }> {
+  async compactUntilUnder(input: { conversationId: number; tokenBudget: number; targetTokens?: number; currentTokens?: number; summaryModelSelection?: CompactionModelSelection; signal?: AbortSignal }): Promise<{ success: boolean; rounds: number; finalTokens: number }> {
     const targetTokens = typeof input.targetTokens === "number" && Number.isFinite(input.targetTokens) && input.targetTokens > 0 ? Math.floor(input.targetTokens) : input.tokenBudget;
     const storedTokens = await this.summaryStore.getContextTokenCount(input.conversationId);
     const liveTokens = typeof input.currentTokens === "number" && Number.isFinite(input.currentTokens) && input.currentTokens > 0 ? Math.floor(input.currentTokens) : 0;
@@ -354,6 +354,7 @@ export class CompactionEngine {
         tokenBudget: input.tokenBudget,
         force: true,
         summaryModelSelection: input.summaryModelSelection,
+        signal: input.signal,
       });
 
       if (result.tokensAfter <= targetTokens) {
@@ -674,6 +675,7 @@ export class CompactionEngine {
     agentId: string,
     messages: Array<{ id: string; role: "user" | "assistant"; content: string; createdAt: string }>,
     summaryModelSelection?: CompactionModelSelection,
+    signal?: AbortSignal,
   ): Promise<string> {
     const summary = await generateCompactionSummary({
       agentId: agentId as never,
@@ -689,8 +691,9 @@ export class CompactionEngine {
         ? {
             settings: summaryModelSelection.settings,
             modelConfigOverrides: summaryModelSelection.modelConfigOverrides,
+            ...(signal ? { signal } : {}),
           }
-        : {}),
+        : signal ? { signal } : {}),
     });
     return summary.trim();
   }
@@ -700,6 +703,7 @@ export class CompactionEngine {
     messageItems: ContextItemRecord[],
     previousSummaryContent?: string,
     summaryModelSelection?: CompactionModelSelection,
+    signal?: AbortSignal,
   ): Promise<{ summaryId: string; level: CompactionLevel; content: string } | null> {
     const messageContents: { messageId: number; role: "user" | "assistant"; content: string; createdAt: Date; tokenCount: number }[] = [];
     for (const item of messageItems) {
@@ -732,6 +736,7 @@ export class CompactionEngine {
           createdAt: message.createdAt.toISOString(),
         })),
         summaryModelSelection,
+        signal,
       );
     } catch {
       const fallback = this.buildDeterministicFallback(concatenated);
@@ -779,6 +784,7 @@ export class CompactionEngine {
     summaryItems: ContextItemRecord[],
     targetDepth: number,
     summaryModelSelection?: CompactionModelSelection,
+    signal?: AbortSignal,
   ): Promise<PassResult | null> {
     const summaryRecords: SummaryRecord[] = [];
     for (const item of summaryItems) {
@@ -815,6 +821,7 @@ export class CompactionEngine {
           createdAt: summary.createdAt.toISOString(),
         })),
         summaryModelSelection,
+        signal,
       );
     } catch {
       const fallback = this.buildDeterministicFallback(concatenated);

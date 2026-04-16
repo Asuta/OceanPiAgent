@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { addAgentParticipantToRoom } from "@/lib/chat/room-actions";
 import { createAgentSharedState, createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
-import { runRoomCommand } from "@/lib/server/room-service";
+import { appendUserRoomMessage, runRoomCommand } from "@/lib/server/room-service";
 
 function createRoomServiceHarness() {
   let state = createDefaultWorkspaceState();
@@ -32,7 +32,7 @@ function createRoomServiceHarness() {
       mutateWorkspace,
       listAgentDefinitions: async () => [],
       clearPersistedAgentCompactions: async () => ({
-        version: 1,
+        version: 1 as const,
         agentId: "concierge",
         history: [],
         compactions: [],
@@ -98,6 +98,28 @@ test("runRoomCommand send_message persists the user message and waits for server
   assert.deepEqual(queuedRoomIds, [roomId]);
   assert.equal(result.room?.roomMessages.some((message) => message.content === "Please sync the room."), true);
   assert.equal(result.room?.roomMessages.some((message) => message.content === "Server scheduler finished the handoff."), true);
+});
+
+test("appendUserRoomMessage preserves a caller-provided client message id", async () => {
+  const harness = createRoomServiceHarness();
+  const roomId = harness.getState().rooms[0]!.id;
+
+  const result = await appendUserRoomMessage(
+    {
+      roomId,
+      content: "Keep this exact id.",
+      senderId: "local-operator",
+      clientMessageId: "client-message-123",
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+
+  assert.equal(result.userMessage.id, "client-message-123");
+  assert.equal(result.room.roomMessages.at(-1)?.id, "client-message-123");
 });
 
 test("runRoomCommand rename_room trims the title and rejects empty titles", async () => {

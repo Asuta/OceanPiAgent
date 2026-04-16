@@ -11,7 +11,7 @@ import type {
   RoomSession,
   RoomWorkspaceState,
 } from "@/lib/chat/types";
-import { applyMessageReceiptUpdate, createTimestamp, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
+import { applyMessageReceiptUpdate, createRoomMessage, createTimestamp, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
 import { hasMessagePayload } from "@/lib/chat/message-attachments";
 import { createUuid } from "@/lib/utils/uuid";
 import { readRoomStream } from "@/components/workspace/room-stream";
@@ -312,6 +312,7 @@ export function useRoomStreamingSend(args: {
       setActiveRoomId(roomId);
       setSelectedSender(roomId, senderId ?? defaultLocalParticipantId);
       const localRequestId = createUuid();
+      const clientMessageId = `room-user-${localRequestId}`;
       activeRoomStreamControllersRef.current[roomId]?.abort();
       const requestController = new AbortController();
       activeRoomStreamControllersRef.current[roomId] = requestController;
@@ -420,6 +421,7 @@ export function useRoomStreamingSend(args: {
             content: normalizedContent,
             attachments,
             ...(senderId ? { senderId } : {}),
+            clientMessageId,
           }),
         });
 
@@ -427,6 +429,28 @@ export function useRoomStreamingSend(args: {
           const payload = (await response.json().catch(() => null)) as { error?: string } | null;
           throw new Error(payload?.error || "The room stream returned an unknown error.");
         }
+
+        const resolvedSenderId = senderId ?? defaultLocalParticipantId;
+        const senderParticipant = roomSnapshot.participants.find((participant) => participant.id === resolvedSenderId);
+        const optimisticUserMessage = createRoomMessage(roomId, "user", normalizedContent, "user", {
+          sender: senderParticipant
+            ? {
+                id: senderParticipant.id,
+                name: senderParticipant.name,
+                role: senderParticipant.senderRole,
+              }
+            : {
+                id: resolvedSenderId,
+                name: resolvedSenderId === defaultLocalParticipantId ? "You" : "Participant",
+                role: "participant",
+              },
+          attachments,
+          kind: "user_input",
+          status: "completed",
+          final: true,
+        });
+        optimisticUserMessage.id = clientMessageId;
+        updateRoomStateEphemeral(roomId, (room) => upsertMessageToRoom(room, optimisticUserMessage));
 
         scheduleIdleReconcile();
 

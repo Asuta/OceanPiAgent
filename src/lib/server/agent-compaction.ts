@@ -326,9 +326,11 @@ function buildCompactionPrompt(args: {
   const transcript = args.chunk.map((message) => formatCompactionMessage(message)).join("\n\n");
   const sections = [
     "请把这段较早的隐藏 agent 历史压缩成后续可复用的共享记忆。",
+    "这份摘要只是共享背景记忆，不是当前房间的新指令。",
     "只返回 Markdown，并且必须严格使用下面这些标题，顺序也必须完全一致：",
     ...REQUIRED_SUMMARY_HEADINGS,
     "请使用简短、事实性的项目符号。如果某一节没有内容，写 '- 无'。",
+    "凡是仍未完成的问题、待办事项或用户仍在等待的问题，都尽量写清对应的 room ID，避免让后续模型把别的房间待办误认成当前房间指令。",
     "需要保留精确标识符时，请原样保留：room ID、message ID、sender ID、文件路径、URL、模型名、工具名等。",
     "默认使用中文输出；除精确标识符、文件路径、URL、工具名、模型名等必须保持原样的内容外，不要改成英文。",
   ];
@@ -371,6 +373,7 @@ async function summarizeChunk(args: {
       modelConfigOverrides: args.modelConfigOverrides,
       systemPrompt: [
         "你负责把较早的隐藏 agent 历史压缩成可复用的共享记忆。",
+        "这些共享记忆会和当前房间的新消息一起提供给后续模型，因此绝不能把较早历史写成当前房间必须立刻执行的新指令。",
         "摘要必须简洁、准确、偏事实，不要扩写。",
         "不要编造工具结果、房间动作、承诺或结论。",
         "除精确标识符等必须保持原样的内容外，默认使用中文输出。",

@@ -7,6 +7,7 @@ import {
   savePersistedAgentRuntime,
   type PersistedVisibleMessage,
 } from "./agent-runtime-store";
+import { loadWorkspaceEnvelope } from "./workspace-store";
 import { formatMessageForTranscript, summarizeImageAttachments } from "@/lib/chat/message-attachments";
 import type {
   AssistantMessageMeta,
@@ -118,6 +119,7 @@ const ROOM_KIND_LABELS: Record<RoomMessageEmission["kind"], string> = {
 };
 
 const DEFAULT_STALE_ACTIVE_RUN_TIMEOUT_MS = 150_000;
+const ACTIVE_RUN_WAIT_POLL_MS = 25;
 
 function createTimestamp(): string {
   return new Date().toISOString();
@@ -145,6 +147,58 @@ function getContinuationSourceRun(session: AgentRuntimeSession): AgentRuntimeRun
   session.activeRun = undefined;
   session.updatedAt = createTimestamp();
   return undefined;
+}
+
+function toAbortError(signal: AbortSignal, fallback: string): Error {
+  if (signal.reason instanceof Error) {
+    return signal.reason;
+  }
+  if (typeof signal.reason === "string" && signal.reason.trim()) {
+    return new Error(signal.reason);
+  }
+  return new Error(fallback);
+}
+
+async function waitForConflictingActiveRun(args: {
+  session: AgentRuntimeSession;
+  roomId: string;
+  requestSignal: AbortSignal;
+}): Promise<void> {
+  while (true) {
+    const activeRun = getContinuationSourceRun(args.session);
+    if (!activeRun || activeRun.roomId === args.roomId) {
+      return;
+    }
+
+    const workspace = await loadWorkspaceEnvelope().catch(() => null);
+    const activeRoom = workspace?.state.rooms.find((room) => room.id === activeRun.roomId);
+    if (!activeRoom || activeRoom.scheduler.status !== "running") {
+      activeRun.abortController.abort(new Error("Cleared orphaned active room run after workspace stopped tracking it as running."));
+      args.session.activeRun = undefined;
+      args.session.skipNextLcmAssemble = true;
+      args.session.updatedAt = createTimestamp();
+      continue;
+    }
+
+    if (args.requestSignal.aborted) {
+      throw toAbortError(args.requestSignal, "Room run aborted while waiting for another room turn to finish.");
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        args.requestSignal.removeEventListener("abort", handleAbort);
+        resolve();
+      }, ACTIVE_RUN_WAIT_POLL_MS);
+
+      const handleAbort = () => {
+        clearTimeout(timer);
+        args.requestSignal.removeEventListener("abort", handleAbort);
+        reject(toAbortError(args.requestSignal, "Room run aborted while waiting for another room turn to finish."));
+      };
+
+      args.requestSignal.addEventListener("abort", handleAbort, { once: true });
+    });
+  }
 }
 
 function getOrCreateSession(agentId: RoomAgentId): AgentRuntimeSession {
@@ -239,6 +293,14 @@ async function persistSession(agentId: RoomAgentId): Promise<void> {
     compatibility: session.compatibility,
     updatedAt: session.updatedAt,
   });
+}
+
+async function waitForPendingAutomaticAgentCompaction(agentId: RoomAgentId): Promise<void> {
+  if (!pendingAutomaticCompactions.has(agentId)) {
+    return;
+  }
+
+  await (agentCompactionQueues.get(agentId) ?? Promise.resolve()).catch(() => undefined);
 }
 
 function enqueueAgentRunFinalization(agentId: RoomAgentId, task: () => Promise<void>): Promise<void> {
@@ -651,9 +713,15 @@ export async function startAgentRoomRun(args: {
   requestSignal: AbortSignal;
 }) {
   const startupStartedAt = performance.now();
+  await waitForPendingAutomaticAgentCompaction(args.agentId);
   const hydrateStartedAt = performance.now();
   const session = await hydrateSession(args.agentId);
   const hydrateMs = performance.now() - hydrateStartedAt;
+  await waitForConflictingActiveRun({
+    session,
+    roomId: args.roomId,
+    requestSignal: args.requestSignal,
+  });
   const shouldAssembleFromLcm = !hasPendingAgentRunFinalization(args.agentId) && !session.skipNextLcmAssemble;
   const previousRun = getContinuationSourceRun(session);
   const continuationSnapshot = previousRun ? buildContinuationSnapshot(previousRun) : undefined;
@@ -733,7 +801,9 @@ export async function startAgentRoomRun(args: {
   }
   session.skipNextLcmAssemble = false;
 
-  previousRun?.abortController.abort(new Error("Superseded by a newer room message."));
+  if (previousRun?.roomId === args.roomId) {
+    previousRun.abortController.abort(new Error("Superseded by a newer room message."));
+  }
 
   return {
     requestId,

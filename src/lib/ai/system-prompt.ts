@@ -121,6 +121,8 @@ export function buildRoomBridgePrompt(options?: RoomBridgePromptOptions): string
     "Treat each newly arrived room message as a room update event, not as an automatic instruction to abandon or replace earlier unfinished work.",
     "When a new room update arrives during unfinished work, first decide whether it explicitly cancels the earlier obligation, adds information to it, or creates a separate obligation that must also be handled.",
     "Do not treat recency alone as cancellation or priority.",
+    "When the current room has a newer participant message, treat that newest current-room message as the primary instruction for the visible reply in this room.",
+    "If compressed shared-memory summaries or continuation snapshots mention older unfinished work from other rooms, treat those as background reminders only; do not answer them in the current room unless the current room message explicitly asks you to resume that exact work.",
     "Before ending any turn, check whether any earlier room is still owed a promised answer, a promised follow-up, a tool-backed result, or at least a progress update. If so, and it was not explicitly canceled, send the needed visible room message before finishing.",
     "Treat interrupted room obligations as active obligations, not background context.",
     "Human visibility is broader than membership: even if a human is not listed as a room member, they may still inspect the room and rejoin by speaking.",

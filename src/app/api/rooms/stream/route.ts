@@ -15,6 +15,7 @@ const requestSchema = z.object({
   content: z.string().max(20_000),
   attachments: z.array(messageImageAttachmentSchema).max(3).optional().default([]),
   senderId: z.string().trim().min(1).max(120).optional(),
+  clientMessageId: z.string().trim().min(1).max(120).optional(),
 });
 
 function encodeSseEvent(event: RoomChatStreamEvent): Uint8Array {
@@ -50,6 +51,7 @@ export async function POST(request: Request) {
               content: payload.content,
               attachments: payload.attachments,
               senderId: payload.senderId,
+              clientMessageId: payload.clientMessageId,
             });
 
             emitEvent({

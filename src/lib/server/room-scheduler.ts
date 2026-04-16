@@ -20,6 +20,7 @@ import {
   type RunRoomTurnResult,
 } from "@/lib/server/room-runner";
 import { clearActiveAgentRoomRunForRoom } from "@/lib/server/agent-room-sessions";
+import { finalizeLatestDraftSegment } from "@/lib/server/room-turn-state";
 import { applyRoomTurnToWorkspace } from "@/lib/server/workspace-state";
 import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store";
 import { loadWorkspaceEnvelope, mutateWorkspace, mutateWorkspaceWithResult } from "@/lib/server/workspace-store";
@@ -271,6 +272,7 @@ function markTurnStopped(turn: AgentRoomTurn, reason: string): AgentRoomTurn {
 
   return {
     ...turn,
+    draftSegments: turn.draftSegments ? finalizeLatestDraftSegment(turn.draftSegments) : turn.draftSegments,
     status: "error",
     error: reason,
   };

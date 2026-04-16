@@ -68,6 +68,17 @@ test("buildRoomBridgePrompt requires early progress acknowledgments for multi-st
   assert.match(prompt, /If the task can be answered immediately with one concise final room reply, you do not need a separate acknowledgment message first/);
 });
 
+test("buildRoomBridgePrompt prioritizes the newest current-room message over stale shared-memory tasks", () => {
+  const prompt = buildRoomBridgePrompt({
+    roomTitle: "Test Room",
+    roomId: "room-1",
+    agentLabel: "Harbor Concierge",
+  });
+
+  assert.match(prompt, /treat that newest current-room message as the primary instruction for the visible reply in this room/i);
+  assert.match(prompt, /compressed shared-memory summaries or continuation snapshots mention older unfinished work from other rooms, treat those as background reminders only/i);
+});
+
 test("buildRoomBridgePrompt explains that each send_message_to_room call creates its own bubble", () => {
   const prompt = buildRoomBridgePrompt({
     roomTitle: "Test Room",

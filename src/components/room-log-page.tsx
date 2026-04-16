@@ -12,6 +12,7 @@ import {
   useWorkspaceAgentsState,
   useWorkspaceRoomsState,
 } from "@/components/workspace-provider";
+import { getRoomTurnsForTimeline } from "@/components/workspace/room-thread";
 import type { AgentRoomTurn, RoomAgentId, ToolExecution } from "@/lib/chat/types";
 
 type LogFilter = "all" | "request" | "full-request" | "tool" | "system" | "compaction";
@@ -130,10 +131,6 @@ function mergeCachedEntries<T extends { id: string; createdAt: string }>(args: {
   }
 
   return mergedEntries.sort((left, right) => getSortableTime(right.createdAt) - getSortableTime(left.createdAt)).slice(0, MAX_LOG_ENTRIES_PER_TYPE);
-}
-
-function getTurnRoomId(turn: AgentRoomTurn) {
-  return turn.userMessage.roomId || turn.emittedMessages[0]?.roomId || "";
 }
 
 function getSortableTime(value: string) {
@@ -256,15 +253,8 @@ export function RoomLogPage({ roomId }: { roomId: string }) {
       return [] as AgentRoomTurn[];
     }
 
-    if (room.agentTurns.length > 0) {
-      return [...room.agentTurns].sort((left, right) => getSortableTime(right.userMessage.createdAt) - getSortableTime(left.userMessage.createdAt));
-    }
-
-    const fallbackTurns = Object.values(agentStates)
-      .flatMap((state) => state.agentTurns)
-      .filter((turn) => getTurnRoomId(turn) === room.id);
-
-    return fallbackTurns.sort((left, right) => getSortableTime(right.userMessage.createdAt) - getSortableTime(left.userMessage.createdAt));
+    return [...getRoomTurnsForTimeline({ roomId: room.id, agentStates })]
+      .sort((left, right) => getSortableTime(right.userMessage.createdAt) - getSortableTime(left.userMessage.createdAt));
   }, [agentStates, room]);
   const compactionLogs = useRoomCompactionLogs({ room: room ?? undefined, getAgentDefinition });
 

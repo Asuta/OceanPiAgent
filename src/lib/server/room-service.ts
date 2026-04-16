@@ -140,6 +140,7 @@ export async function appendUserRoomMessage(
     content: string;
     attachments?: MessageImageAttachment[];
     senderId?: string;
+    clientMessageId?: string;
   },
   overrides: Partial<RoomServiceDependencies> = {},
 ): Promise<AppendedRoomMessageResult> {
@@ -177,6 +178,7 @@ export async function appendUserRoomMessage(
         attachments: args.attachments ?? [],
         sender,
         nextTitle,
+        messageId: args.clientMessageId,
       }),
     );
   }, deps);
