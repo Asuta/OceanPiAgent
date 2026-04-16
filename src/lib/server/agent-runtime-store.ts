@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { estimateAgentPromptTokens } from "./agent-prompt-token-estimate";
@@ -7,11 +8,16 @@ import {
   appendAgentLcmMessage,
   assembleAgentLcmContext,
   clearAgentLcmConversation,
+  clearAgentPostToolConversation,
   compactAgentLcmContext,
-  compactScratchAgentLcmMessages,
+  compactAgentPostToolLcmContext,
   getAgentLcmStoredContextTokenCount,
+  getAgentPostToolLcmConversation,
+  getAgentPostToolStoredContextTokenCount,
   getAgentLcmRetrieval,
   getOrCreateAgentConversation,
+  appendAgentPostToolLcmMessages,
+  replaceAgentPostToolLcmMessages,
 } from "./lcm/facade";
 import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runtime-hooks";
 import {
@@ -114,8 +120,49 @@ type PromptTokenEstimateResult = Awaited<ReturnType<typeof estimateAgentPromptTo
 const RUNTIME_ROOT = path.join(process.cwd(), ".oceanking", "agent-runtime");
 const MAX_COMPACTION_RECORDS = 24;
 
+interface PostToolCompactionState {
+  sourceVisibleMessageSignatures: string[];
+  compactedVisibleMessageSignatures?: string[];
+}
+
+declare global {
+  var __oceankingPostToolCompactionState: Map<string, PostToolCompactionState> | undefined;
+}
+
+const postToolCompactionState = globalThis.__oceankingPostToolCompactionState ?? new Map<string, PostToolCompactionState>();
+globalThis.__oceankingPostToolCompactionState = postToolCompactionState;
+
 function createTimestamp(): string {
   return new Date().toISOString();
+}
+
+function getPostToolCompactionStateKey(agentId: RoomAgentId, requestId: string): string {
+  return `${agentId}:${requestId}`;
+}
+
+function describeAbortSignalReason(signal?: AbortSignal): string | null {
+  if (!signal?.aborted) {
+    return null;
+  }
+  if (signal.reason instanceof Error) {
+    return signal.reason.message || signal.reason.name || "aborted";
+  }
+  if (typeof signal.reason === "string" && signal.reason.trim()) {
+    return signal.reason;
+  }
+  if (signal.reason == null) {
+    return "aborted";
+  }
+  try {
+    return JSON.stringify(signal.reason);
+  } catch {
+    return String(signal.reason);
+  }
+}
+
+function isPostToolCompactionTimeoutAbort(signal?: AbortSignal): boolean {
+  const reason = describeAbortSignalReason(signal);
+  return typeof reason === "string" && reason.startsWith("Post-tool compaction timed out after ");
 }
 
 function createEmptyRuntime(agentId: RoomAgentId): PersistedAgentRuntime {
@@ -647,6 +694,131 @@ function snapshotToPersistedVisibleMessage(message: AssistantHistoryMessage): Pe
   };
 }
 
+function createPostToolSnapshotSignature(message: AssistantHistoryMessage): string {
+  const normalized =
+    message.role === "user"
+      ? {
+          role: message.role,
+          content: message.content,
+        }
+      : message.role === "assistant"
+        ? {
+            role: message.role,
+            content: message.content.map((part) => {
+              if (part.type === "toolCall") {
+                return {
+                  type: part.type,
+                  id: part.id,
+                  name: part.name,
+                  arguments: part.arguments,
+                };
+              }
+              if (part.type === "thinking") {
+                return {
+                  type: part.type,
+                  thinking: part.thinking,
+                  thinkingSignature: part.thinkingSignature,
+                  redacted: part.redacted,
+                };
+              }
+              return {
+                type: part.type,
+                text: part.text,
+              };
+            }),
+          }
+        : {
+            role: message.role,
+            toolCallId: message.toolCallId,
+            toolName: message.toolName,
+            content: message.content,
+            isError: message.isError,
+          };
+
+  return createHash("sha1").update(JSON.stringify(normalized)).digest("hex");
+}
+
+function buildPostToolSnapshotSignatures(historyDelta: AssistantHistoryMessage[]): string[] {
+  return historyDelta.map((message) => createPostToolSnapshotSignature(message));
+}
+
+function startsWithSnapshotSignatures(candidate: string[], prefix: string[]): boolean {
+  if (prefix.length > candidate.length) {
+    return false;
+  }
+
+  for (let index = 0; index < prefix.length; index += 1) {
+    if (candidate[index] !== prefix[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function buildSyntheticPostToolSummarySnapshotSignature(summaryText: string): string {
+  return createPostToolSnapshotSignature({
+    role: "assistant",
+    content: [{ type: "text", text: summaryText }],
+    api: "internal",
+    provider: "internal",
+    model: "internal/post_tool_compaction",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: 0,
+  } satisfies AssistantHistoryAssistantMessage);
+}
+
+function getPostToolCompactionState(agentId: RoomAgentId, requestId: string): PostToolCompactionState | undefined {
+  return postToolCompactionState.get(getPostToolCompactionStateKey(agentId, requestId));
+}
+
+function setPostToolCompactionState(agentId: RoomAgentId, requestId: string, state: PostToolCompactionState): void {
+  postToolCompactionState.set(getPostToolCompactionStateKey(agentId, requestId), state);
+}
+
+function createPostToolCompactionState(args: {
+  sourceVisibleMessageSignatures: string[];
+  compactedVisibleMessageSignatures?: string[];
+}): PostToolCompactionState {
+  return {
+    sourceVisibleMessageSignatures: args.sourceVisibleMessageSignatures,
+    ...(args.compactedVisibleMessageSignatures
+      ? { compactedVisibleMessageSignatures: args.compactedVisibleMessageSignatures }
+      : {}),
+  };
+}
+
+function resolvePostToolSyncedPrefixLength(
+  candidateVisibleMessageSignatures: string[],
+  state: PostToolCompactionState | undefined,
+): number | null {
+  if (!state) {
+    return null;
+  }
+
+  const prefixes = [
+    state.sourceVisibleMessageSignatures,
+    state.compactedVisibleMessageSignatures,
+  ]
+    .filter((prefix): prefix is string[] => Array.isArray(prefix) && prefix.length > 0)
+    .sort((left, right) => right.length - left.length);
+
+  for (const prefix of prefixes) {
+    if (startsWithSnapshotSignatures(candidateVisibleMessageSignatures, prefix)) {
+      return prefix.length;
+    }
+  }
+
+  return null;
+}
+
 function buildPromptHistoryFromSnapshots(historyDelta: AssistantHistoryMessage[]): Array<{ role: "user" | "assistant"; attachments?: MessageImageAttachment[] }> {
   return historyDelta.flatMap((message) => (message.role === "toolResult" ? [] : [{ role: message.role, attachments: [] }]));
 }
@@ -825,6 +997,24 @@ export async function finalizePersistedAgentRuntime(args: {
   });
 }
 
+export async function clearPostToolCompactionRunState(args: {
+  agentId: RoomAgentId;
+  requestId?: string;
+}): Promise<void> {
+  if (args.requestId) {
+    postToolCompactionState.delete(getPostToolCompactionStateKey(args.agentId, args.requestId));
+    await clearAgentPostToolConversation(args.agentId, args.requestId).catch(() => undefined);
+    return;
+  }
+
+  const keys = [...postToolCompactionState.keys()].filter((key) => key.startsWith(`${args.agentId}:`));
+  for (const key of keys) {
+    postToolCompactionState.delete(key);
+    const requestId = key.slice(`${args.agentId}:`.length);
+    await clearAgentPostToolConversation(args.agentId, requestId).catch(() => undefined);
+  }
+}
+
 export async function compactPersistedAgentRuntime(args: {
   agentId: RoomAgentId;
   reason: "post_turn" | "manual";
@@ -976,12 +1166,16 @@ export async function compactPersistedAgentRuntime(args: {
 
 export async function compactPromptHistoryAfterToolBatch(args: {
   agentId: RoomAgentId;
+  requestId: string;
   historyDelta: AssistantHistoryMessage[];
   resolvedModel: string;
   signal?: AbortSignal;
+  onTimingPhase?: (phase: string, details?: Record<string, unknown>) => void;
 }): Promise<PromptCompactionTransformResult> {
+  const startedAt = performance.now();
   const charsBefore = estimateSnapshotHistoryChars(args.historyDelta);
   const contextTokens = estimateSnapshotHistoryContextTokens(args.historyDelta);
+  const visibleMessageSignatures = buildPostToolSnapshotSignatures(args.historyDelta);
   const { thresholdTokens, freshTailCount, modelSelection } = await resolveAgentCompactionSettingsSelection(
     args.agentId,
     args.resolvedModel,
@@ -992,13 +1186,84 @@ export async function compactPromptHistoryAfterToolBatch(args: {
     contextTokens,
     history: buildPromptHistoryFromSnapshots(args.historyDelta),
   });
+  const visibleMessageCountAfterCompaction = 1 + Math.max(0, args.historyDelta.length - keptStartIndex);
+  const syncTransientPostToolConversation = async (): Promise<number> => {
+    const existingState = getPostToolCompactionState(args.agentId, args.requestId);
+    const syncedPrefixLength = resolvePostToolSyncedPrefixLength(visibleMessageSignatures, existingState);
+    const conversationMessages = args.historyDelta
+      .map((message) => snapshotToPersistedVisibleMessage(message))
+      .filter((message): message is PersistedVisibleMessage => Boolean(message))
+      .map((message) => ({
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+      }));
+
+    if (syncedPrefixLength == null) {
+      return replaceAgentPostToolLcmMessages({
+        agentId: args.agentId,
+        requestId: args.requestId,
+        messages: conversationMessages,
+      });
+    }
+
+    const appendedMessages = args.historyDelta
+      .slice(syncedPrefixLength)
+      .map((message) => snapshotToPersistedVisibleMessage(message))
+      .filter((message): message is PersistedVisibleMessage => Boolean(message))
+      .map((message) => ({
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+      }));
+
+    const appendedConversationId = await appendAgentPostToolLcmMessages({
+      agentId: args.agentId,
+      requestId: args.requestId,
+      messages: appendedMessages,
+    });
+
+    if (appendedConversationId != null) {
+      return appendedConversationId;
+    }
+
+    return replaceAgentPostToolLcmMessages({
+      agentId: args.agentId,
+      requestId: args.requestId,
+      messages: conversationMessages,
+    });
+  };
+
+  args.onTimingPhase?.("post_tool_compaction_enter", {
+    historyDeltaCount: args.historyDelta.length,
+    contextTokens,
+    keptStartIndex,
+    signalAborted: args.signal?.aborted ?? false,
+    signalReason: describeAbortSignalReason(args.signal),
+  });
+  await syncTransientPostToolConversation();
+  const storedContextTokensBefore = await getAgentPostToolStoredContextTokenCount(args.agentId, args.requestId).catch(() => null);
+  const resolvedStoredContextTokensBefore =
+    typeof storedContextTokensBefore === "number" && Number.isFinite(storedContextTokensBefore)
+      ? Math.max(0, Math.round(storedContextTokensBefore))
+      : promptTokenEstimate.contextTokens;
+  const comparisonExtraTokens = promptTokenEstimate.totalTokens - resolvedStoredContextTokensBefore;
   const baseDetails = createCompactionBaseDetails({
     thresholdTokens,
-    storedContextTokens: promptTokenEstimate.contextTokens,
+    storedContextTokens: resolvedStoredContextTokensBefore,
     promptTokenEstimate,
   });
 
   if (promptTokenEstimate.totalTokens <= thresholdTokens) {
+    setPostToolCompactionState(args.agentId, args.requestId, createPostToolCompactionState({
+      sourceVisibleMessageSignatures: visibleMessageSignatures,
+    }));
+    args.onTimingPhase?.("post_tool_compaction_skipped_below_threshold", {
+      elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+      thresholdTokens,
+      totalEstimatedTokens: promptTokenEstimate.totalTokens,
+      storedContextTokensBefore: resolvedStoredContextTokensBefore,
+    });
     const record = createSkippedCompactionRecord({
       reason: "post_tool",
       result: "below_threshold",
@@ -1009,9 +1274,9 @@ export async function compactPromptHistoryAfterToolBatch(args: {
       charsBefore,
       charsAfter: charsBefore,
       baseDetails,
-      tokensAfter: promptTokenEstimate.contextTokens,
+      tokensAfter: resolvedStoredContextTokensBefore,
       contextTokensAfter: promptTokenEstimate.contextTokens,
-      storedContextTokensAfter: promptTokenEstimate.contextTokens,
+      storedContextTokensAfter: resolvedStoredContextTokensBefore,
       totalEstimatedTokensAfter: promptTokenEstimate.totalTokens,
       includePromptOverhead: true,
     });
@@ -1020,6 +1285,15 @@ export async function compactPromptHistoryAfterToolBatch(args: {
   }
 
   if (keptStartIndex <= 0 || keptStartIndex >= args.historyDelta.length) {
+    setPostToolCompactionState(args.agentId, args.requestId, createPostToolCompactionState({
+      sourceVisibleMessageSignatures: visibleMessageSignatures,
+    }));
+    args.onTimingPhase?.("post_tool_compaction_skipped_no_prefix", {
+      elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+      keptStartIndex,
+      historyDeltaCount: args.historyDelta.length,
+      totalEstimatedTokens: promptTokenEstimate.totalTokens,
+    });
     const record = createSkippedCompactionRecord({
       reason: "post_tool",
       result: "no_eligible_post_tool_prefix",
@@ -1030,9 +1304,9 @@ export async function compactPromptHistoryAfterToolBatch(args: {
       charsBefore,
       charsAfter: charsBefore,
       baseDetails,
-      tokensAfter: promptTokenEstimate.contextTokens,
+      tokensAfter: resolvedStoredContextTokensBefore,
       contextTokensAfter: promptTokenEstimate.contextTokens,
-      storedContextTokensAfter: promptTokenEstimate.contextTokens,
+      storedContextTokensAfter: resolvedStoredContextTokensBefore,
       totalEstimatedTokensAfter: promptTokenEstimate.totalTokens,
       includePromptOverhead: false,
     });
@@ -1046,6 +1320,15 @@ export async function compactPromptHistoryAfterToolBatch(args: {
     .map((message) => snapshotToPersistedVisibleMessage(message))
     .filter((message): message is PersistedVisibleMessage => Boolean(message));
   if (compactionMessages.length === 0) {
+    setPostToolCompactionState(args.agentId, args.requestId, createPostToolCompactionState({
+      sourceVisibleMessageSignatures: visibleMessageSignatures,
+    }));
+    args.onTimingPhase?.("post_tool_compaction_skipped_empty_prefix", {
+      elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+      keptStartIndex,
+      historyDeltaCount: args.historyDelta.length,
+      totalEstimatedTokens: promptTokenEstimate.totalTokens,
+    });
     const record = createSkippedCompactionRecord({
       reason: "post_tool",
       result: "no_eligible_post_tool_prefix",
@@ -1056,9 +1339,9 @@ export async function compactPromptHistoryAfterToolBatch(args: {
       charsBefore,
       charsAfter: charsBefore,
       baseDetails,
-      tokensAfter: promptTokenEstimate.contextTokens,
+      tokensAfter: resolvedStoredContextTokensBefore,
       contextTokensAfter: promptTokenEstimate.contextTokens,
-      storedContextTokensAfter: promptTokenEstimate.contextTokens,
+      storedContextTokensAfter: resolvedStoredContextTokensBefore,
       totalEstimatedTokensAfter: promptTokenEstimate.totalTokens,
       includePromptOverhead: false,
     });
@@ -1067,13 +1350,22 @@ export async function compactPromptHistoryAfterToolBatch(args: {
   }
 
   try {
-    const scratchCompaction = await compactScratchAgentLcmMessages({
+    const lcmStartedAt = performance.now();
+    args.onTimingPhase?.("post_tool_compaction_lcm_start", {
+      elapsedMs: Math.round((lcmStartedAt - startedAt) * 10) / 10,
+      thresholdTokens,
+      totalEstimatedTokens: promptTokenEstimate.totalTokens,
+      storedContextTokensBefore: resolvedStoredContextTokensBefore,
+      freshTailCount: args.historyDelta.length - keptStartIndex,
+      signalAborted: args.signal?.aborted ?? false,
+      signalReason: describeAbortSignalReason(args.signal),
+    });
+    const lcmCompaction = await compactAgentPostToolLcmContext({
       agentId: args.agentId,
-      messages: compactionMessages.map((message) => ({
-        role: message.role,
-        content: message.content,
-        createdAt: message.createdAt,
-      })),
+      requestId: args.requestId,
+      tokenThreshold: thresholdTokens,
+      freshTailCount: args.historyDelta.length - keptStartIndex,
+      comparisonExtraTokens,
       summaryModelSelection: {
         resolvedModel: modelSelection.resolvedModel,
         settings: modelSelection.settings,
@@ -1081,7 +1373,33 @@ export async function compactPromptHistoryAfterToolBatch(args: {
       },
       signal: args.signal,
     });
-    if (!scratchCompaction?.summaryText.trim() && args.signal?.aborted) {
+    const storedContextTokensAfter = await getAgentPostToolStoredContextTokenCount(args.agentId, args.requestId).catch(() => null);
+    const resolvedStoredContextTokensAfter =
+      typeof storedContextTokensAfter === "number" && Number.isFinite(storedContextTokensAfter)
+        ? Math.max(0, Math.round(storedContextTokensAfter))
+        : resolvedStoredContextTokensBefore;
+    args.onTimingPhase?.("post_tool_compaction_lcm_end", {
+      elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+      lcmElapsedMs: Math.round((performance.now() - lcmStartedAt) * 10) / 10,
+      actionTaken: lcmCompaction?.actionTaken ?? false,
+      skipReason: lcmCompaction?.skipReason ?? null,
+      createdSummaryId: lcmCompaction?.createdSummaryId ?? null,
+      storedContextTokensAfter: resolvedStoredContextTokensAfter,
+      signalAborted: args.signal?.aborted ?? false,
+      signalReason: describeAbortSignalReason(args.signal),
+    });
+    if (args.signal?.aborted && !(isPostToolCompactionTimeoutAbort(args.signal) && lcmCompaction?.actionTaken && lcmCompaction.createdSummaryId)) {
+      await clearPostToolCompactionRunState({
+        agentId: args.agentId,
+        requestId: args.requestId,
+      });
+      args.onTimingPhase?.("post_tool_compaction_aborted", {
+        elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+        storedContextTokensAfter: resolvedStoredContextTokensAfter,
+        signalReason: describeAbortSignalReason(args.signal),
+        actionTaken: lcmCompaction?.actionTaken ?? false,
+        createdSummaryId: lcmCompaction?.createdSummaryId ?? null,
+      });
       const record = createSkippedCompactionRecord({
         reason: "post_tool",
         result: "aborted",
@@ -1092,19 +1410,58 @@ export async function compactPromptHistoryAfterToolBatch(args: {
         charsBefore,
         charsAfter: charsBefore,
         baseDetails,
-        tokensAfter: promptTokenEstimate.contextTokens,
+        tokensAfter: resolvedStoredContextTokensAfter,
         contextTokensAfter: promptTokenEstimate.contextTokens,
-        storedContextTokensAfter: promptTokenEstimate.contextTokens,
+        storedContextTokensAfter: resolvedStoredContextTokensAfter,
         totalEstimatedTokensAfter: promptTokenEstimate.totalTokens,
         includePromptOverhead: true,
       });
       await appendCompactionRecord(args.agentId, record);
       return { compacted: false, record };
     }
-    if (!scratchCompaction?.summaryText.trim()) {
-      throw new Error("Scratch LCM post-tool compaction did not produce a summary.");
+    if (!lcmCompaction?.actionTaken || !lcmCompaction.createdSummaryId) {
+      setPostToolCompactionState(args.agentId, args.requestId, createPostToolCompactionState({
+        sourceVisibleMessageSignatures: visibleMessageSignatures,
+      }));
+      const promptTokenEstimateAfter = await estimateAgentPromptTokens({
+        agentId: args.agentId,
+        contextTokens: estimateSnapshotHistoryContextTokens(args.historyDelta),
+        history: buildPromptHistoryFromSnapshots(args.historyDelta),
+      }).catch(() => null);
+      const result = (lcmCompaction?.skipReason ?? "no_eligible_leaf_chunk") as CompactionRecordDetails["result"];
+      args.onTimingPhase?.("post_tool_compaction_skipped_after_lcm", {
+        elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+        result,
+        storedContextTokensAfter: lcmCompaction?.tokensAfter ?? resolvedStoredContextTokensAfter,
+      });
+      const record = createSkippedCompactionRecord({
+        reason: "post_tool",
+        result,
+        summaryPrefix: "tool 批次后压缩检查结果",
+        thresholdTokens,
+        promptTokenEstimate,
+        keptMessages: args.historyDelta.length,
+        charsBefore,
+        charsAfter: charsBefore,
+        baseDetails,
+        tokensAfter: lcmCompaction?.tokensAfter ?? resolvedStoredContextTokensAfter,
+        contextTokensAfter: promptTokenEstimateAfter?.contextTokens ?? promptTokenEstimate.contextTokens,
+        storedContextTokensAfter: lcmCompaction?.tokensAfter ?? resolvedStoredContextTokensAfter,
+        totalEstimatedTokensAfter: promptTokenEstimateAfter?.totalTokens ?? promptTokenEstimate.totalTokens,
+        includePromptOverhead: true,
+      });
+      await appendCompactionRecord(args.agentId, record);
+      return { compacted: false, record };
     }
-    const summaryText = scratchCompaction.summaryText;
+
+    const describedSummary = await getAgentPostToolLcmConversation(args.agentId, args.requestId)
+      .then(({ retrieval }) => retrieval.describe(lcmCompaction.createdSummaryId!))
+      .catch(() => null);
+    const summaryText = describedSummary?.summary?.content?.trim();
+    if (!summaryText) {
+      throw new Error("Incremental LCM post-tool compaction did not produce a summary.");
+    }
+
     const method = detectCompactionMethod(summaryText);
     const compactedSnapshots: AssistantHistoryMessage[] = [
       {
@@ -1133,23 +1490,37 @@ export async function compactPromptHistoryAfterToolBatch(args: {
       contextTokens: contextTokensAfter,
       history: buildPromptHistoryFromSnapshots(compactedSnapshots),
     }).catch(() => null);
+    setPostToolCompactionState(args.agentId, args.requestId, createPostToolCompactionState({
+      sourceVisibleMessageSignatures: visibleMessageSignatures,
+      compactedVisibleMessageSignatures: [
+        buildSyntheticPostToolSummarySnapshotSignature(summaryText),
+        ...buildPostToolSnapshotSignatures(keptSnapshots),
+      ],
+    }));
+    args.onTimingPhase?.("post_tool_compaction_compacted", {
+      elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+      prunedMessages: prunedSnapshots.length,
+      keptMessages: visibleMessageCountAfterCompaction,
+      storedContextTokensAfter: resolvedStoredContextTokensAfter,
+      createdSummaryId: lcmCompaction.createdSummaryId,
+    });
     const record = createCompactionRecord({
       reason: "post_tool",
       success: true,
       actionTaken: true,
       method,
-      createdSummaryId: scratchCompaction.summaryId,
+      createdSummaryId: lcmCompaction.createdSummaryId,
       summary: summaryText,
       prunedMessages: prunedSnapshots.length,
-      keptMessages: compactedSnapshots.length,
+      keptMessages: visibleMessageCountAfterCompaction,
       charsBefore,
       charsAfter,
       details: withCompactionOutcomeDetails({
         baseDetails,
         result: "compacted",
-        tokensAfter: scratchCompaction.tokensAfter,
+        tokensAfter: lcmCompaction.tokensAfter,
         contextTokensAfter,
-        storedContextTokensAfter: scratchCompaction.tokensAfter,
+        storedContextTokensAfter: resolvedStoredContextTokensAfter,
         totalEstimatedTokensAfter: promptTokenEstimateAfter?.totalTokens ?? contextTokensAfter,
       }),
     });
@@ -1161,6 +1532,16 @@ export async function compactPromptHistoryAfterToolBatch(args: {
       record,
     };
   } catch (error) {
+    await clearPostToolCompactionRunState({
+      agentId: args.agentId,
+      requestId: args.requestId,
+    });
+    args.onTimingPhase?.("post_tool_compaction_failed", {
+      elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+      error: error instanceof Error ? error.message : String(error),
+      signalAborted: args.signal?.aborted ?? false,
+      signalReason: describeAbortSignalReason(args.signal),
+    });
     const record = createFailedCompactionRecord({
       reason: "post_tool",
       keptMessages: args.historyDelta.length,
@@ -1177,5 +1558,6 @@ export async function compactPromptHistoryAfterToolBatch(args: {
 export async function resetPersistedAgentRuntime(agentId: RoomAgentId): Promise<void> {
   await rm(getRuntimeFilePath(agentId), { force: true });
   await clearAgentLcmConversation(agentId).catch(() => undefined);
+  await clearPostToolCompactionRunState({ agentId }).catch(() => undefined);
   await clearAgentMemory(agentId);
 }

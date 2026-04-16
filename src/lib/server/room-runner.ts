@@ -777,11 +777,24 @@ export async function runPreparedRoomTurn(
             return null;
           }
 
+          tailTrace.mark("post_tool_compaction_requested", {
+            historyDeltaCount: historyDelta.length,
+            resolvedModel,
+            signalAborted: signal?.aborted ?? false,
+          });
           const compaction = await compactPromptHistoryAfterToolBatch({
             agentId: args.agent.id,
+            requestId: runContext.requestId,
             historyDelta,
             resolvedModel,
             signal,
+            onTimingPhase: (phase, details) => tailTrace.mark(phase, details),
+          });
+          tailTrace.mark("post_tool_compaction_resolved", {
+            compacted: compaction.compacted,
+            hasSummaryText: Boolean(compaction.summaryText?.trim()),
+            keptStartIndex: typeof compaction.keptStartIndex === "number" ? compaction.keptStartIndex : null,
+            recordResult: compaction.record?.details?.result ?? null,
           });
           if (!compaction.compacted || !compaction.summaryText || typeof compaction.keptStartIndex !== "number") {
             return null;

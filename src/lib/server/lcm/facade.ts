@@ -15,6 +15,14 @@ export function getAgentSessionId(agentId: RoomAgentId): string {
   return `agent:${agentId}`;
 }
 
+export function getAgentPostToolSessionId(agentId: RoomAgentId, requestId: string): string {
+  return `${getAgentSessionId(agentId)}:post_tool:${requestId}`;
+}
+
+export function getAgentPostToolSessionKey(agentId: RoomAgentId, requestId: string): string {
+  return `${agentId}:post_tool:${requestId}`;
+}
+
 const LARGE_TEXT_THRESHOLD = 12_000;
 
 export async function getLcmStores(
@@ -360,6 +368,145 @@ export async function compactScratchAgentLcmMessages(args: {
     summaryText,
     tokensAfter: result.tokensAfter,
   };
+}
+
+async function getOrCreateAgentPostToolConversation(agentId: RoomAgentId, requestId: string) {
+  const { conversationStore } = await getLcmStores();
+  return conversationStore.getOrCreateConversation(
+    getAgentPostToolSessionId(agentId, requestId),
+    {
+      sessionKey: getAgentPostToolSessionKey(agentId, requestId),
+      title: `Agent ${agentId} post tool incremental compaction`,
+    },
+  );
+}
+
+export async function replaceAgentPostToolLcmMessages(args: {
+  agentId: RoomAgentId;
+  requestId: string;
+  messages: Array<{
+    role: "user" | "assistant";
+    content: string;
+    createdAt?: string;
+  }>;
+}): Promise<number> {
+  const normalizedMessages = args.messages
+    .map((message) => ({
+      ...message,
+      content: message.content.trim(),
+    }))
+    .filter((message) => message.content.length > 0);
+
+  const { conversationStore, summaryStore } = await getLcmStores();
+  await conversationStore.deleteConversationBySessionKey(getAgentPostToolSessionKey(args.agentId, args.requestId));
+  const conversation = await getOrCreateAgentPostToolConversation(args.agentId, args.requestId);
+  if (normalizedMessages.length === 0) {
+    return conversation.conversationId;
+  }
+
+  const createdMessages = await conversationStore.createMessagesBulk(
+    normalizedMessages.map((message, index) => ({
+      conversationId: conversation.conversationId,
+      seq: index + 1,
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+    })),
+  );
+  await summaryStore.appendContextMessages(
+    conversation.conversationId,
+    createdMessages.map((message) => message.messageId),
+  );
+  await conversationStore.markConversationBootstrapped(conversation.conversationId);
+  return conversation.conversationId;
+}
+
+export async function appendAgentPostToolLcmMessages(args: {
+  agentId: RoomAgentId;
+  requestId: string;
+  messages: Array<{
+    role: "user" | "assistant";
+    content: string;
+    createdAt?: string;
+  }>;
+}): Promise<number | null> {
+  const normalizedMessages = args.messages
+    .map((message) => ({
+      ...message,
+      content: message.content.trim(),
+    }))
+    .filter((message) => message.content.length > 0);
+
+  const { conversationStore, summaryStore } = await getLcmStores();
+  const conversation = await conversationStore.getConversationBySessionKey(getAgentPostToolSessionKey(args.agentId, args.requestId));
+  if (!conversation) {
+    return null;
+  }
+  if (normalizedMessages.length === 0) {
+    return conversation.conversationId;
+  }
+
+  const nextSeq = (await conversationStore.getMaxSeq(conversation.conversationId)) + 1;
+  const createdMessages = await conversationStore.createMessagesBulk(
+    normalizedMessages.map((message, index) => ({
+      conversationId: conversation.conversationId,
+      seq: nextSeq + index,
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+    })),
+  );
+  await summaryStore.appendContextMessages(
+    conversation.conversationId,
+    createdMessages.map((message) => message.messageId),
+  );
+  await conversationStore.markConversationBootstrapped(conversation.conversationId);
+  return conversation.conversationId;
+}
+
+export async function compactAgentPostToolLcmContext(args: {
+  agentId: RoomAgentId;
+  requestId: string;
+  tokenThreshold: number;
+  summaryModelSelection?: CompactionModelSelection;
+  comparisonExtraTokens?: number;
+  freshTailCount?: number;
+  signal?: AbortSignal;
+}) {
+  const { conversationStore, compaction } = await getLcmStores(args.tokenThreshold, args.freshTailCount);
+  const conversation = await conversationStore.getConversationBySessionKey(getAgentPostToolSessionKey(args.agentId, args.requestId));
+  if (!conversation) {
+    return null;
+  }
+  return compaction.compact({
+    conversationId: conversation.conversationId,
+    tokenBudget: args.tokenThreshold,
+    force: true,
+    hardTrigger: true,
+    summaryModelSelection: args.summaryModelSelection,
+    ...(typeof args.comparisonExtraTokens === "number" ? { comparisonExtraTokens: args.comparisonExtraTokens } : {}),
+    signal: args.signal,
+  });
+}
+
+export async function getAgentPostToolLcmConversation(agentId: RoomAgentId, requestId: string) {
+  const { conversationStore, retrieval } = await getLcmStores();
+  const conversation = await conversationStore.getConversationBySessionKey(getAgentPostToolSessionKey(agentId, requestId));
+  return { conversation, retrieval };
+}
+
+export async function getAgentPostToolStoredContextTokenCount(agentId: RoomAgentId, requestId: string): Promise<number | null> {
+  const { conversationStore, summaryStore } = await getLcmStores();
+  const conversation = await conversationStore.getConversationBySessionKey(getAgentPostToolSessionKey(agentId, requestId));
+  if (!conversation) {
+    return null;
+  }
+  return summaryStore.getContextTokenCount(conversation.conversationId);
+}
+
+export async function clearAgentPostToolConversation(agentId: RoomAgentId, requestId: string): Promise<void> {
+  const { conversationStore } = await getLcmStores();
+  await conversationStore.deleteConversationBySessionKey(getAgentPostToolSessionKey(agentId, requestId));
 }
 
 export async function getAgentLcmStoredContextTokenCount(agentId: RoomAgentId): Promise<number | null> {

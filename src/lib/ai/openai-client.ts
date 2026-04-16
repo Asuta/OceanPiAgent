@@ -12,6 +12,11 @@ import {
   createPostToolStallAbortController,
   createToolCallStallAbortController,
 } from "@/lib/ai/post-tool-stall";
+import {
+  applyPostToolCompactedContextState,
+  createPostToolCompactedContextState,
+  type PostToolCompactedContextState,
+} from "@/lib/ai/post-tool-context-cache";
 import { extractRoomMessagePreviewFromToolCallBlock } from "@/lib/ai/room-message-preview";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { resolvePiModel } from "@/lib/ai/pi-model-resolver";
@@ -100,6 +105,8 @@ interface PostToolBatchCompactionResult {
   keptStartIndex: number;
 }
 
+const POST_TOOL_COMPACTION_TIMEOUT_SALVAGE_GRACE_MS = 2_000;
+
 interface ConversationOptions {
   toolScope?: ToolScope;
   systemPromptOverride?: string;
@@ -146,6 +153,27 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 
   throw signal.reason instanceof Error ? signal.reason : new Error("The request was aborted.");
+}
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const handleAbort = () => {
+      signal.removeEventListener("abort", handleAbort);
+      resolve();
+    };
+
+    signal.addEventListener("abort", handleAbort, { once: true });
+  });
+}
+
+function waitForDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function createUsage() {
@@ -430,6 +458,15 @@ function restoreHistoryDelta(historyDelta: AssistantHistoryMessage[] | undefined
     const message = restoreHistoryMessage(snapshot);
     return message ? [message] : [];
   });
+}
+
+function createHistorySnapshotSignature(snapshot: AssistantHistoryMessage): string {
+  return createHash("sha1").update(JSON.stringify(snapshot)).digest("hex");
+}
+
+function buildHistoryMessageSignatures(messages: Message[]): string[] {
+  const historyDelta = snapshotHistoryDelta(messages);
+  return historyDelta?.map((snapshot) => createHistorySnapshotSignature(snapshot)) ?? [];
 }
 
 function toAssistantUsageSnapshot(usage: Usage | undefined): AssistantUsageSnapshot | undefined {
@@ -729,6 +766,7 @@ async function runConversationAttempt(args: {
       }
     : args.resolvedModel.model;
   let pendingPostToolBatchCompaction = false;
+  let postToolCompactedContextState: PostToolCompactedContextState<Message> | null = null;
   const postToolStallAbort = createPostToolStallAbortController({
     abort: () => agent.abort(),
   });
@@ -756,6 +794,25 @@ async function runConversationAttempt(args: {
         systemPrompt: args.systemPromptText,
       }),
     transformContext: async (messages: Message[], signal?: AbortSignal) => {
+      const rawMessageSignatures = buildHistoryMessageSignatures(messages);
+      const {
+        effectiveMessages: cachedEffectiveMessages,
+        cacheApplied,
+      } = applyPostToolCompactedContextState({
+        messages,
+        state: postToolCompactedContextState,
+        rawMessageSignatures,
+      });
+      if (!cacheApplied) {
+        postToolCompactedContextState = null;
+      }
+      const rememberCurrentEffectiveMessages = (effectiveMessages: Message[]) => {
+        postToolCompactedContextState = createPostToolCompactedContextState({
+          rawMessages: messages,
+          effectiveMessages,
+          rawMessageSignatures,
+        });
+      };
       const postToolBatchCompaction = args.resolvedOptions.postToolBatchCompaction;
       if (!shouldApplyPostToolBatchCompaction({
         pendingPostToolBatchCompaction,
@@ -765,16 +822,25 @@ async function runConversationAttempt(args: {
         if (finalRoomDeliveryShortCircuitArmed) {
           pendingPostToolBatchCompaction = false;
         }
-        return messages;
+        if (cacheApplied) {
+          rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+        }
+        return cachedEffectiveMessages;
       }
       if (!postToolBatchCompaction) {
-        return messages;
+        if (cacheApplied) {
+          rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+        }
+        return cachedEffectiveMessages;
       }
 
       pendingPostToolBatchCompaction = false;
-      const historyDelta = snapshotHistoryDelta(messages);
+      const historyDelta = snapshotHistoryDelta(cachedEffectiveMessages);
       if (!historyDelta?.length) {
-        return messages;
+        if (cacheApplied) {
+          rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+        }
+        return cachedEffectiveMessages;
       }
 
       // Post-tool compaction can consume most of the stall budget on its own, so
@@ -784,34 +850,103 @@ async function runConversationAttempt(args: {
       let shouldResumePostToolStallAbort = true;
       const postToolCompactionTimeout = createPostToolCompactionTimeoutController({ signal });
       try {
-        const compaction = await postToolBatchCompaction({
+        const compactionPromise = postToolBatchCompaction({
           historyDelta,
           resolvedModel: args.resolvedModel.resolvedModelRef,
           signal: postToolCompactionTimeout.signal,
-        });
+        }).then(
+          (value) => ({ kind: "resolved" as const, value }),
+          (error) => ({ kind: "rejected" as const, error }),
+        );
+        const compactionOutcome = await Promise.race([
+          compactionPromise,
+          waitForAbort(postToolCompactionTimeout.signal).then(() => ({ kind: "aborted" as const })),
+        ]);
+        if (compactionOutcome.kind === "aborted" && postToolCompactionTimeout.timedOut()) {
+          const lateCompactionOutcome = await Promise.race([
+            compactionPromise,
+            waitForDelay(POST_TOOL_COMPACTION_TIMEOUT_SALVAGE_GRACE_MS).then(() => null),
+          ]);
+          if (lateCompactionOutcome?.kind === "resolved") {
+            if (!lateCompactionOutcome.value || !lateCompactionOutcome.value.summaryText.trim()) {
+              if (cacheApplied) {
+                rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+              }
+              return cachedEffectiveMessages;
+            }
+            const keptStartIndex = Math.max(0, Math.min(cachedEffectiveMessages.length, lateCompactionOutcome.value.keptStartIndex));
+            if (keptStartIndex <= 0 || keptStartIndex >= cachedEffectiveMessages.length) {
+              if (cacheApplied) {
+                rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+              }
+              return cachedEffectiveMessages;
+            }
+
+            const transformedMessages = [
+              createSyntheticSummaryMessage({
+                summaryText: lateCompactionOutcome.value.summaryText,
+                resolvedModel: args.resolvedModel,
+                timestamp: cachedEffectiveMessages[keptStartIndex - 1]?.timestamp ?? Date.now(),
+              }),
+              ...cachedEffectiveMessages.slice(keptStartIndex),
+            ];
+            rememberCurrentEffectiveMessages(transformedMessages);
+            return transformedMessages;
+          }
+          if (cacheApplied) {
+            rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+          }
+          return cachedEffectiveMessages;
+        }
         if (postToolCompactionTimeout.timedOut()) {
-          return messages;
+          if (cacheApplied) {
+            rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+          }
+          return cachedEffectiveMessages;
         }
+        if (compactionOutcome.kind === "aborted") {
+          if (cacheApplied) {
+            rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+          }
+          return cachedEffectiveMessages;
+        }
+        if (compactionOutcome.kind === "rejected") {
+          shouldResumePostToolStallAbort = false;
+          throw compactionOutcome.error;
+        }
+
+        const compaction = compactionOutcome.value;
         if (!compaction || !compaction.summaryText.trim()) {
-          return messages;
+          if (cacheApplied) {
+            rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+          }
+          return cachedEffectiveMessages;
         }
 
-        const keptStartIndex = Math.max(0, Math.min(messages.length, compaction.keptStartIndex));
-        if (keptStartIndex <= 0 || keptStartIndex >= messages.length) {
-          return messages;
+        const keptStartIndex = Math.max(0, Math.min(cachedEffectiveMessages.length, compaction.keptStartIndex));
+        if (keptStartIndex <= 0 || keptStartIndex >= cachedEffectiveMessages.length) {
+          if (cacheApplied) {
+            rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+          }
+          return cachedEffectiveMessages;
         }
 
-        return [
+        const transformedMessages = [
           createSyntheticSummaryMessage({
             summaryText: compaction.summaryText,
             resolvedModel: args.resolvedModel,
-            timestamp: messages[keptStartIndex - 1]?.timestamp ?? Date.now(),
+            timestamp: cachedEffectiveMessages[keptStartIndex - 1]?.timestamp ?? Date.now(),
           }),
-          ...messages.slice(keptStartIndex),
+          ...cachedEffectiveMessages.slice(keptStartIndex),
         ];
+        rememberCurrentEffectiveMessages(transformedMessages);
+        return transformedMessages;
       } catch (error) {
         if (postToolCompactionTimeout.timedOut()) {
-          return messages;
+          if (cacheApplied) {
+            rememberCurrentEffectiveMessages(cachedEffectiveMessages);
+          }
+          return cachedEffectiveMessages;
         }
         shouldResumePostToolStallAbort = false;
         throw error;

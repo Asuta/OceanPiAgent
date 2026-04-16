@@ -1,5 +1,6 @@
 import { assembleAgentLcmContext, ingestCompletedRun, ingestContinuationSnapshot, ingestIncomingRoomEnvelope } from "./lcm/facade";
 import {
+  clearPostToolCompactionRunState,
   compactPersistedAgentRuntime,
   finalizePersistedAgentRuntime,
   loadPersistedAgentRuntime,
@@ -553,6 +554,10 @@ async function appendContinuationSnapshotToSession(args: {
     roomActions: args.previousRun.roomActions,
     createdAt: createTimestamp(),
   }).catch(() => undefined);
+  await clearPostToolCompactionRunState({
+    agentId: args.agentId,
+    requestId: args.previousRun.requestId,
+  }).catch(() => undefined);
 }
 
 function createIncomingRoomMessage(args: {
@@ -660,45 +665,52 @@ async function finalizeCompletedAgentRun(args: {
   meta?: AssistantMessageMeta;
   onTimingPhase?: (phase: string, details?: Record<string, unknown>) => void;
 }): Promise<void> {
-  args.onTimingPhase?.("complete_run_finalize_runtime_start");
-  await finalizePersistedAgentRuntime({
-    agentId: args.agentId,
-    assistantMessage: args.assistantMessage,
-    resolvedModel: args.resolvedModel,
-    compatibility: args.compatibility,
-    onTimingPhase: args.onTimingPhase,
-  });
-  args.onTimingPhase?.("complete_run_finalize_runtime_end");
-
-  args.onTimingPhase?.("complete_run_ingest_completed_run_start");
-  await ingestCompletedRun({
-    agentId: args.agentId,
-    requestId: args.requestId,
-    assistantText: args.assistantText,
-    assistantHistoryEntry: args.assistantMessage.content,
-    roomId: args.run.roomId,
-    roomTitle: args.run.roomTitle,
-    userMessageId: args.run.userMessageId,
-    userSender: args.run.userSender,
-    userAttachments: args.run.userAttachments,
-    emittedMessages: args.run.emittedMessages,
-    roomActions: args.run.roomActions,
-    tools: args.run.toolEvents,
-    resolvedModel: args.resolvedModel,
-    compatibility: args.compatibility,
-    meta: args.meta,
-    createdAt: args.assistantMessage.createdAt,
-    onTimingPhase: args.onTimingPhase,
-  }).catch((error) => {
-    args.onTimingPhase?.("complete_run_ingest_completed_run_error", {
-      error: error instanceof Error ? error.message : "Unknown ingest error.",
+  try {
+    args.onTimingPhase?.("complete_run_finalize_runtime_start");
+    await finalizePersistedAgentRuntime({
+      agentId: args.agentId,
+      assistantMessage: args.assistantMessage,
+      resolvedModel: args.resolvedModel,
+      compatibility: args.compatibility,
+      onTimingPhase: args.onTimingPhase,
     });
-    return undefined;
-  });
-  args.onTimingPhase?.("complete_run_ingest_completed_run_end");
+    args.onTimingPhase?.("complete_run_finalize_runtime_end");
 
-  scheduleAutomaticAgentCompaction(args.agentId);
-  args.onTimingPhase?.("complete_run_schedule_automatic_compaction");
+    args.onTimingPhase?.("complete_run_ingest_completed_run_start");
+    await ingestCompletedRun({
+      agentId: args.agentId,
+      requestId: args.requestId,
+      assistantText: args.assistantText,
+      assistantHistoryEntry: args.assistantMessage.content,
+      roomId: args.run.roomId,
+      roomTitle: args.run.roomTitle,
+      userMessageId: args.run.userMessageId,
+      userSender: args.run.userSender,
+      userAttachments: args.run.userAttachments,
+      emittedMessages: args.run.emittedMessages,
+      roomActions: args.run.roomActions,
+      tools: args.run.toolEvents,
+      resolvedModel: args.resolvedModel,
+      compatibility: args.compatibility,
+      meta: args.meta,
+      createdAt: args.assistantMessage.createdAt,
+      onTimingPhase: args.onTimingPhase,
+    }).catch((error) => {
+      args.onTimingPhase?.("complete_run_ingest_completed_run_error", {
+        error: error instanceof Error ? error.message : "Unknown ingest error.",
+      });
+      return undefined;
+    });
+    args.onTimingPhase?.("complete_run_ingest_completed_run_end");
+
+    scheduleAutomaticAgentCompaction(args.agentId);
+    args.onTimingPhase?.("complete_run_schedule_automatic_compaction");
+  } finally {
+    await clearPostToolCompactionRunState({
+      agentId: args.agentId,
+      requestId: args.requestId,
+    }).catch(() => undefined);
+  }
 }
 
 export async function startAgentRoomRun(args: {
@@ -922,6 +934,7 @@ export function clearAgentRoomRun(agentId: RoomAgentId, requestId: string): void
 
   session.activeRun = undefined;
   session.updatedAt = createTimestamp();
+  void clearPostToolCompactionRunState({ agentId, requestId });
 }
 
 export async function discardAgentRoomRun(agentId: RoomAgentId, requestId: string): Promise<void> {
@@ -935,6 +948,7 @@ export async function discardAgentRoomRun(agentId: RoomAgentId, requestId: strin
   session.activeRun = undefined;
   session.skipNextLcmAssemble = true;
   session.updatedAt = createTimestamp();
+  await clearPostToolCompactionRunState({ agentId, requestId }).catch(() => undefined);
   await persistSession(agentId).catch(() => undefined);
 }
 
@@ -950,6 +964,7 @@ export function clearActiveAgentRoomRunForRoom(agentId: RoomAgentId, roomId: str
   session.activeRun = undefined;
   session.skipNextLcmAssemble = true;
   session.updatedAt = createTimestamp();
+  void clearPostToolCompactionRunState({ agentId, requestId: run.requestId });
 }
 
 export async function compactAgentRoomSession(agentId: RoomAgentId, reason: "post_turn" | "manual" = "manual") {
@@ -978,5 +993,6 @@ export async function resetAgentRoomSession(agentId: RoomAgentId): Promise<void>
   session.compatibility = null;
   session.updatedAt = createTimestamp();
   session.loaded = true;
+  await clearPostToolCompactionRunState({ agentId }).catch(() => undefined);
   await resetPersistedAgentRuntime(agentId);
 }

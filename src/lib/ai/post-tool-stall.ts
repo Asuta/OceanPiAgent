@@ -2,7 +2,7 @@ import type { ToolExecution } from "@/lib/chat/types";
 
 const DEFAULT_POST_TOOL_STALL_ABORT_MS = 20_000;
 const DEFAULT_TOOL_CALL_STALL_ABORT_MS = 20_000;
-const DEFAULT_POST_TOOL_COMPACTION_ABORT_MS = 20_000;
+const DEFAULT_POST_TOOL_COMPACTION_ABORT_MS = 60_000;
 
 export interface PostToolStallAbortController {
   arm: (toolEvent: ToolExecution) => void;
@@ -57,7 +57,13 @@ export function getPostToolCompactionAbortMs(): number {
     return parsed;
   }
 
-  return getPostToolStallAbortMs() || DEFAULT_POST_TOOL_COMPACTION_ABORT_MS;
+  const sharedRaw = process.env.OCEANKING_POST_TOOL_STALL_ABORT_MS?.trim();
+  const sharedParsed = sharedRaw ? Number(sharedRaw) : Number.NaN;
+  if (Number.isFinite(sharedParsed) && sharedParsed > 0) {
+    return sharedParsed;
+  }
+
+  return DEFAULT_POST_TOOL_COMPACTION_ABORT_MS;
 }
 
 export function createPostToolStallAbortController(args: {

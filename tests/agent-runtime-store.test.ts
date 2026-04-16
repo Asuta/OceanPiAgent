@@ -519,6 +519,7 @@ test("compactPromptHistoryAfterToolBatch compresses only the prefix before the l
 
     const result = await runtimeStore.compactPromptHistoryAfterToolBatch({
       agentId,
+      requestId: "req-post-tool-prefix",
       resolvedModel: "fake-provider/fake-model",
       historyDelta: [
         {
@@ -574,6 +575,285 @@ test("compactPromptHistoryAfterToolBatch compresses only the prefix before the l
   });
 });
 
+test("compactPromptHistoryAfterToolBatch reuses the same transient LCM conversation across repeated post-tool compactions", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    const requestId = "req-incremental-post-tool";
+    const lcmFacadeUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/lcm/facade.ts")).href;
+    const lcmFacade = await import(`${lcmFacadeUrl}?test=${Date.now()}-${Math.random()}`) as typeof import("../src/lib/server/lcm/facade");
+    let summaryRound = 0;
+
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionTokenThreshold: 1_000,
+      compactionFreshTailCount: 0,
+    });
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => {
+      summaryRound += 1;
+      return [
+        "## 关键结论",
+        `- 增量压缩轮次 ${summaryRound}。`,
+        "",
+        "## 待办事项",
+        "- 无",
+        "",
+        "## 约束与规则",
+        "- 无",
+        "",
+        "## 用户仍在等待的问题",
+        "- 无",
+        "",
+        "## 精确标识符",
+        `- req:${requestId}:${summaryRound}`,
+      ].join("\n");
+    });
+
+    const firstHistoryDelta = [
+      {
+        role: "user" as const,
+        content: "Earlier room request: " + "context ".repeat(220),
+        timestamp: 1,
+      },
+      {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: "Earlier answer: " + "details ".repeat(180) }],
+        api: "responses" as const,
+        provider: "openai",
+        model: "fake-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "stop" as const,
+        timestamp: 2,
+      },
+      {
+        role: "assistant" as const,
+        content: [{ type: "toolCall" as const, id: "tool-1", name: "web_fetch", arguments: { url: "https://example.com/1" } }],
+        api: "responses" as const,
+        provider: "openai",
+        model: "fake-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "toolUse" as const,
+        timestamp: 3,
+      },
+      {
+        role: "toolResult" as const,
+        toolCallId: "tool-1",
+        toolName: "web_fetch",
+        content: [{ type: "text" as const, text: "tool output " + "result ".repeat(140) }],
+        isError: false,
+        timestamp: 4,
+      },
+    ];
+
+    const firstResult = await runtimeStore.compactPromptHistoryAfterToolBatch({
+      agentId,
+      requestId,
+      resolvedModel: "fake-provider/fake-model",
+      historyDelta: firstHistoryDelta,
+    });
+
+    assert.equal(firstResult.compacted, true);
+    assert.ok(firstResult.summaryText);
+    const firstSummaryId = firstResult.record?.createdSummaryId;
+    assert.equal(typeof firstSummaryId, "string");
+    const firstDescription = await lcmFacade.getAgentPostToolLcmConversation(agentId, requestId)
+      .then(({ retrieval }) => retrieval.describe(firstSummaryId ?? ""));
+    assert.equal(firstDescription?.type, "summary");
+
+    const secondHistoryDelta = [
+      {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: firstResult.summaryText ?? "" }],
+        api: "responses" as const,
+        provider: "openai",
+        model: "fake-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "stop" as const,
+        timestamp: 2,
+      },
+      ...firstHistoryDelta.slice(firstResult.keptStartIndex),
+      {
+        role: "user" as const,
+        content: "Follow-up request: " + "latest updates ".repeat(220),
+        timestamp: 5,
+      },
+      {
+        role: "assistant" as const,
+        content: [{ type: "toolCall" as const, id: "tool-2", name: "web_fetch", arguments: { url: "https://example.com/2" } }],
+        api: "responses" as const,
+        provider: "openai",
+        model: "fake-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "toolUse" as const,
+        timestamp: 6,
+      },
+      {
+        role: "toolResult" as const,
+        toolCallId: "tool-2",
+        toolName: "web_fetch",
+        content: [{ type: "text" as const, text: "second tool output " + "evidence ".repeat(140) }],
+        isError: false,
+        timestamp: 7,
+      },
+    ];
+
+    const secondResult = await runtimeStore.compactPromptHistoryAfterToolBatch({
+      agentId,
+      requestId,
+      resolvedModel: "fake-provider/fake-model",
+      historyDelta: secondHistoryDelta,
+    });
+
+    assert.equal(secondResult.compacted, true);
+    assert.ok(secondResult.summaryText);
+    assert.notEqual(secondResult.record?.createdSummaryId, firstSummaryId);
+    const secondSummaryId = secondResult.record?.createdSummaryId;
+    const secondDescription = await lcmFacade.getAgentPostToolLcmConversation(agentId, requestId)
+      .then(({ retrieval }) => retrieval.describe(secondSummaryId ?? ""));
+    assert.equal(secondDescription?.type, "summary");
+    assert.equal(
+      secondDescription?.summary?.conversationId,
+      firstDescription?.summary?.conversationId,
+    );
+
+    await runtimeStore.clearPostToolCompactionRunState({ agentId, requestId });
+    const clearedConversation = await lcmFacade.getAgentPostToolLcmConversation(agentId, requestId);
+    assert.equal(clearedConversation.conversation, null);
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
+test("compactPromptHistoryAfterToolBatch keeps incremental post-tool LCM state even when the next history delta is still uncompressed", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    const requestId = "req-incremental-post-tool-raw-history";
+    const lcmFacadeUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/lcm/facade.ts")).href;
+    const lcmFacade = await import(`${lcmFacadeUrl}?test=${Date.now()}-${Math.random()}`) as typeof import("../src/lib/server/lcm/facade");
+    let summaryRound = 0;
+
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionTokenThreshold: 1_000,
+      compactionFreshTailCount: 0,
+    });
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => {
+      summaryRound += 1;
+      return [
+        "## 关键结论",
+        `- 原始历史增量压缩轮次 ${summaryRound}。`,
+        "",
+        "## 待办事项",
+        "- 无",
+        "",
+        "## 约束与规则",
+        "- 无",
+        "",
+        "## 用户仍在等待的问题",
+        "- 无",
+        "",
+        "## 精确标识符",
+        `- req:${requestId}:${summaryRound}`,
+      ].join("\n");
+    });
+
+    const firstHistoryDelta = [
+      {
+        role: "user" as const,
+        content: "Earlier room request: " + "context ".repeat(220),
+        timestamp: 1,
+      },
+      {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: "Earlier answer: " + "details ".repeat(180) }],
+        api: "responses" as const,
+        provider: "openai",
+        model: "fake-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "stop" as const,
+        timestamp: 2,
+      },
+      {
+        role: "assistant" as const,
+        content: [{ type: "toolCall" as const, id: "tool-1", name: "web_fetch", arguments: { url: "https://example.com/1" } }],
+        api: "responses" as const,
+        provider: "openai",
+        model: "fake-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "toolUse" as const,
+        timestamp: 3,
+      },
+      {
+        role: "toolResult" as const,
+        toolCallId: "tool-1",
+        toolName: "web_fetch",
+        content: [{ type: "text" as const, text: "tool output " + "result ".repeat(140) }],
+        isError: false,
+        timestamp: 4,
+      },
+    ];
+
+    const firstResult = await runtimeStore.compactPromptHistoryAfterToolBatch({
+      agentId,
+      requestId,
+      resolvedModel: "fake-provider/fake-model",
+      historyDelta: firstHistoryDelta,
+    });
+
+    assert.equal(firstResult.compacted, true);
+    const firstSummaryId = firstResult.record?.createdSummaryId;
+    assert.equal(typeof firstSummaryId, "string");
+    const firstDescription = await lcmFacade.getAgentPostToolLcmConversation(agentId, requestId)
+      .then(({ retrieval }) => retrieval.describe(firstSummaryId ?? ""));
+    assert.equal(firstDescription?.type, "summary");
+
+    const secondHistoryDelta = [
+      ...firstHistoryDelta,
+      {
+        role: "user" as const,
+        content: "Follow-up request: " + "latest updates ".repeat(220),
+        timestamp: 5,
+      },
+      {
+        role: "assistant" as const,
+        content: [{ type: "toolCall" as const, id: "tool-2", name: "web_fetch", arguments: { url: "https://example.com/2" } }],
+        api: "responses" as const,
+        provider: "openai",
+        model: "fake-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "toolUse" as const,
+        timestamp: 6,
+      },
+      {
+        role: "toolResult" as const,
+        toolCallId: "tool-2",
+        toolName: "web_fetch",
+        content: [{ type: "text" as const, text: "second tool output " + "evidence ".repeat(140) }],
+        isError: false,
+        timestamp: 7,
+      },
+    ];
+
+    const secondResult = await runtimeStore.compactPromptHistoryAfterToolBatch({
+      agentId,
+      requestId,
+      resolvedModel: "fake-provider/fake-model",
+      historyDelta: secondHistoryDelta,
+    });
+
+    assert.equal(secondResult.compacted, true);
+    assert.ok(secondResult.summaryText);
+    assert.notEqual(secondResult.record?.createdSummaryId, firstSummaryId);
+    const secondSummaryId = secondResult.record?.createdSummaryId;
+    const secondDescription = await lcmFacade.getAgentPostToolLcmConversation(agentId, requestId)
+      .then(({ retrieval }) => retrieval.describe(secondSummaryId ?? ""));
+    assert.equal(secondDescription?.type, "summary");
+    assert.equal(
+      secondDescription?.summary?.conversationId,
+      firstDescription?.summary?.conversationId,
+    );
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
 test("compactPromptHistoryAfterToolBatch preserves visible room deliveries from tool results in the compaction summary", async () => {
   await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
     const agentId = "concierge";
@@ -587,6 +867,7 @@ test("compactPromptHistoryAfterToolBatch preserves visible room deliveries from 
 
     const result = await runtimeStore.compactPromptHistoryAfterToolBatch({
       agentId,
+      requestId: "req-visible-room-delivery",
       resolvedModel: "fake-provider/fake-model",
       historyDelta: [
         {
@@ -680,6 +961,7 @@ test("compactPromptHistoryAfterToolBatch keeps only the latest open room request
 
     const result = await runtimeStore.compactPromptHistoryAfterToolBatch({
       agentId,
+      requestId: "req-open-room-request",
       resolvedModel: "fake-provider/fake-model",
       historyDelta: [
         {
@@ -808,6 +1090,7 @@ test("compactPromptHistoryAfterToolBatch stops when the post-tool compaction sig
     const abortTimer = setTimeout(() => controller.abort(new Error("post-tool timeout")), 10);
     const result = await runtimeStore.compactPromptHistoryAfterToolBatch({
       agentId,
+      requestId: "req-post-tool-abort",
       resolvedModel: "fake-provider/fake-model",
       signal: controller.signal,
       historyDelta: [
@@ -844,6 +1127,82 @@ test("compactPromptHistoryAfterToolBatch stops when the post-tool compaction sig
     assert.equal(result.record?.reason, "post_tool");
     assert.equal(result.record?.details?.result, "aborted");
     assert.equal(result.record?.error, undefined);
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
+test("compactPromptHistoryAfterToolBatch keeps a completed post-tool compaction even if the timeout signal fires just before it returns", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionTokenThreshold: 1_000,
+      compactionFreshTailCount: 0,
+    });
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(() => new Promise<string>((resolve) => {
+      setTimeout(() => {
+        resolve([
+          "## 关键结论",
+          "- 压缩已经完成。",
+          "",
+          "## 待办事项",
+          "- 无",
+          "",
+          "## 约束与规则",
+          "- 无",
+          "",
+          "## 用户仍在等待的问题",
+          "- 无",
+          "",
+          "## 精确标识符",
+          "- salvage:test",
+        ].join("\n"));
+      }, 25);
+    }));
+
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => {
+      controller.abort(new Error("Post-tool compaction timed out after 10 ms."));
+    }, 10);
+
+    const result = await runtimeStore.compactPromptHistoryAfterToolBatch({
+      agentId,
+      requestId: "req-post-tool-timeout-salvage",
+      resolvedModel: "fake-provider/fake-model",
+      signal: controller.signal,
+      historyDelta: [
+        {
+          role: "user",
+          content: "Earlier room request: " + "context ".repeat(220),
+          timestamp: 1,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "tool-1", name: "web_fetch", arguments: { url: "https://example.com" } }],
+          api: "responses",
+          provider: "openai",
+          model: "fake-model",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "toolUse",
+          timestamp: 2,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool-1",
+          toolName: "web_fetch",
+          content: [{ type: "text", text: "tool output " + "result ".repeat(140) }],
+          isError: false,
+          timestamp: 3,
+        },
+      ],
+    });
+    clearTimeout(abortTimer);
+
+    assert.equal(result.compacted, true);
+    assert.match(result.summaryText ?? "", /^## 关键结论/m);
+    assert.equal(result.record?.details?.result, "compacted");
+    assert.equal(typeof result.record?.createdSummaryId, "string");
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });

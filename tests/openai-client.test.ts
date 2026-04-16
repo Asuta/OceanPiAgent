@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as postToolContextCache from "@/lib/ai/post-tool-context-cache";
 import { shouldApplyPostToolBatchCompaction } from "@/lib/ai/post-tool-compaction";
 import { __testing as postToolStallTesting } from "@/lib/ai/post-tool-stall";
 import { extractRoomMessagePreviewFromToolArgs, extractRoomMessagePreviewFromToolCallBlock } from "@/lib/ai/room-message-preview";
@@ -109,6 +110,110 @@ test("shouldApplyPostToolBatchCompaction still allows normal post-tool compactio
     }),
     true,
   );
+});
+
+test("cached post-tool compaction state reuses the compacted prefix for later tool loops", () => {
+  const usage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+    },
+  };
+  const firstRawMessages = [
+    {
+      role: "user" as const,
+      content: "Earlier room request",
+      timestamp: 1,
+    },
+    {
+      role: "assistant" as const,
+      content: [{ type: "text" as const, text: "Earlier answer" }],
+      api: "responses" as const,
+      provider: "openai",
+      model: "fake-model",
+      usage,
+      stopReason: "stop" as const,
+      timestamp: 2,
+    },
+    {
+      role: "assistant" as const,
+      content: [{ type: "toolCall" as const, id: "tool-1", name: "web_fetch", arguments: { url: "https://example.com/1" } }],
+      api: "responses" as const,
+      provider: "openai",
+      model: "fake-model",
+      usage,
+      stopReason: "toolUse" as const,
+      timestamp: 3,
+    },
+    {
+      role: "toolResult" as const,
+      toolCallId: "tool-1",
+      toolName: "web_fetch",
+      content: [{ type: "text" as const, text: "tool output" }],
+      isError: false,
+      timestamp: 4,
+    },
+  ];
+  const compactedMessages = [
+    {
+      role: "assistant" as const,
+      content: [{ type: "text" as const, text: "## 关键结论\n- 已压缩" }],
+      api: "responses" as const,
+      provider: "openai",
+      model: "fake-model",
+      usage,
+      stopReason: "stop" as const,
+      timestamp: 2,
+    },
+    ...firstRawMessages.slice(2),
+  ];
+  const state = postToolContextCache.createPostToolCompactedContextState({
+    rawMessages: firstRawMessages,
+    effectiveMessages: compactedMessages,
+    rawMessageSignatures: ["m1", "m2", "m3", "m4"],
+  });
+  const secondRawMessages = [
+    ...firstRawMessages,
+    {
+      role: "assistant" as const,
+      content: [{ type: "toolCall" as const, id: "tool-2", name: "web_fetch", arguments: { url: "https://example.com/2" } }],
+      api: "responses" as const,
+      provider: "openai",
+      model: "fake-model",
+      usage,
+      stopReason: "toolUse" as const,
+      timestamp: 5,
+    },
+    {
+      role: "toolResult" as const,
+      toolCallId: "tool-2",
+      toolName: "web_fetch",
+      content: [{ type: "text" as const, text: "second tool output" }],
+      isError: false,
+      timestamp: 6,
+    },
+  ];
+
+  const applied = postToolContextCache.applyPostToolCompactedContextState({
+    messages: secondRawMessages,
+    state,
+    rawMessageSignatures: ["m1", "m2", "m3", "m4", "m5", "m6"],
+  });
+
+  assert.equal(applied.cacheApplied, true);
+  assert.equal(applied.effectiveMessages.length, 5);
+  assert.deepEqual(applied.effectiveMessages, [
+    ...compactedMessages,
+    ...secondRawMessages.slice(firstRawMessages.length),
+  ]);
 });
 
 test("post-tool stall watchdog pauses during compaction and resumes afterward", async () => {
