@@ -854,6 +854,119 @@ test("compactPromptHistoryAfterToolBatch keeps incremental post-tool LCM state e
   });
 });
 
+test("compactPromptHistoryAfterToolBatch prepares multiple post-tool leaf summaries in parallel before committing them", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    await setAgentCompactionSettings(workspaceStore, agentId, {
+      compactionTokenThreshold: 1_000,
+      compactionFreshTailCount: 0,
+    });
+
+    const longPrefixA = `Parallel prefix A ${"alpha ".repeat(18_000)}`;
+    const longPrefixB = `Parallel prefix B ${"beta ".repeat(18_000)}`;
+    let startedCalls = 0;
+    let inFlightCalls = 0;
+    let maxInFlightCalls = 0;
+    let releaseBarrier: (() => void) | undefined;
+    const barrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    const secondCallStarted = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Timed out waiting for the second parallel leaf summary to start.")), 500);
+      const maybeResolve = () => {
+        if (startedCalls >= 2) {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+      const originalRelease = releaseBarrier;
+      releaseBarrier = () => {
+        maybeResolve();
+        originalRelease?.();
+      };
+      maybeResolve();
+    });
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => {
+      startedCalls += 1;
+      const callNumber = startedCalls;
+      inFlightCalls += 1;
+      maxInFlightCalls = Math.max(maxInFlightCalls, inFlightCalls);
+      if (callNumber === 2) {
+        releaseBarrier?.();
+      }
+      await Promise.race([barrier, secondCallStarted]);
+      try {
+        return [
+          "## 关键结论",
+          `- 并行 leaf 摘要调用 ${callNumber}。`,
+          "",
+          "## 待办事项",
+          "- 无",
+          "",
+          "## 约束与规则",
+          "- 无",
+          "",
+          "## 用户仍在等待的问题",
+          "- 无",
+          "",
+          "## 精确标识符",
+          `- parallel:${callNumber}`,
+        ].join("\n");
+      } finally {
+        inFlightCalls -= 1;
+      }
+    });
+
+    const result = await runtimeStore.compactPromptHistoryAfterToolBatch({
+      agentId,
+      requestId: "req-post-tool-parallel-leaf-batch",
+      resolvedModel: "fake-provider/fake-model",
+      historyDelta: [
+        {
+          role: "user",
+          content: longPrefixA,
+          timestamp: 1,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: longPrefixB }],
+          api: "responses",
+          provider: "openai",
+          model: "fake-model",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "stop",
+          timestamp: 2,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "tool-1", name: "web_fetch", arguments: { url: "https://example.com/parallel" } }],
+          api: "responses",
+          provider: "openai",
+          model: "fake-model",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "toolUse",
+          timestamp: 3,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool-1",
+          toolName: "web_fetch",
+          content: [{ type: "text", text: "parallel tool output " + "evidence ".repeat(120) }],
+          isError: false,
+          timestamp: 4,
+        },
+      ],
+    });
+
+    assert.equal(result.compacted, true);
+    assert.ok(startedCalls >= 2);
+    assert.ok(maxInFlightCalls >= 2);
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
 test("compactPromptHistoryAfterToolBatch preserves visible room deliveries from tool results in the compaction summary", async () => {
   await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
     const agentId = "concierge";

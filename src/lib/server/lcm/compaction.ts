@@ -49,8 +49,21 @@ type PassResult = { summaryId: string; level: CompactionLevel; content?: string 
 type LeafChunkSelection = { items: ContextItemRecord[] };
 type CondensedChunkSelection = { items: ContextItemRecord[]; summaryTokens: number };
 type CondensedPhaseCandidate = { targetDepth: number; chunk: CondensedChunkSelection };
+type LeafMessageContent = { messageId: number; role: "user" | "assistant"; content: string; createdAt: Date; tokenCount: number };
+type PreparedLeafPass = {
+  summaryId: string;
+  level: CompactionLevel;
+  content: string;
+  tokenCount: number;
+  fileIds: string[];
+  earliestAt?: Date;
+  latestAt?: Date;
+  sourceMessageTokenCount: number;
+  messageIds: number[];
+};
 
 const DEFAULT_LEAF_CHUNK_TOKENS = 20_000;
+const DEFAULT_LEAF_PARALLEL_BATCH_SIZE = 2;
 const FALLBACK_MAX_CHARS = 512 * 4;
 const CONDENSED_MIN_INPUT_RATIO = 0.1;
 const MEDIA_PATH_RE = /^MEDIA:\/.+$/;
@@ -98,8 +111,8 @@ export function formatTimestamp(value: Date, timezone: string = "UTC"): string {
   }
 }
 
-function generateSummaryId(content: string): string {
-  return `sum_${createHash("sha256").update(content + Date.now().toString()).digest("hex").slice(0, 16)}`;
+function generateSummaryId(content: string, salt?: string): string {
+  return `sum_${createHash("sha256").update(content).update("\n").update(salt ?? "").update("\n").update(Date.now().toString()).digest("hex").slice(0, 16)}`;
 }
 
 function dedupeOrderedIds(ids: Iterable<string>): string[] {
@@ -237,14 +250,57 @@ export class CompactionEngine {
     let previousTokens = tokensBefore;
 
     while (true) {
-      const leafChunk = await this.selectOldestLeafChunk(input.conversationId, input.force);
-      if (leafChunk.items.length === 0) {
+      const leafChunks = await this.selectOldestLeafChunksBatch(input.conversationId, this.resolveLeafParallelBatchSize(), input.force);
+      if (leafChunks.length === 0) {
         break;
       }
 
-      const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-      const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModelSelection, input.signal);
-      if (!leafResult) {
+      // Only summary generation runs in parallel; context mutations still commit one chunk at a time.
+      const preparedLeafPasses = await Promise.all(leafChunks.map(async (leafChunk, index) => {
+        const priorSummary = index === 0
+          ? previousSummaryContent ?? await this.resolvePriorLeafSummaryContext(input.conversationId, leafChunk.items)
+          : await this.resolvePriorLeafSummaryContext(input.conversationId, leafChunk.items);
+        return this.prepareLeafPass(input.conversationId, leafChunk.items, priorSummary, input.summaryModelSelection, input.signal);
+      }));
+
+      let committedInBatch = 0;
+      let shouldStopLeafPasses = false;
+      for (const preparedLeafPass of preparedLeafPasses) {
+        if (!preparedLeafPass) {
+          continue;
+        }
+
+        const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
+        const leafResult = await this.commitPreparedLeafPass(input.conversationId, preparedLeafPass, input.summaryModelSelection);
+        if (!leafResult) {
+          continue;
+        }
+
+        const passTokensAfter = await this.summaryStore.getContextTokenCount(input.conversationId);
+        await this.persistCompactionEvents({
+          conversationId: input.conversationId,
+          tokensBefore: passTokensBefore,
+          tokensAfterLeaf: passTokensAfter,
+          tokensAfterFinal: passTokensAfter,
+          leafResult: { summaryId: leafResult.summaryId, level: leafResult.level },
+          condenseResult: null,
+        });
+
+        actionTaken = true;
+        createdSummaryId = leafResult.summaryId;
+        level = leafResult.level;
+        previousSummaryContent = leafResult.content;
+        committedInBatch += 1;
+
+        if (passTokensAfter >= passTokensBefore || passTokensAfter >= previousTokens) {
+          previousTokens = passTokensAfter;
+          shouldStopLeafPasses = true;
+          break;
+        }
+        previousTokens = passTokensAfter;
+      }
+
+      if (committedInBatch === 0) {
         return {
           actionTaken,
           tokensBefore,
@@ -255,26 +311,9 @@ export class CompactionEngine {
           skipReason: actionTaken ? undefined : "leaf_pass_failed",
         };
       }
-
-      const passTokensAfter = await this.summaryStore.getContextTokenCount(input.conversationId);
-      await this.persistCompactionEvents({
-        conversationId: input.conversationId,
-        tokensBefore: passTokensBefore,
-        tokensAfterLeaf: passTokensAfter,
-        tokensAfterFinal: passTokensAfter,
-        leafResult: { summaryId: leafResult.summaryId, level: leafResult.level },
-        condenseResult: null,
-      });
-
-      actionTaken = true;
-      createdSummaryId = leafResult.summaryId;
-      level = leafResult.level;
-      previousSummaryContent = leafResult.content;
-
-      if (passTokensAfter >= passTokensBefore || passTokensAfter >= previousTokens) {
+      if (shouldStopLeafPasses) {
         break;
       }
-      previousTokens = passTokensAfter;
     }
 
     while (!this.isBelowThreshold({ force: input.force, storedTokens: previousTokens, comparisonExtraTokens: input.comparisonExtraTokens })) {
@@ -393,6 +432,10 @@ export class CompactionEngine {
     return DEFAULT_LEAF_CHUNK_TOKENS;
   }
 
+  private resolveLeafParallelBatchSize(): number {
+    return DEFAULT_LEAF_PARALLEL_BATCH_SIZE;
+  }
+
   private resolveFixedTokenThreshold(): number {
     return Math.max(1, Math.floor(this.config.fixedTokenThreshold));
   }
@@ -431,41 +474,65 @@ export class CompactionEngine {
   }
 
   private async selectOldestLeafChunk(conversationId: number, force?: boolean): Promise<LeafChunkSelection> {
+    const [chunk] = await this.selectOldestLeafChunksBatch(conversationId, 1, force);
+    return chunk ?? { items: [] };
+  }
+
+  private async selectOldestLeafChunksBatch(conversationId: number, maxBatchSize: number, force?: boolean): Promise<LeafChunkSelection[]> {
     const contextItems = await this.summaryStore.getContextItems(conversationId);
     const freshTailOrdinal = this.resolveFreshTailOrdinal(contextItems);
     const threshold = this.resolveLeafChunkTokens();
     void force;
 
-    const chunk: ContextItemRecord[] = [];
-    let chunkTokens = 0;
-    let started = false;
-    for (const item of contextItems) {
-      if (item.ordinal >= freshTailOrdinal) {
-        break;
-      }
-
-      if (!started) {
-        if (item.itemType !== "message" || item.messageId == null) {
-          continue;
+    const chunks: LeafChunkSelection[] = [];
+    let cursor = 0;
+    while (cursor < contextItems.length && chunks.length < Math.max(1, Math.floor(maxBatchSize))) {
+      while (cursor < contextItems.length) {
+        const item = contextItems[cursor]!;
+        if (item.ordinal >= freshTailOrdinal) {
+          return chunks;
         }
-        started = true;
-      } else if (item.itemType !== "message" || item.messageId == null) {
+        if (item.itemType === "message" && item.messageId != null) {
+          break;
+        }
+        cursor += 1;
+      }
+
+      if (cursor >= contextItems.length || contextItems[cursor]!.ordinal >= freshTailOrdinal) {
         break;
       }
 
-      const messageTokens = await this.getMessageTokenCount(item.messageId!);
-      if (chunk.length > 0 && chunkTokens + messageTokens > threshold) {
-        break;
+      const chunk: ContextItemRecord[] = [];
+      let chunkTokens = 0;
+      while (cursor < contextItems.length) {
+        const item = contextItems[cursor]!;
+        if (item.ordinal >= freshTailOrdinal) {
+          break;
+        }
+        if (item.itemType !== "message" || item.messageId == null) {
+          break;
+        }
+
+        const messageTokens = await this.getMessageTokenCount(item.messageId);
+        if (chunk.length > 0 && chunkTokens + messageTokens > threshold) {
+          break;
+        }
+
+        chunk.push(item);
+        chunkTokens += messageTokens;
+        cursor += 1;
+        if (chunkTokens >= threshold) {
+          break;
+        }
       }
 
-      chunk.push(item);
-      chunkTokens += messageTokens;
-      if (chunkTokens >= threshold) {
+      if (chunk.length === 0) {
         break;
       }
+      chunks.push({ items: chunk });
     }
 
-    return { items: chunk };
+    return chunks;
   }
 
   private async resolvePriorLeafSummaryContext(conversationId: number, messageItems: ContextItemRecord[]): Promise<string | undefined> {
@@ -698,29 +765,38 @@ export class CompactionEngine {
     return summary.trim();
   }
 
-  private async leafPass(
-    conversationId: number,
-    messageItems: ContextItemRecord[],
-    previousSummaryContent?: string,
-    summaryModelSelection?: CompactionModelSelection,
-    signal?: AbortSignal,
-  ): Promise<{ summaryId: string; level: CompactionLevel; content: string } | null> {
-    const messageContents: { messageId: number; role: "user" | "assistant"; content: string; createdAt: Date; tokenCount: number }[] = [];
+  private async loadLeafMessageContents(messageItems: ContextItemRecord[]): Promise<LeafMessageContent[]> {
+    const messageContents: LeafMessageContent[] = [];
     for (const item of messageItems) {
       if (item.messageId == null) {
         continue;
       }
       const msg = await this.conversationStore.getMessageById(item.messageId);
-      if (msg) {
-        const annotatedContent = await this.annotateMediaContent(msg.messageId, msg.content);
-        messageContents.push({
-          messageId: msg.messageId,
-          role: msg.role === "assistant" ? "assistant" : "user",
-          content: annotatedContent,
-          createdAt: msg.createdAt,
-          tokenCount: this.resolveMessageTokenCount(msg),
-        });
+      if (!msg) {
+        continue;
       }
+      const annotatedContent = await this.annotateMediaContent(msg.messageId, msg.content);
+      messageContents.push({
+        messageId: msg.messageId,
+        role: msg.role === "assistant" ? "assistant" : "user",
+        content: annotatedContent,
+        createdAt: msg.createdAt,
+        tokenCount: this.resolveMessageTokenCount(msg),
+      });
+    }
+    return messageContents;
+  }
+
+  private async prepareLeafPass(
+    conversationId: number,
+    messageItems: ContextItemRecord[],
+    previousSummaryContent?: string,
+    summaryModelSelection?: CompactionModelSelection,
+    signal?: AbortSignal,
+  ): Promise<PreparedLeafPass | null> {
+    const messageContents = await this.loadLeafMessageContents(messageItems);
+    if (messageContents.length === 0) {
+      return null;
     }
 
     const concatenated = messageContents.map((message) => `[${formatTimestamp(message.createdAt, this.config.timezone)}]\n${message.content}`).join("\n\n");
@@ -749,34 +825,105 @@ export class CompactionEngine {
       level = fallback.level;
     }
 
-    const fileIds = dedupeOrderedIds(messageContents.flatMap((message) => extractFileIdsFromContent(message.content)));
-    const summaryId = generateSummaryId(summaryContent);
+    return {
+      summaryId: generateSummaryId(summaryContent, messageContents.map((message) => String(message.messageId)).join(",")),
+      level,
+      content: summaryContent,
+      tokenCount: estimateTokens(summaryContent),
+      fileIds: dedupeOrderedIds(messageContents.flatMap((message) => extractFileIdsFromContent(message.content))),
+      earliestAt: new Date(Math.min(...messageContents.map((message) => message.createdAt.getTime()))),
+      latestAt: new Date(Math.max(...messageContents.map((message) => message.createdAt.getTime()))),
+      sourceMessageTokenCount: messageContents.reduce((sum, message) => sum + Math.max(0, Math.floor(message.tokenCount)), 0),
+      messageIds: messageContents.map((message) => message.messageId),
+    };
+  }
+
+  private async resolveCurrentLeafMessageRange(conversationId: number, messageIds: number[]): Promise<{ startOrdinal: number; endOrdinal: number } | null> {
+    if (messageIds.length === 0) {
+      return null;
+    }
+
+    const messageIdSet = new Set(messageIds);
+    const matchingItems = (await this.summaryStore.getContextItems(conversationId))
+      .filter((item) => item.itemType === "message" && item.messageId != null && messageIdSet.has(item.messageId));
+    if (matchingItems.length !== messageIds.length) {
+      return null;
+    }
+    if (matchingItems.some((item, index) => item.messageId !== messageIds[index])) {
+      return null;
+    }
+
+    for (let index = 1; index < matchingItems.length; index += 1) {
+      if (matchingItems[index]!.ordinal !== matchingItems[index - 1]!.ordinal + 1) {
+        return null;
+      }
+    }
+
+    return {
+      startOrdinal: matchingItems[0]!.ordinal,
+      endOrdinal: matchingItems[matchingItems.length - 1]!.ordinal,
+    };
+  }
+
+  private async commitPreparedLeafPass(
+    conversationId: number,
+    preparedLeafPass: PreparedLeafPass,
+    summaryModelSelection?: CompactionModelSelection,
+  ): Promise<{ summaryId: string; level: CompactionLevel; content: string } | null> {
+    const range = await this.resolveCurrentLeafMessageRange(conversationId, preparedLeafPass.messageIds);
+    if (!range) {
+      return null;
+    }
+
     await this.summaryStore.insertSummary({
-      summaryId,
+      summaryId: preparedLeafPass.summaryId,
       conversationId,
       kind: "leaf",
       depth: 0,
-      content: summaryContent,
-      tokenCount: estimateTokens(summaryContent),
-      fileIds,
-      earliestAt: messageContents.length > 0 ? new Date(Math.min(...messageContents.map((message) => message.createdAt.getTime()))) : undefined,
-      latestAt: messageContents.length > 0 ? new Date(Math.max(...messageContents.map((message) => message.createdAt.getTime()))) : undefined,
+      content: preparedLeafPass.content,
+      tokenCount: preparedLeafPass.tokenCount,
+      fileIds: preparedLeafPass.fileIds,
+      earliestAt: preparedLeafPass.earliestAt,
+      latestAt: preparedLeafPass.latestAt,
       descendantCount: 0,
       descendantTokenCount: 0,
-      sourceMessageTokenCount: messageContents.reduce((sum, message) => sum + Math.max(0, Math.floor(message.tokenCount)), 0),
+      sourceMessageTokenCount: preparedLeafPass.sourceMessageTokenCount,
       model: getSummaryModelLabel(summaryModelSelection),
     });
 
-    const messageIds = messageContents.map((message) => message.messageId);
-    await this.summaryStore.linkSummaryToMessages(summaryId, messageIds);
+    await this.summaryStore.linkSummaryToMessages(preparedLeafPass.summaryId, preparedLeafPass.messageIds);
     await this.summaryStore.replaceContextRangeWithSummary({
       conversationId,
-      startOrdinal: Math.min(...messageItems.map((item) => item.ordinal)),
-      endOrdinal: Math.max(...messageItems.map((item) => item.ordinal)),
-      summaryId,
+      startOrdinal: range.startOrdinal,
+      endOrdinal: range.endOrdinal,
+      summaryId: preparedLeafPass.summaryId,
     });
 
-    return { summaryId, level, content: summaryContent };
+    return {
+      summaryId: preparedLeafPass.summaryId,
+      level: preparedLeafPass.level,
+      content: preparedLeafPass.content,
+    };
+  }
+
+  private async leafPass(
+    conversationId: number,
+    messageItems: ContextItemRecord[],
+    previousSummaryContent?: string,
+    summaryModelSelection?: CompactionModelSelection,
+    signal?: AbortSignal,
+  ): Promise<{ summaryId: string; level: CompactionLevel; content: string } | null> {
+    const preparedLeafPass = await this.prepareLeafPass(
+      conversationId,
+      messageItems,
+      previousSummaryContent,
+      summaryModelSelection,
+      signal,
+    );
+    if (!preparedLeafPass) {
+      return null;
+    }
+    return this.commitPreparedLeafPass(conversationId, preparedLeafPass, summaryModelSelection);
   }
 
   private async condensedPass(
@@ -835,7 +982,7 @@ export class CompactionEngine {
     }
 
     const fileIds = dedupeOrderedIds(summaryRecords.flatMap((summary) => [...summary.fileIds, ...extractFileIdsFromContent(summary.content)]));
-    const summaryId = generateSummaryId(condensedContent);
+    const summaryId = generateSummaryId(condensedContent, summaryRecords.map((summary) => summary.summaryId).join(","));
     await this.summaryStore.insertSummary({
       summaryId,
       conversationId,
