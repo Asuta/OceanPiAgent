@@ -528,7 +528,7 @@ test("runRoomSchedulerNow settles idle after a streaming room turn fails with pa
   assert.deepEqual(streamedDone, [{ status: "error", roomRunning: false }]);
 });
 
-test("runRoomSchedulerNow stops a scheduled turn that times out", async () => {
+test("runRoomSchedulerNow no longer applies the legacy scheduler turn timeout", async () => {
   const previousTimeout = process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS;
   process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS = "20";
 
@@ -568,18 +568,11 @@ test("runRoomSchedulerNow stops a scheduled turn that times out", async () => {
       };
     };
     const streamedErrors: string[] = [];
+    const streamedDone: Array<{ status: string; roomRunning: boolean }> = [];
 
     await runRoomSchedulerNow(room.id, {
       loadWorkspaceEnvelope,
       mutateWorkspace,
-      runRoomTurnNonStreaming: async ({ signal }) => {
-        await new Promise<never>((_resolve, reject) => {
-          signal?.addEventListener("abort", () => {
-            reject(signal.reason ?? new Error("Aborted"));
-          }, { once: true });
-        });
-        throw new Error("Unreachable");
-      },
       resolveSettingsWithModelConfig: async (settings) => ({
         settings,
         modelConfig: null,
@@ -605,20 +598,62 @@ test("runRoomSchedulerNow stops a scheduled turn that times out", async () => {
         signal,
       }),
       runPreparedRoomTurn: async (preparedInput) => {
-        await new Promise<never>((_resolve, reject) => {
-          preparedInput.signal?.addEventListener("abort", () => {
-            reject(preparedInput.signal?.reason ?? new Error("Aborted"));
-          }, { once: true });
+        await new Promise((resolve) => {
+          setTimeout(resolve, 40);
         });
-        throw new Error("Unreachable");
+        return {
+          turn: {
+            id: preparedInput.turnId ?? "turn-researcher",
+            agent: {
+              id: preparedInput.agent.id,
+              label: preparedInput.agent.label,
+            },
+            userMessage: {
+              ...createRoomMessage(preparedInput.room.id, "system", preparedInput.message.content, "system", {
+                sender: preparedInput.message.sender,
+                kind: "system",
+              }),
+              id: preparedInput.message.id,
+            },
+            assistantContent: "Completed after waiting longer than the legacy timeout.",
+            draftSegments: [],
+            timeline: [],
+            tools: [],
+            emittedMessages: [],
+            status: "completed",
+            resolvedModel: "generic/fake-model",
+          },
+          resolvedModel: "generic/fake-model",
+          compatibility: {
+            providerKey: "generic",
+            providerLabel: "Generic",
+            baseUrl: "",
+            chatCompletionsToolStyle: "tools",
+            responsesContinuation: "replay",
+            responsesPayloadMode: "json",
+            notes: [],
+          },
+          emittedMessages: [],
+          receiptUpdates: [],
+          roomActions: [],
+        };
       },
       onError: (error) => {
         streamedErrors.push(error instanceof Error ? error.message : String(error));
       },
+      onTurnDone: (result, roomRunning) => {
+        streamedDone.push({ status: result.turn.status, roomRunning });
+      },
     });
 
     assert.equal(state.rooms[0]?.scheduler.status, "idle");
-    assert.match(streamedErrors[0] ?? "", /Room scheduler turn timed out after 20 ms\./);
+    assert.equal(state.rooms[0]?.error ?? "", "");
+    assert.deepEqual(streamedErrors, []);
+    assert.deepEqual(streamedDone, [
+      { status: "completed", roomRunning: true },
+      { status: "completed", roomRunning: false },
+    ]);
+    assert.equal(state.rooms[0]?.agentTurns.at(-1)?.status, "completed");
   } finally {
     if (typeof previousTimeout === "string") {
       process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS = previousTimeout;

@@ -28,7 +28,6 @@ import { hasSupersedingVisibleActivity, planSchedulerRound } from "@/lib/server/
 import { createUuid } from "@/lib/utils/uuid";
 
 export const DEFAULT_ROOM_SCHEDULER_MAX_ROUNDS = 20;
-const DEFAULT_ROOM_SCHEDULER_TURN_TIMEOUT_MS = 120_000;
 
 export interface RoomSchedulerRunHooks {
   signal?: AbortSignal;
@@ -366,29 +365,6 @@ function getAbortReason(signal: AbortSignal | undefined, fallback: string): stri
   return fallback;
 }
 
-function getRoomSchedulerTurnTimeoutMs(): number {
-  const raw = process.env.OCEANKING_ROOM_SCHEDULER_TURN_TIMEOUT_MS?.trim();
-  const parsed = raw ? Number(raw) : Number.NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ROOM_SCHEDULER_TURN_TIMEOUT_MS;
-}
-
-function createTimeoutSignal(timeoutMs: number): {
-  signal: AbortSignal;
-  cancel: () => void;
-} {
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort(new Error(`Room scheduler turn timed out after ${timeoutMs} ms.`));
-  }, timeoutMs);
-
-  return {
-    signal: controller.signal,
-    cancel: () => {
-      clearTimeout(timer);
-    },
-  };
-}
-
 function isAbortLike(error: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) {
     return true;
@@ -643,10 +619,7 @@ export async function runRoomSchedulerNow(
 
     const targetAgentId = roundPlan.participant.agentId ?? room.agentId;
     let result: RunRoomTurnResult;
-    const turnTimeout = createTimeoutSignal(getRoomSchedulerTurnTimeoutMs());
-    const currentTurnSignal = hooks.signal
-      ? combineAbortSignals([hooks.signal, turnTimeout.signal])
-      : turnTimeout.signal;
+    const currentTurnSignal = hooks.signal;
     try {
       result = await executeScheduledTurn({
         workspace: workspaceEnvelope.state,
@@ -684,8 +657,6 @@ export async function runRoomSchedulerNow(
         }
         throw error;
       }
-    } finally {
-      turnTimeout.cancel();
     }
 
     result.markTimingPhase?.("scheduler_execute_turn_returned", {

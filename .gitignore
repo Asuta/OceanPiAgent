@@ -2,6 +2,7 @@
 .oceanking/
 node_modules/
 out/
+output/
 dist/
 coverage/
 tsconfig.tsbuildinfo
