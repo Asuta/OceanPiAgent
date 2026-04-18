@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { generateCompactionSummary } from "@/lib/server/agent-compaction";
+import type { CompactionPreference } from "@/lib/chat/types";
 import { extractFileIdsFromContent } from "./large-files";
 import { estimateTokens } from "./estimate-tokens";
 import type { ConversationStore, CreateMessagePartInput } from "./conversation-store";
@@ -119,11 +120,11 @@ export class CompactionEngine {
     return { shouldCompact: false, reason: "none", currentTokens, threshold };
   }
 
-  async compact(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string }): Promise<CompactionResult> {
+  async compact(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string; compactionPreference?: CompactionPreference }): Promise<CompactionResult> {
     return this.compactFullSweep(input);
   }
 
-  async compactLeaf(input: { conversationId: number; tokenBudget: number; force?: boolean; previousSummaryContent?: string; summaryModel?: string }): Promise<CompactionResult> {
+  async compactLeaf(input: { conversationId: number; tokenBudget: number; force?: boolean; previousSummaryContent?: string; summaryModel?: string; compactionPreference?: CompactionPreference }): Promise<CompactionResult> {
     const tokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
     const threshold = this.resolveFixedTokenThreshold();
 
@@ -137,7 +138,13 @@ export class CompactionEngine {
     }
 
     const previousSummaryContent = input.previousSummaryContent ?? await this.resolvePriorLeafSummaryContext(input.conversationId, leafChunk.items);
-    const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModel);
+    const leafResult = await this.leafPass(
+      input.conversationId,
+      leafChunk.items,
+      previousSummaryContent,
+      input.summaryModel,
+      input.compactionPreference,
+    );
     if (!leafResult) {
       return { actionTaken: false, tokensBefore, tokensAfter: tokensBefore, condensed: false };
     }
@@ -168,7 +175,13 @@ export class CompactionEngine {
         }
 
         const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-        const condenseResult = await this.condensedPass(input.conversationId, chunk.items, targetDepth, input.summaryModel);
+        const condenseResult = await this.condensedPass(
+          input.conversationId,
+          chunk.items,
+          targetDepth,
+          input.summaryModel,
+          input.compactionPreference,
+        );
         if (!condenseResult) {
           break;
         }
@@ -203,7 +216,7 @@ export class CompactionEngine {
     };
   }
 
-  async compactFullSweep(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string }): Promise<CompactionResult> {
+  async compactFullSweep(input: { conversationId: number; tokenBudget: number; force?: boolean; hardTrigger?: boolean; summaryModel?: string; compactionPreference?: CompactionPreference }): Promise<CompactionResult> {
     const tokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
     const threshold = this.resolveFixedTokenThreshold();
 
@@ -230,7 +243,13 @@ export class CompactionEngine {
       }
 
       const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-      const leafResult = await this.leafPass(input.conversationId, leafChunk.items, previousSummaryContent, input.summaryModel);
+      const leafResult = await this.leafPass(
+        input.conversationId,
+        leafChunk.items,
+        previousSummaryContent,
+        input.summaryModel,
+        input.compactionPreference,
+      );
       if (!leafResult) {
         break;
       }
@@ -271,7 +290,13 @@ export class CompactionEngine {
       }
 
       const passTokensBefore = await this.summaryStore.getContextTokenCount(input.conversationId);
-      const condenseResult = await this.condensedPass(input.conversationId, candidate.chunk.items, candidate.targetDepth, input.summaryModel);
+      const condenseResult = await this.condensedPass(
+        input.conversationId,
+        candidate.chunk.items,
+        candidate.targetDepth,
+        input.summaryModel,
+        input.compactionPreference,
+      );
       if (!condenseResult) {
         break;
       }
@@ -312,7 +337,7 @@ export class CompactionEngine {
     };
   }
 
-  async compactUntilUnder(input: { conversationId: number; tokenBudget: number; targetTokens?: number; currentTokens?: number; summaryModel?: string }): Promise<{ success: boolean; rounds: number; finalTokens: number }> {
+  async compactUntilUnder(input: { conversationId: number; tokenBudget: number; targetTokens?: number; currentTokens?: number; summaryModel?: string; compactionPreference?: CompactionPreference }): Promise<{ success: boolean; rounds: number; finalTokens: number }> {
     const targetTokens = typeof input.targetTokens === "number" && Number.isFinite(input.targetTokens) && input.targetTokens > 0 ? Math.floor(input.targetTokens) : input.tokenBudget;
     const storedTokens = await this.summaryStore.getContextTokenCount(input.conversationId);
     const liveTokens = typeof input.currentTokens === "number" && Number.isFinite(input.currentTokens) && input.currentTokens > 0 ? Math.floor(input.currentTokens) : 0;
@@ -328,6 +353,7 @@ export class CompactionEngine {
         tokenBudget: input.tokenBudget,
         force: true,
         summaryModel: input.summaryModel,
+        compactionPreference: input.compactionPreference,
       });
 
       if (result.tokensAfter <= targetTokens) {
@@ -633,7 +659,12 @@ export class CompactionEngine {
     return `${textWithoutPaths} [with media attachment]`;
   }
 
-  private async summarizeMessages(agentId: string, messages: Array<{ id: string; role: "user" | "assistant"; content: string; createdAt: string }>, summaryModel?: string): Promise<string> {
+  private async summarizeMessages(
+    agentId: string,
+    messages: Array<{ id: string; role: "user" | "assistant"; content: string; createdAt: string }>,
+    summaryModel?: string,
+    compactionPreference?: CompactionPreference,
+  ): Promise<string> {
     const summary = await generateCompactionSummary({
       agentId: agentId as never,
       messages: messages.map((message) => ({
@@ -644,11 +675,18 @@ export class CompactionEngine {
         createdAt: message.createdAt,
       })),
       resolvedModel: summaryModel ?? "unknown",
+      preference: compactionPreference,
     });
     return summary.trim();
   }
 
-  private async leafPass(conversationId: number, messageItems: ContextItemRecord[], previousSummaryContent?: string, summaryModel?: string): Promise<{ summaryId: string; level: CompactionLevel; content: string } | null> {
+  private async leafPass(
+    conversationId: number,
+    messageItems: ContextItemRecord[],
+    previousSummaryContent?: string,
+    summaryModel?: string,
+    compactionPreference?: CompactionPreference,
+  ): Promise<{ summaryId: string; level: CompactionLevel; content: string } | null> {
     const messageContents: { messageId: number; role: "user" | "assistant"; content: string; createdAt: Date; tokenCount: number }[] = [];
     for (const item of messageItems) {
       if (item.messageId == null) {
@@ -680,6 +718,7 @@ export class CompactionEngine {
           createdAt: message.createdAt.toISOString(),
         })),
         summaryModel,
+        compactionPreference,
       );
     } catch {
       const fallback = this.buildDeterministicFallback(concatenated);
@@ -722,7 +761,13 @@ export class CompactionEngine {
     return { summaryId, level, content: summaryContent };
   }
 
-  private async condensedPass(conversationId: number, summaryItems: ContextItemRecord[], targetDepth: number, summaryModel?: string): Promise<PassResult | null> {
+  private async condensedPass(
+    conversationId: number,
+    summaryItems: ContextItemRecord[],
+    targetDepth: number,
+    summaryModel?: string,
+    compactionPreference?: CompactionPreference,
+  ): Promise<PassResult | null> {
     const summaryRecords: SummaryRecord[] = [];
     for (const item of summaryItems) {
       if (item.summaryId == null) {
@@ -758,6 +803,7 @@ export class CompactionEngine {
           createdAt: summary.createdAt.toISOString(),
         })),
         summaryModel,
+        compactionPreference,
       );
     } catch {
       const fallback = this.buildDeterministicFallback(concatenated);

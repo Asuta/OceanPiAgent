@@ -4,6 +4,8 @@ import { MEMORY_BACKENDS } from "@/lib/chat/types";
 import { extractAssistantMetaFromConversationError, runConversation, streamConversation } from "@/lib/ai/openai-client";
 import { assistantMessageMetaSchema, messageImageAttachmentSchema } from "@/lib/chat/schemas";
 import {
+  COMPACTION_PREFERENCES,
+  DEFAULT_COMPACTION_PREFERENCE,
   DEFAULT_COMPACTION_TOKEN_THRESHOLD,
   DEFAULT_MAX_TOOL_LOOP_STEPS,
   MAX_COMPACTION_TOKEN_THRESHOLD,
@@ -46,6 +48,7 @@ const requestSchema = z.object({
     providerMode: z.enum(["auto", "openai", "right_codes", "generic"]).optional().default("auto"),
     memoryBackend: z.enum(MEMORY_BACKENDS).optional().default("sqlite-fts"),
     compactionTokenThreshold: z.number().int().min(MIN_COMPACTION_TOKEN_THRESHOLD).max(MAX_COMPACTION_TOKEN_THRESHOLD).optional().default(DEFAULT_COMPACTION_TOKEN_THRESHOLD),
+    compactionPreference: z.enum(COMPACTION_PREFERENCES).optional().default(DEFAULT_COMPACTION_PREFERENCE),
     thinkingLevel: z.preprocess((value) => (value === "minimal" ? "none" : value), z.enum(THINKING_LEVELS)).optional().default("off"),
     enabledSkillIds: z.array(z.string().trim().min(1).max(120)).max(24).optional().default([]),
     maxToolLoopSteps: z

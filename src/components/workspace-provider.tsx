@@ -36,9 +36,11 @@ import type {
 } from "@/lib/chat/types";
 import {
   coerceCompactionTokenThreshold,
+  coerceCompactionPreference,
   coerceSkillIds,
   coerceThinkingLevel,
   coerceMaxToolLoopSteps,
+  DEFAULT_COMPACTION_PREFERENCE,
   DEFAULT_COMPACTION_TOKEN_THRESHOLD,
   DEFAULT_MAX_TOOL_LOOP_STEPS,
   MAX_MAX_TOOL_LOOP_STEPS,
@@ -98,6 +100,7 @@ const DEFAULT_SETTINGS: ChatSettings = {
   providerMode: "auto",
   memoryBackend: "sqlite-fts",
   compactionTokenThreshold: DEFAULT_COMPACTION_TOKEN_THRESHOLD,
+  compactionPreference: DEFAULT_COMPACTION_PREFERENCE,
   maxToolLoopSteps: DEFAULT_MAX_TOOL_LOOP_STEPS,
   thinkingLevel: "off",
   enabledSkillIds: [],
@@ -1467,6 +1470,7 @@ function normalizeSettings(value: unknown): ChatSettings {
         : "auto",
     memoryBackend: "sqlite-fts",
     compactionTokenThreshold: coerceCompactionTokenThreshold(value.compactionTokenThreshold),
+    compactionPreference: coerceCompactionPreference(value.compactionPreference),
     maxToolLoopSteps:
       value.maxToolLoopSteps === LEGACY_DEFAULT_MAX_TOOL_LOOP_STEPS
         ? DEFAULT_MAX_TOOL_LOOP_STEPS
@@ -2415,6 +2419,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           ...patch,
           memoryBackend: "sqlite-fts" as MemoryBackendId,
           compactionTokenThreshold: coerceCompactionTokenThreshold(patch.compactionTokenThreshold ?? state.settings.compactionTokenThreshold),
+          compactionPreference: coerceCompactionPreference(patch.compactionPreference ?? state.settings.compactionPreference),
           maxToolLoopSteps: coerceMaxToolLoopSteps(patch.maxToolLoopSteps ?? state.settings.maxToolLoopSteps),
           thinkingLevel: coerceThinkingLevel(patch.thinkingLevel ?? state.settings.thinkingLevel),
           enabledSkillIds: coerceSkillIds(patch.enabledSkillIds ?? state.settings.enabledSkillIds),

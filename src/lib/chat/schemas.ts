@@ -1,5 +1,7 @@
 import { z } from "zod";
 import {
+  COMPACTION_PREFERENCES,
+  DEFAULT_COMPACTION_PREFERENCE,
   DEFAULT_COMPACTION_TOKEN_THRESHOLD,
   MEMORY_BACKENDS,
   MAX_COMPACTION_TOKEN_THRESHOLD,
@@ -15,6 +17,7 @@ const providerKeySchema = z.enum(["openai", "right_codes", "generic"]);
 const providerModeSchema = z.enum(["auto", "openai", "right_codes", "generic"]);
 const apiFormatSchema = z.enum(["chat_completions", "responses"]);
 const thinkingLevelSchema = z.preprocess((value) => (value === "minimal" ? "none" : value), z.enum(THINKING_LEVELS));
+const compactionPreferenceSchema = z.enum(COMPACTION_PREFERENCES);
 export const modelConfigKindSchema = z.enum(["openai_compatible", "pi_builtin"]);
 const chatCompletionsToolStyleSchema = z.enum(["tools", "functions"]);
 const responsesContinuationSchema = z.enum(["previous_response_id", "replay"]);
@@ -389,6 +392,7 @@ const chatSettingsSchema = z.object({
   providerMode: providerModeSchema,
   memoryBackend: z.enum(MEMORY_BACKENDS).optional().default("sqlite-fts"),
   compactionTokenThreshold: z.number().int().min(MIN_COMPACTION_TOKEN_THRESHOLD).max(MAX_COMPACTION_TOKEN_THRESHOLD).optional().default(DEFAULT_COMPACTION_TOKEN_THRESHOLD),
+  compactionPreference: compactionPreferenceSchema.optional().default(DEFAULT_COMPACTION_PREFERENCE),
   maxToolLoopSteps: z.number().int().min(MIN_MAX_TOOL_LOOP_STEPS).max(MAX_MAX_TOOL_LOOP_STEPS),
   thinkingLevel: thinkingLevelSchema,
   enabledSkillIds: z.array(z.string()),

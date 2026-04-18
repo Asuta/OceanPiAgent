@@ -1,6 +1,16 @@
 import { createHash } from "node:crypto";
 import { DEFAULT_COMPACTION_TOKEN_THRESHOLD } from "@/lib/chat/types";
-import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId, RoomMessageEmission, RoomSender, RoomToolActionUnion, ToolExecution } from "@/lib/chat/types";
+import type {
+  AssistantMessageMeta,
+  CompactionPreference,
+  MessageImageAttachment,
+  ProviderCompatibility,
+  RoomAgentId,
+  RoomMessageEmission,
+  RoomSender,
+  RoomToolActionUnion,
+  ToolExecution,
+} from "@/lib/chat/types";
 import { getLcmDatabase } from "./db";
 import { getLcmDbFeatures } from "./features";
 import { formatToolOutputReference, generateExplorationSummary } from "./large-files";
@@ -178,13 +188,25 @@ export async function assembleAgentLcmContext(agentId: RoomAgentId, tokenBudget 
   return assembler.assemble({ conversationId: conversation.conversationId, tokenBudget });
 }
 
-export async function compactAgentLcmContext(agentId: RoomAgentId, tokenThreshold: number, force?: boolean, summaryModel?: string) {
+export async function compactAgentLcmContext(
+  agentId: RoomAgentId,
+  tokenThreshold: number,
+  force?: boolean,
+  summaryModel?: string,
+  compactionPreference?: CompactionPreference,
+) {
   const { conversationStore, compaction } = await getLcmStores(tokenThreshold);
   const conversation = await conversationStore.getConversationBySessionKey(agentId);
   if (!conversation) {
     return null;
   }
-  return compaction.compact({ conversationId: conversation.conversationId, tokenBudget: tokenThreshold, force, summaryModel });
+  return compaction.compact({
+    conversationId: conversation.conversationId,
+    tokenBudget: tokenThreshold,
+    force,
+    summaryModel,
+    compactionPreference,
+  });
 }
 
 export async function ingestIncomingRoomEnvelope(args: {

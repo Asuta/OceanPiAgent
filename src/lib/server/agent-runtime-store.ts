@@ -10,9 +10,15 @@ import {
   getAgentLcmRetrieval,
   getOrCreateAgentConversation,
 } from "./lcm/facade";
+import { resolveSettingsWithModelConfig } from "./model-config-store";
 import { runAfterCompactionHooks, runBeforeCompactionHooks } from "@/lib/ai/runtime-hooks";
-import { DEFAULT_COMPACTION_TOKEN_THRESHOLD, coerceCompactionTokenThreshold } from "@/lib/chat/types";
-import type { AssistantMessageMeta, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
+import {
+  DEFAULT_COMPACTION_PREFERENCE,
+  DEFAULT_COMPACTION_TOKEN_THRESHOLD,
+  coerceCompactionPreference,
+  coerceCompactionTokenThreshold,
+} from "@/lib/chat/types";
+import type { AssistantMessageMeta, CompactionPreference, MessageImageAttachment, ProviderCompatibility, RoomAgentId } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
 
 export interface PersistedVisibleMessage {
@@ -240,9 +246,34 @@ async function assembleLcmPersistedHistory(agentId: RoomAgentId): Promise<Persis
   }));
 }
 
-async function resolveAgentCompactionTokenThreshold(agentId: RoomAgentId): Promise<number> {
+async function resolveAgentCompactionSettings(
+  agentId: RoomAgentId,
+  fallbackResolvedModel?: string,
+): Promise<{
+  tokenThreshold: number;
+  preference: CompactionPreference;
+  summaryModel?: string;
+}> {
   const workspace = await loadWorkspaceEnvelope().catch(() => null);
-  return coerceCompactionTokenThreshold(workspace?.state.agentStates[agentId]?.settings.compactionTokenThreshold ?? DEFAULT_COMPACTION_TOKEN_THRESHOLD);
+  const agentSettings = workspace?.state.agentStates[agentId]?.settings;
+  const tokenThreshold = coerceCompactionTokenThreshold(agentSettings?.compactionTokenThreshold ?? DEFAULT_COMPACTION_TOKEN_THRESHOLD);
+  const preference = coerceCompactionPreference(agentSettings?.compactionPreference ?? DEFAULT_COMPACTION_PREFERENCE);
+
+  let summaryModel = fallbackResolvedModel?.trim() || "";
+  if (agentSettings) {
+    try {
+      const resolvedSelection = await resolveSettingsWithModelConfig(agentSettings);
+      summaryModel = resolvedSelection.settings.model.trim() || summaryModel;
+    } catch {
+      // Fall back to the last successful runtime model when the current config cannot be resolved.
+    }
+  }
+
+  return {
+    tokenThreshold,
+    preference,
+    ...(summaryModel ? { summaryModel } : {}),
+  };
 }
 
 async function saveStoredRuntime(runtime: PersistedAgentRuntime): Promise<void> {
@@ -325,8 +356,14 @@ export async function compactPersistedAgentRuntime(args: {
 }): Promise<CompactRuntimeResult> {
   const runtimeBefore = await readStoredRuntime(args.agentId);
   const charsBefore = estimateHistoryChars(runtimeBefore.history);
-  const compactionTokenThreshold = await resolveAgentCompactionTokenThreshold(args.agentId);
-  const lcmCompaction = await compactAgentLcmContext(args.agentId, compactionTokenThreshold, args.force).catch(() => null);
+  const compactionSettings = await resolveAgentCompactionSettings(args.agentId, runtimeBefore.resolvedModel);
+  const lcmCompaction = await compactAgentLcmContext(
+    args.agentId,
+    compactionSettings.tokenThreshold,
+    args.force,
+    compactionSettings.summaryModel,
+    compactionSettings.preference,
+  ).catch(() => null);
   if (!lcmCompaction) {
     return {
       compacted: false,

@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 
 type RuntimeStoreModule = typeof import("../src/lib/server/agent-runtime-store");
 type AgentCompactionModule = typeof import("../src/lib/server/agent-compaction");
+type WorkspaceStoreModule = typeof import("../src/lib/server/workspace-store");
 
 const TEST_IMAGE_ATTACHMENT = {
   id: "img-1",
@@ -21,7 +22,12 @@ const TEST_IMAGE_ATTACHMENT = {
 const repoRoot = process.cwd();
 
 async function withRuntimeModules(
-  run: (runtimeStore: RuntimeStoreModule, agentCompaction: AgentCompactionModule, tempDir: string) => Promise<void>,
+  run: (
+    runtimeStore: RuntimeStoreModule,
+    agentCompaction: AgentCompactionModule,
+    workspaceStore: WorkspaceStoreModule,
+    tempDir: string,
+  ) => Promise<void>,
 ) {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "oceanking-agent-runtime-test-"));
   const previousCwd = process.cwd();
@@ -29,13 +35,15 @@ async function withRuntimeModules(
 
   const runtimeStoreUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/agent-runtime-store.ts")).href;
   const agentCompactionUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/agent-compaction.ts")).href;
+  const workspaceStoreUrl = pathToFileURL(path.join(repoRoot, "src/lib/server/workspace-store.ts")).href;
 
   try {
-    const [runtimeStore, agentCompaction] = await Promise.all([
+    const [runtimeStore, agentCompaction, workspaceStore] = await Promise.all([
       import(`${runtimeStoreUrl}?test=${Date.now()}-${Math.random()}`) as Promise<RuntimeStoreModule>,
       import(`${agentCompactionUrl}?test=${Date.now()}-${Math.random()}`) as Promise<AgentCompactionModule>,
+      import(`${workspaceStoreUrl}?test=${Date.now()}-${Math.random()}`) as Promise<WorkspaceStoreModule>,
     ]);
-    await run(runtimeStore, agentCompaction, tempDir);
+    await run(runtimeStore, agentCompaction, workspaceStore, tempDir);
   } finally {
     process.chdir(previousCwd);
     await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
@@ -228,6 +236,42 @@ test("compactPersistedAgentRuntime prunes image-bearing messages when they fall 
     assert.match(result.history[0]?.content ?? "", /^## Decisions/m);
     assert.equal((await runtimeStore.loadPersistedAgentRuntime(agentId)).compactions.length, 1);
     assert.ok(!result.history.some((message) => message.attachments.some((attachment) => attachment.id === TEST_IMAGE_ATTACHMENT.id)));
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
+  });
+});
+
+test("compactPersistedAgentRuntime skips model summarization when compaction preference is procedural", async () => {
+  await withRuntimeModules(async (runtimeStore, agentCompaction, workspaceStore) => {
+    const agentId = "concierge";
+    await workspaceStore.mutateWorkspace((state) => ({
+      ...state,
+      agentStates: {
+        ...state.agentStates,
+        [agentId]: {
+          ...state.agentStates[agentId],
+          settings: {
+            ...state.agentStates[agentId].settings,
+            compactionPreference: "procedural_preferred",
+          },
+        },
+      },
+    }));
+
+    agentCompaction.__testing.setGenerateCompactionSummaryOverride(async () => {
+      throw new Error("LLM summarizer should not run for procedural compaction.");
+    });
+    await seedConversation(runtimeStore, agentId);
+
+    const result = await runtimeStore.compactPersistedAgentRuntime({
+      agentId,
+      reason: "manual",
+      force: true,
+    });
+
+    assert.equal(result.compacted, true);
+    assert.match(result.history[0]?.content ?? "", /\[Compacted shared history summary\]/);
+    assert.match(result.history[0]?.content ?? "", /^## Exact identifiers/m);
 
     agentCompaction.__testing.setGenerateCompactionSummaryOverride(undefined);
   });

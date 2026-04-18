@@ -25,6 +25,7 @@ import {
   MAX_MAX_TOOL_LOOP_STEPS,
   MIN_MAX_TOOL_LOOP_STEPS,
   type ApiFormat,
+  type CompactionPreference,
   type MemoryBackendId,
   type ModelConfig,
   type ModelConfigKind,
@@ -71,6 +72,18 @@ const DEFAULT_PI_NATIVE_PROVIDER_ID: PiProviderId = "openai";
 const PI_NATIVE_PROVIDER_OPTIONS = getPiProviderOptions().filter((option) => !option.usesCustomEndpoint);
 const MEMORY_BACKEND_OPTIONS: Array<{ value: MemoryBackendId; label: string; description: string }> = [
   { value: "sqlite-fts", label: "Structured LCM", description: "唯一在线方案。所有记忆、压缩摘要和可展开回溯都直接来自 LCM 结构化存储。" },
+];
+const COMPACTION_PREFERENCE_OPTIONS: Array<{ value: CompactionPreference; label: string; description: string }> = [
+  {
+    value: "llm_preferred",
+    label: "大模型优先",
+    description: "优先让模型生成结构化压缩摘要；如果失败，再回退到程序化摘要。",
+  },
+  {
+    value: "procedural_preferred",
+    label: "程序化优先",
+    description: "直接走确定性程序化压缩，不额外发起模型摘要请求。",
+  },
 ];
 
 interface WorkspaceSkillSummary {
@@ -1024,6 +1037,26 @@ export function SettingsPage() {
                 ))}
               </select>
               <p className="muted-copy">{MEMORY_BACKEND_OPTIONS[0]?.description}</p>
+            </label>
+
+            <label className="field-block" htmlFor={`${agent.id}-compaction-preference`}>
+              <span>压缩策略</span>
+              <select
+                id={`${agent.id}-compaction-preference`}
+                className="text-input"
+                value={state.settings.compactionPreference}
+                onChange={(event) => updateAgentSettings(agent.id, { compactionPreference: event.target.value as CompactionPreference })}
+                disabled={isRunning || isCompacting}
+              >
+                {COMPACTION_PREFERENCE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="muted-copy">
+                {COMPACTION_PREFERENCE_OPTIONS.find((option) => option.value === state.settings.compactionPreference)?.description}
+              </p>
             </label>
           </div>
 

@@ -1,4 +1,11 @@
-import { DEFAULT_COMPACTION_TOKEN_THRESHOLD, DEFAULT_MAX_TOOL_LOOP_STEPS, type ChatSettings, type RoomAgentId } from "@/lib/chat/types";
+import {
+  DEFAULT_COMPACTION_PREFERENCE,
+  DEFAULT_COMPACTION_TOKEN_THRESHOLD,
+  DEFAULT_MAX_TOOL_LOOP_STEPS,
+  type ChatSettings,
+  type CompactionPreference,
+  type RoomAgentId,
+} from "@/lib/chat/types";
 import { formatMessageForTranscript, summarizeImageAttachments } from "@/lib/chat/message-attachments";
 import type { PersistedVisibleMessage } from "./agent-runtime-store";
 
@@ -16,6 +23,7 @@ type GenerateCompactionSummaryArgs = {
   agentId: RoomAgentId;
   messages: PersistedVisibleMessage[];
   resolvedModel: string;
+  preference?: CompactionPreference;
   signal?: AbortSignal;
 };
 
@@ -122,6 +130,7 @@ function createCompactionSettings(resolvedModel: string): ChatSettings {
     providerMode: "auto",
     memoryBackend: "sqlite-fts",
     compactionTokenThreshold: DEFAULT_COMPACTION_TOKEN_THRESHOLD,
+    compactionPreference: DEFAULT_COMPACTION_PREFERENCE,
     maxToolLoopSteps: DEFAULT_MAX_TOOL_LOOP_STEPS,
     thinkingLevel: "low",
     enabledSkillIds: [],
@@ -335,6 +344,10 @@ async function generateStructuredCompactionSummary(args: GenerateCompactionSumma
 }
 
 export async function generateCompactionSummary(args: GenerateCompactionSummaryArgs): Promise<string> {
+  if ((args.preference ?? DEFAULT_COMPACTION_PREFERENCE) === "procedural_preferred") {
+    return buildStructuredFallbackSummary(buildRuleBasedCompactionSummary(args.messages));
+  }
+
   const override = globalThis.__oceankingAgentCompactionSummaryOverride;
   if (override) {
     try {

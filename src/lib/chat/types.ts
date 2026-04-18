@@ -17,9 +17,12 @@ export type ModelConfigKind = (typeof MODEL_CONFIG_KINDS)[number];
 export type ToolScope = "default" | "room";
 export const MEMORY_BACKENDS = ["sqlite-fts", "markdown"] as const;
 export type MemoryBackendId = (typeof MEMORY_BACKENDS)[number];
+export const COMPACTION_PREFERENCES = ["llm_preferred", "procedural_preferred"] as const;
+export type CompactionPreference = (typeof COMPACTION_PREFERENCES)[number];
 
 export const DEFAULT_MAX_TOOL_LOOP_STEPS = 200;
 export const DEFAULT_COMPACTION_TOKEN_THRESHOLD = 200_000;
+export const DEFAULT_COMPACTION_PREFERENCE: CompactionPreference = "llm_preferred";
 export const MIN_COMPACTION_TOKEN_THRESHOLD = 1_000;
 export const MAX_COMPACTION_TOKEN_THRESHOLD = 2_000_000;
 
@@ -520,6 +523,7 @@ export interface ChatSettings {
   providerMode: ProviderMode;
   memoryBackend: MemoryBackendId;
   compactionTokenThreshold: number;
+  compactionPreference: CompactionPreference;
   maxToolLoopSteps: number;
   thinkingLevel: ThinkingLevel;
   enabledSkillIds: string[];
@@ -713,6 +717,12 @@ export function coerceCompactionTokenThreshold(value: unknown): number {
 
   const rounded = Math.round(value);
   return Math.min(MAX_COMPACTION_TOKEN_THRESHOLD, Math.max(MIN_COMPACTION_TOKEN_THRESHOLD, rounded));
+}
+
+export function coerceCompactionPreference(value: unknown): CompactionPreference {
+  return typeof value === "string" && COMPACTION_PREFERENCES.includes(value as CompactionPreference)
+    ? (value as CompactionPreference)
+    : DEFAULT_COMPACTION_PREFERENCE;
 }
 
 export function coerceThinkingLevel(value: unknown): ThinkingLevel {
