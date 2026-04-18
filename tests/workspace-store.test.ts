@@ -57,6 +57,58 @@ test("workspace store persists valid workspace envelopes", async () => {
   });
 });
 
+test("workspace store preserves server room history when a stale client snapshot omits messages", async () => {
+  await withTempCwd(async ({ domain, store }) => {
+    const state = domain.createDefaultWorkspaceState();
+    const room = state.rooms[0]!;
+    const originalMessage = {
+      ...domain.createRoomMessage(room.id, "user", "first", "user"),
+      id: "user-msg-1",
+      seq: 1,
+    };
+    const newerMessage = {
+      ...domain.createRoomMessage(room.id, "user", "missing-from-client", "user"),
+      id: "user-msg-2",
+      seq: 2,
+    };
+
+    state.rooms[0] = {
+      ...room,
+      roomMessages: [originalMessage, newerMessage],
+    };
+
+    const initialEnvelope = await store.loadWorkspaceEnvelope();
+    const firstSave = await store.saveWorkspaceState({
+      expectedVersion: initialEnvelope.version,
+      state,
+    });
+
+    const staleClientState = structuredClone(firstSave.state);
+    staleClientState.rooms[0] = {
+      ...staleClientState.rooms[0]!,
+      roomMessages: staleClientState.rooms[0]!.roomMessages.filter((message) => message.id !== newerMessage.id),
+    };
+    staleClientState.agentStates[room.agentId] = {
+      ...staleClientState.agentStates[room.agentId],
+      settings: {
+        ...staleClientState.agentStates[room.agentId]!.settings,
+        systemPrompt: "updated by client",
+      },
+    };
+
+    const latestEnvelope = await store.loadWorkspaceEnvelope();
+    const saved = await store.saveWorkspaceState({
+      expectedVersion: latestEnvelope.version,
+      state: staleClientState,
+    });
+
+    const savedRoom = saved.state.rooms.find((entry) => entry.id === room.id);
+    assert.ok(savedRoom);
+    assert.equal(savedRoom?.roomMessages.some((message) => message.id === newerMessage.id), true);
+    assert.equal(saved.state.agentStates[room.agentId]?.settings.systemPrompt, "updated by client");
+  });
+});
+
 test("workspace store accepts assistant history tool-call parts with partialJson", async () => {
   await withTempCwd(async ({ domain, store }) => {
     const state = domain.createDefaultWorkspaceState();

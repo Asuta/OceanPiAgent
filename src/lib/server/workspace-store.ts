@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { roomWorkspaceStateSchema } from "@/lib/chat/schemas";
 import type { RoomWorkspaceState } from "@/lib/chat/types";
+import { createAgentSharedState, sortRoomsForDisplay, upsertRoomMessages } from "@/lib/chat/workspace-domain";
 import { createWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
 import { createDefaultWorkspaceState } from "@/lib/server/workspace-state";
 
@@ -84,6 +85,102 @@ function broadcastWorkspaceEvent(event: WorkspaceStreamEvent): void {
   }
 }
 
+function mergeAgentTurnsPreservingServerHistory(
+  serverTurns: NonNullable<RoomWorkspaceState["agentStates"][string]>["agentTurns"],
+  proposedTurns: NonNullable<RoomWorkspaceState["agentStates"][string]>["agentTurns"],
+) {
+  const proposedById = new Map(proposedTurns.map((turn) => [turn.id, turn]));
+  const serverTurnIds = new Set(serverTurns.map((turn) => turn.id));
+  const mergedTurns = [
+    ...serverTurns.map((turn) => proposedById.get(turn.id) ?? turn),
+    ...proposedTurns.filter((turn) => !serverTurnIds.has(turn.id)),
+  ];
+
+  return mergedTurns;
+}
+
+function mergeRoomMessagesPreservingServerHistory(
+  serverMessages: RoomWorkspaceState["rooms"][number]["roomMessages"],
+  proposedMessages: RoomWorkspaceState["rooms"][number]["roomMessages"],
+) {
+  let mergedMessages = serverMessages;
+
+  for (const message of proposedMessages) {
+    mergedMessages = upsertRoomMessages(mergedMessages, message);
+  }
+
+  return mergedMessages;
+}
+
+function mergeRoomsPreservingServerState(
+  serverRooms: RoomWorkspaceState["rooms"],
+  proposedRooms: RoomWorkspaceState["rooms"],
+) {
+  const proposedRoomsById = new Map(proposedRooms.map((room) => [room.id, room]));
+  const mergedRooms = serverRooms.map((room) => {
+    const proposedRoom = proposedRoomsById.get(room.id);
+    if (!proposedRoom) {
+      return room;
+    }
+
+    return {
+      ...room,
+      roomMessages: mergeRoomMessagesPreservingServerHistory(room.roomMessages, proposedRoom.roomMessages),
+      agentTurns: mergeAgentTurnsPreservingServerHistory(room.agentTurns, proposedRoom.agentTurns),
+    };
+  });
+
+  const existingRoomIds = new Set(serverRooms.map((room) => room.id));
+  mergedRooms.push(...proposedRooms.filter((room) => !existingRoomIds.has(room.id)));
+  return sortRoomsForDisplay(mergedRooms);
+}
+
+function mergeAgentStatesPreservingServerState(
+  serverAgentStates: RoomWorkspaceState["agentStates"],
+  proposedAgentStates: RoomWorkspaceState["agentStates"],
+) {
+  const mergedAgentStates: RoomWorkspaceState["agentStates"] = { ...serverAgentStates };
+
+  for (const [agentId, proposedState] of Object.entries(proposedAgentStates)) {
+    const serverState = serverAgentStates[agentId];
+    if (!serverState) {
+      mergedAgentStates[agentId] = proposedState;
+      continue;
+    }
+
+    mergedAgentStates[agentId] = {
+      ...createAgentSharedState(),
+      ...serverState,
+      settings: proposedState.settings,
+      agentTurns: mergeAgentTurnsPreservingServerHistory(serverState.agentTurns, proposedState.agentTurns),
+    };
+  }
+
+  return mergedAgentStates;
+}
+
+function mergeClientWorkspaceStateIntoServerState(
+  serverState: RoomWorkspaceState,
+  proposedState: RoomWorkspaceState,
+): RoomWorkspaceState {
+  const mergedRooms = mergeRoomsPreservingServerState(serverState.rooms, proposedState.rooms);
+  const mergedAgentStates = mergeAgentStatesPreservingServerState(serverState.agentStates, proposedState.agentStates);
+  const activeRoomId = mergedRooms.some((room) => room.id === proposedState.activeRoomId)
+    ? proposedState.activeRoomId
+    : serverState.activeRoomId;
+  const selectedConsoleAgentId = proposedState.selectedConsoleAgentId && mergedAgentStates[proposedState.selectedConsoleAgentId]
+    ? proposedState.selectedConsoleAgentId
+    : serverState.selectedConsoleAgentId;
+
+  return {
+    ...serverState,
+    rooms: mergedRooms,
+    agentStates: mergedAgentStates,
+    activeRoomId,
+    ...(selectedConsoleAgentId ? { selectedConsoleAgentId } : {}),
+  };
+}
+
 export function subscribeWorkspaceEvents(listener: (event: WorkspaceStreamEvent) => void): () => void {
   const subscriptionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   workspaceSubscribers.set(subscriptionId, listener);
@@ -121,10 +218,14 @@ export async function saveWorkspaceState(args: {
       throw error;
     }
 
+    const mergedState = current.version === 0
+      ? parsedState
+      : mergeClientWorkspaceStateIntoServerState(current.state, parsedState);
+
     const nextEnvelope: WorkspaceEnvelope = {
       version: current.version + 1,
       updatedAt: createTimestamp(),
-      state: parsedState,
+      state: mergedState,
     };
     await writeWorkspaceEnvelope(nextEnvelope);
     broadcastWorkspaceEvent({

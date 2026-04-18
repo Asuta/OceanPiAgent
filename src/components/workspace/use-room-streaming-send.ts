@@ -303,14 +303,15 @@ export function useRoomStreamingSend(args: {
             const finalTurn = event.turn;
             activeTurnId = finalTurn.id;
             activeTurnAgentId = finalTurn.agent.id;
-            updateRoomStateEphemeral(roomId, (room) => ({
-              ...room,
-              roomMessages: room.roomMessages.map((message) =>
-                message.id === finalTurn.userMessage.id ? finalTurn.userMessage : message,
-              ),
-              error: "",
-              updatedAt: createTimestamp(),
-            }));
+            updateRoomStateEphemeral(roomId, (room) => (
+              room.error
+                ? {
+                    ...room,
+                    error: "",
+                    updatedAt: createTimestamp(),
+                  }
+                : room
+            ));
 
             const finalizedMessageIds = new Set(finalTurn.emittedMessages.map((message) => message.id));
             for (const previewMessageId of previewMessageIds) {
