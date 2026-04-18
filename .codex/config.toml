@@ -1,0 +1,4 @@
+sandbox_mode = "read-only"
+
+[sandbox_workspace_write]
+network_access = true
