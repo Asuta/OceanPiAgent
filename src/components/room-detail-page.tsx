@@ -738,12 +738,15 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
             {isRunning ? (
               <div className="thread-live-banner" role="status" aria-live="polite">
                 <div className="thread-live-copy">
-                  <strong>{activeParticipant?.name || getAgentDefinition(primaryAgentId).label} 正在继续处理这条会话</strong>
-                  <p>如果你现在发送新消息，会中断当前轮询并接管为新的上下文。</p>
+                  <div className="thread-live-topline">
+                    <strong>{activeParticipant?.name || getAgentDefinition(primaryAgentId).label} 处理中</strong>
+                    <span className="thread-live-badge">live</span>
+                  </div>
+                  <p>发送新消息会接管当前这一轮。</p>
                 </div>
                 <button
                   type="button"
-                  className="ghost-button"
+                  className="mini-button thread-live-stop-button"
                   onClick={() => {
                     void (async () => {
                       setIsStoppingRoom(true);
@@ -756,9 +759,8 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                   }}
                   disabled={isStoppingRoom}
                 >
-                  {isStoppingRoom ? "停止中..." : "强制停止当前回复"}
+                  {isStoppingRoom ? "停止中..." : "停止回复"}
                 </button>
-                <span className="thread-live-badge">live</span>
               </div>
             ) : null}
 

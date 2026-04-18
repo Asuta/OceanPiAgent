@@ -1737,11 +1737,11 @@ html[data-theme="dark"] .thread-list::before {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
   overflow: hidden;
-  padding: 14px 16px;
+  padding: 10px 12px;
   border: 1px solid rgba(15, 135, 115, 0.16);
-  border-radius: 18px;
+  border-radius: 16px;
   background: linear-gradient(135deg, rgba(15, 135, 115, 0.12), rgba(255, 252, 247, 0.82));
 }
 
@@ -1758,13 +1758,29 @@ html[data-theme="dark"] .thread-list::before {
   position: relative;
   z-index: 1;
   display: grid;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
   flex: 1 1 auto;
 }
 
+.thread-live-topline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.thread-live-topline strong {
+  font-size: 1rem;
+  line-height: 1.15;
+}
+
 .thread-live-copy p {
+  margin: 0;
   color: var(--ink-soft);
+  font-size: 0.92rem;
+  line-height: 1.35;
 }
 
 .thread-live-badge {
@@ -1773,15 +1789,16 @@ html[data-theme="dark"] .thread-list::before {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 6px;
+  padding: 5px 10px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.72);
   color: var(--accent-strong);
-  font-size: 0.76rem;
+  font-size: 0.68rem;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .thread-live-badge::before,
@@ -1797,6 +1814,15 @@ html[data-theme="dark"] .thread-list::before {
 .thread-status.running,
 .thread-live-badge {
   color: var(--accent-strong);
+}
+
+.thread-live-stop-button {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  font-size: 0.88rem;
+  white-space: nowrap;
 }
 
 .thread-status.running::before,
@@ -3336,8 +3362,25 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
 
   .thread-live-banner {
     gap: 8px;
-    padding: 10px 12px;
+    padding: 9px 10px;
     border-radius: 16px;
+  }
+
+  .thread-live-topline {
+    gap: 6px;
+  }
+
+  .thread-live-topline strong {
+    font-size: 0.94rem;
+  }
+
+  .thread-live-copy p {
+    font-size: 0.84rem;
+  }
+
+  .thread-live-stop-button {
+    padding: 6px 10px;
+    font-size: 0.8rem;
   }
 
   .thread-list {
