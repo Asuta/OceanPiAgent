@@ -303,6 +303,11 @@ p {
   gap: 10px;
 }
 
+.topbar-mobile-summary,
+.topbar-mobile-toggle {
+  display: none;
+}
+
 .topbar-model-switcher {
   display: grid;
   gap: 6px;
@@ -1391,7 +1396,93 @@ html[data-theme="dark"] .thread-list::before {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
+  min-height: 0;
+}
+
+.room-chat-column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.app-shell.room-detail-route {
+  height: 100dvh;
+  min-height: 100dvh;
+  overflow: hidden;
+}
+
+.app-shell.room-detail-route .app-main-frame {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100dvh;
+  min-height: 0;
+  padding-bottom: 0;
+  overflow: hidden;
+}
+
+.app-shell.room-detail-route .workspace-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.app-shell.room-detail-route .page-stack.room-detail-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  gap: 0;
+  overflow: hidden;
+}
+
+.app-shell.room-detail-route .room-detail-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app-shell.room-detail-route .room-chat-column {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app-shell.room-detail-route .room-chat-shell {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  padding-bottom: 18px;
+  overflow: hidden;
+}
+
+.app-shell.room-detail-route .room-chat-shell .thread-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 12px;
+}
+
+.app-shell.room-detail-route .room-composer-dock {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.app-shell.room-detail-route .room-composer-dock .composer-card {
+  position: static;
+  margin: 0;
+  pointer-events: auto;
 }
 
 .room-detail-layout.sidepanel-open {
@@ -1413,6 +1504,11 @@ html[data-theme="dark"] .thread-list::before {
 .room-chat-toolbar {
   display: flex;
   gap: 10px;
+}
+
+.room-chat-toolbar-mobile,
+.room-mobile-workbench-bar {
+  display: none;
 }
 
 .room-chat-topbar {
@@ -2454,20 +2550,18 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
   border: 1px solid rgba(24, 53, 49, 0.08);
 }
 
-.room-chat-shell .composer-card {
+.room-composer-dock .composer-card {
   flex: 0 0 auto;
-  position: sticky;
-  bottom: 0;
   z-index: 2;
   padding: 14px 16px;
   box-shadow: 0 -12px 24px rgba(24, 53, 49, 0.06);
 }
 
-.room-chat-shell .compact-composer {
+.room-composer-dock .compact-composer {
   padding: 10px 12px;
 }
 
-.room-chat-shell .composer-textarea {
+.room-composer-dock .composer-textarea {
   min-height: 72px;
   max-height: 28vh;
 }
@@ -2851,9 +2945,169 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
   }
 }
 
+@media (max-width: 1100px) {
+  .app-shell.room-detail-route .room-detail-layout.sidepanel-open {
+    grid-template-columns: 1fr;
+  }
+
+  .app-shell.room-detail-route .room-side-panel {
+    position: static;
+    top: auto;
+    height: auto;
+    min-height: auto;
+  }
+}
+
 @media (max-width: 980px) {
   .app-shell {
     grid-template-columns: 1fr;
+  }
+
+  .app-shell.room-detail-route .app-topbar {
+    position: static;
+    top: auto;
+    flex: 0 0 auto;
+    gap: 10px;
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    border-radius: 18px;
+  }
+
+  .app-shell.room-detail-route .topbar-copy .eyebrow-label,
+  .app-shell.room-detail-route .topbar-copy p:last-child {
+    display: none;
+  }
+
+  .app-shell.room-detail-route .topbar-copy h2 {
+    font-size: 1.18rem;
+    line-height: 1.08;
+  }
+
+  .app-shell.room-detail-route .topbar-mobile-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .app-shell.room-detail-route .topbar-mobile-toggle {
+    display: inline-flex;
+    width: auto;
+    min-height: 36px;
+    margin-left: auto;
+    padding: 8px 12px;
+    font-size: 0.9rem;
+  }
+
+  .app-shell.room-detail-route .topbar-actions {
+    display: none;
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+    gap: 12px;
+    padding-top: 4px;
+    border-top: 1px solid var(--line);
+  }
+
+  .app-shell.room-detail-route .topbar-actions.mobile-open {
+    display: flex;
+  }
+
+  .app-shell.room-detail-route .room-detail-layout {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 12px;
+  }
+
+  .app-shell.room-detail-route .room-chat-shell {
+    gap: 10px;
+    padding: 12px;
+    backdrop-filter: none;
+  }
+
+  .app-shell.room-detail-route .room-chat-topbar {
+    flex: 0 0 auto;
+    gap: 8px;
+  }
+
+  .app-shell.room-detail-route .room-chat-toolbar-desktop {
+    display: none;
+  }
+
+  .app-shell.room-detail-route .room-chat-toolbar-mobile {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin: -2px 0 2px;
+    scrollbar-width: none;
+  }
+
+  .app-shell.room-detail-route .room-chat-toolbar-mobile::-webkit-scrollbar {
+    display: none;
+  }
+
+  .app-shell.room-detail-route .room-chat-toolbar-mobile > * {
+    flex: 0 0 auto;
+  }
+
+  .app-shell.room-detail-route .room-chat-titleblock {
+    flex: 0 0 auto;
+    gap: 4px;
+  }
+
+  .app-shell.room-detail-route .room-chat-titleline {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .app-shell.room-detail-route .room-chat-titleline h1 {
+    font-size: 1.12rem;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+  }
+
+  .app-shell.room-detail-route .thread-panel-copy {
+    display: none;
+  }
+
+  .app-shell.room-detail-route .room-chat-shell .thread-list {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .app-shell.room-detail-route .room-composer-dock .composer-card {
+    padding: 10px 12px;
+  }
+
+  .app-shell.room-detail-route .composer-toolbar {
+    gap: 8px;
+  }
+
+  .app-shell.room-detail-route .composer-select {
+    min-height: 36px;
+    padding: 8px 28px 8px 12px;
+  }
+
+  .app-shell.room-detail-route .composer-toolbar-button,
+  .app-shell.room-detail-route .composer-send-button {
+    min-height: 36px;
+    padding: 8px 10px;
+  }
+
+  .app-shell.room-detail-route .composer-textarea {
+    min-height: 56px;
+    max-height: 22vh;
+    padding: 10px 12px;
+  }
+
+  .app-shell.room-detail-route .composer-footnote-row {
+    display: none;
   }
 
   .topbar-actions {
@@ -2892,7 +3146,7 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
   .app-sidebar {
     position: fixed;
     inset: 0 auto 0 0;
-    z-index: 30;
+    z-index: 60;
     width: min(360px, 88vw);
     height: 100vh;
     background: rgba(248, 243, 236, 0.92);
@@ -2926,9 +3180,14 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
   .sidebar-scrim {
     position: fixed;
     inset: 0;
-    z-index: 20;
+    z-index: 50;
     border: 0;
     background: rgba(24, 53, 49, 0.24);
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .app-shell.room-detail-route.sidebar-open .room-composer-dock .composer-card {
     opacity: 0;
     pointer-events: none;
   }
@@ -2944,6 +3203,10 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
 }
 
 @media (max-width: 720px) {
+  .app-shell.room-detail-route .topbar-mobile-summary .meta-chip {
+    display: none;
+  }
+
   .surface-panel,
   .thread-message-card,
   .composer-card,
@@ -2976,6 +3239,40 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
   .app-topbar {
     flex-direction: column;
     align-items: stretch;
+    gap: 14px;
+    padding: 14px;
+  }
+
+  .topbar-copy h2 {
+    font-size: 1.4rem;
+    line-height: 1.12;
+  }
+
+  .topbar-mobile-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .topbar-mobile-toggle {
+    display: inline-flex;
+    width: 100%;
+    justify-content: center;
+  }
+
+  .topbar-actions {
+    display: none;
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+    gap: 12px;
+    padding-top: 4px;
+    border-top: 1px solid var(--line);
+  }
+
+  .topbar-actions.mobile-open {
+    display: flex;
   }
 
   .compact-hero {
@@ -2983,18 +3280,70 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
   }
 
   .room-chat-topbar,
-  .room-chat-toolbar,
   .room-chat-titleline,
   .room-log-hero {
     flex-direction: column;
     align-items: flex-start;
   }
 
+  .room-chat-toolbar-desktop {
+    display: none;
+  }
+
+  .room-chat-toolbar-mobile {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin: -2px 0 2px;
+    scrollbar-width: none;
+  }
+
+  .room-chat-toolbar-mobile::-webkit-scrollbar {
+    display: none;
+  }
+
+  .room-chat-toolbar-mobile > * {
+    flex: 0 0 auto;
+  }
+
   .room-chat-shell {
     height: auto;
     min-height: auto;
-    padding: 16px;
+    gap: 10px;
+    padding: 12px;
     overflow: visible;
+  }
+
+  .room-chat-titleblock {
+    gap: 4px;
+  }
+
+  .room-chat-titleline {
+    gap: 6px;
+  }
+
+  .room-chat-titleline h1 {
+    font-size: 1.12rem;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+  }
+
+  .thread-panel-copy {
+    display: none;
+  }
+
+  .thread-live-banner {
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 16px;
+  }
+
+  .thread-list {
+    gap: 10px;
+    min-height: 240px;
+    padding: 0 0 4px;
   }
 
   .hero-action-group,
@@ -3050,11 +3399,54 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
   }
 
   .thread-message-card {
-    grid-template-columns: 1fr;
+    padding: 12px;
+    border-radius: 14px;
+    gap: 8px;
+  }
+
+  .thread-message-card.is-streaming {
+    gap: 8px;
+  }
+
+  .thread-message-body {
+    font-size: 0.96rem;
+    line-height: 1.56;
+  }
+
+  .thread-message-topline {
+    gap: 8px;
+  }
+
+  .thread-message-kicker,
+  .thread-message-topline span,
+  .message-receipt-note {
+    font-size: 0.78rem;
+  }
+
+  .message-state-row {
+    gap: 6px;
+  }
+
+  .message-state-row .meta-chip,
+  .room-chat-titleline .meta-chip,
+  .room-chat-toolbar-mobile .meta-chip,
+  .room-chat-shell .thread-status {
+    padding: 5px 9px;
+    font-size: 0.74rem;
+    gap: 6px;
+  }
+
+  .room-chat-shell .thread-status::before {
+    width: 7px;
+    height: 7px;
   }
 
   .thread-turn-inline-stack {
     padding-left: 0;
+  }
+
+  .thread-message-card {
+    grid-template-columns: 1fr;
   }
 
   .message-avatar {
@@ -3073,6 +3465,78 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
     width: 100%;
   }
 
+  .app-shell.room-detail-route .room-detail-layout {
+    gap: 10px;
+  }
+
+  .app-shell.room-detail-route .room-chat-shell {
+    padding: 12px;
+  }
+
+  .app-shell.room-detail-route .room-chat-shell .thread-list {
+    padding: 0 0 12px;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .app-shell.room-detail-route .room-composer-dock .composer-card {
+    gap: 8px;
+    padding: 8px;
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--panel-solid) 92%, transparent);
+    backdrop-filter: blur(16px);
+    box-shadow: 0 -14px 28px rgba(24, 53, 49, 0.08);
+  }
+
+  .composer-toolbar {
+    gap: 8px;
+  }
+
+  .composer-action-cluster {
+    order: -1;
+    justify-content: space-between;
+  }
+
+  .composer-tool-group {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: end;
+    gap: 6px;
+  }
+
+  .composer-inline-field {
+    min-width: 0;
+  }
+
+  .composer-inline-label {
+    display: none;
+  }
+
+  .composer-inline-field .text-input,
+  .composer-select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .composer-select {
+    min-height: 38px;
+    padding: 8px 30px 8px 12px;
+  }
+
+  .composer-toolbar-button,
+  .composer-send-button {
+    min-height: 38px;
+    padding: 8px 12px;
+  }
+
+  .composer-textarea {
+    min-height: 84px;
+    max-height: 26vh;
+    padding: 10px 12px;
+    border-radius: 16px;
+    line-height: 1.45;
+  }
+
   .composer-action-cluster {
     justify-content: space-between;
   }
@@ -3081,10 +3545,31 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
     margin-left: auto;
   }
 
+  .composer-footnote-row {
+    display: none;
+  }
+
+  .room-mobile-workbench-bar {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    padding-top: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .room-mobile-workbench-bar .tab-button {
+    width: 100%;
+    min-height: 36px;
+    padding: 8px 10px;
+    font-size: 0.92rem;
+  }
+
   .hero-copy h1,
   .detail-hero h1,
   .sidebar-brand h1 {
-    font-size: clamp(1.75rem, 10vw, 2.3rem);
+    font-size: clamp(1.4rem, 8vw, 1.95rem);
+    line-height: 1.04;
+    letter-spacing: -0.03em;
   }
 
   .text-area {
@@ -3093,5 +3578,35 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
 
   .room-log-pair-grid {
     grid-template-columns: 1fr;
+  }
+
+  .room-side-panel {
+    gap: 12px;
+    max-height: min(72vh, 760px);
+    padding: 14px;
+    border-radius: 20px;
+    scroll-margin-top: 14px;
+  }
+
+  .room-side-panel-header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+    background: inherit;
+  }
+
+  .room-side-panel-body {
+    padding-right: 0;
+  }
+
+  .inspector-tabs {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .inspector-tabs .tab-button {
+    display: none;
   }
 }

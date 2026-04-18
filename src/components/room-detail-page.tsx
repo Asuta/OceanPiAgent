@@ -409,6 +409,10 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   }, [inspectorTab, room?.id, scrollWorkbenchToBottom, workbenchOpen]);
 
   const isRunning = room ? isRoomRunning(room.id) : false;
+  const openWorkbenchTab = useCallback((tab: "console" | "room") => {
+    setInspectorTab(tab);
+    setWorkbenchOpen(true);
+  }, []);
 
   useLayoutEffect(() => {
     const textarea = composerTextareaRef.current;
@@ -658,202 +662,233 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   return (
     <div className="page-stack room-detail-page chat-centric-page">
       <div className={`room-detail-layout${workbenchOpen ? " sidepanel-open" : ""}`}>
-        <section className="surface-panel thread-panel room-chat-shell page-enter">
-          <div className="room-chat-topbar">
-            <div className="room-chat-titleblock">
-              <div className="room-chat-titleline">
-                <h1>{room.title}</h1>
-                <span className={isRunning ? "thread-status running" : "thread-status idle"}>{isRunning ? "处理中" : "空闲"}</span>
-                <span className="meta-chip subtle">{getAgentDefinition(primaryAgentId).label}</span>
-                <span className="meta-chip subtle">{room.roomMessages.length} 条消息</span>
+        <div className="room-chat-column">
+          <section className="surface-panel thread-panel room-chat-shell page-enter">
+            <div className="room-chat-topbar">
+              <div className="room-chat-titleblock">
+                <div className="room-chat-titleline">
+                  <h1>{room.title}</h1>
+                  <span className={isRunning ? "thread-status running" : "thread-status idle"}>{isRunning ? "处理中" : "空闲"}</span>
+                  <span className="meta-chip subtle">{getAgentDefinition(primaryAgentId).label}</span>
+                  <span className="meta-chip subtle">{room.roomMessages.length} 条消息</span>
+                </div>
+                <p className="thread-panel-copy">
+                  {isRunning ? `${activeParticipant?.name || getAgentDefinition(primaryAgentId).label} 正在继续处理这条会话。` : "当前房间已准备就绪，可以直接继续对话。"}
+                </p>
               </div>
-              <p className="thread-panel-copy">
-                {isRunning ? `${activeParticipant?.name || getAgentDefinition(primaryAgentId).label} 正在继续处理这条会话。` : "当前房间已准备就绪，可以直接继续对话。"}
-              </p>
+              <div className="room-chat-toolbar room-chat-toolbar-desktop">
+                <button
+                  type="button"
+                  className={workbenchOpen && inspectorTab === "console" ? "tab-button active" : "tab-button"}
+                  onClick={() => openWorkbenchTab("console")}
+                >
+                  执行详情
+                </button>
+                <button
+                  type="button"
+                  className={workbenchOpen && inspectorTab === "room" ? "tab-button active" : "tab-button"}
+                  onClick={() => openWorkbenchTab("room")}
+                >
+                  房间设置
+                </button>
+                <Link href="/settings" className="secondary-button">
+                  打开设置
+                </Link>
+                <button type="button" className="ghost-button" onClick={() => void clearRoom(room.id)} disabled={isRunning}>
+                  清空房间
+                </button>
+              </div>
             </div>
 
-            <div className="room-chat-toolbar">
+            <div className="room-chat-toolbar room-chat-toolbar-mobile" aria-label="房间快捷操作">
               <button
                 type="button"
                 className={workbenchOpen && inspectorTab === "console" ? "tab-button active" : "tab-button"}
                 onClick={() => {
-                  setInspectorTab("console");
-                  setWorkbenchOpen(true);
+                  if (workbenchOpen && inspectorTab === "console") {
+                    setWorkbenchOpen(false);
+                    return;
+                  }
+                  openWorkbenchTab("console");
                 }}
               >
-                执行详情
+                {workbenchOpen && inspectorTab === "console" ? "收起执行" : "执行详情"}
               </button>
               <button
                 type="button"
                 className={workbenchOpen && inspectorTab === "room" ? "tab-button active" : "tab-button"}
                 onClick={() => {
-                  setInspectorTab("room");
-                  setWorkbenchOpen(true);
+                  if (workbenchOpen && inspectorTab === "room") {
+                    setWorkbenchOpen(false);
+                    return;
+                  }
+                  openWorkbenchTab("room");
                 }}
               >
-                房间设置
+                {workbenchOpen && inspectorTab === "room" ? "收起设置" : "房间设置"}
               </button>
               <Link href="/settings" className="secondary-button">
-                打开设置
+                全局设置
               </Link>
               <button type="button" className="ghost-button" onClick={() => void clearRoom(room.id)} disabled={isRunning}>
-                清空房间
+                清空
               </button>
             </div>
-          </div>
 
-          {isRunning ? (
-            <div className="thread-live-banner" role="status" aria-live="polite">
-              <div className="thread-live-copy">
-                <strong>{activeParticipant?.name || getAgentDefinition(primaryAgentId).label} 正在继续处理这条会话</strong>
-                <p>如果你现在发送新消息，会中断当前轮询并接管为新的上下文。</p>
+            {isRunning ? (
+              <div className="thread-live-banner" role="status" aria-live="polite">
+                <div className="thread-live-copy">
+                  <strong>{activeParticipant?.name || getAgentDefinition(primaryAgentId).label} 正在继续处理这条会话</strong>
+                  <p>如果你现在发送新消息，会中断当前轮询并接管为新的上下文。</p>
+                </div>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => {
+                    void (async () => {
+                      setIsStoppingRoom(true);
+                      try {
+                        await stopRoom(room.id);
+                      } finally {
+                        setIsStoppingRoom(false);
+                      }
+                    })();
+                  }}
+                  disabled={isStoppingRoom}
+                >
+                  {isStoppingRoom ? "停止中..." : "强制停止当前回复"}
+                </button>
+                <span className="thread-live-badge">live</span>
               </div>
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => {
-                  void (async () => {
-                    setIsStoppingRoom(true);
-                    try {
-                      await stopRoom(room.id);
-                    } finally {
-                      setIsStoppingRoom(false);
-                    }
-                  })();
-                }}
-                disabled={isStoppingRoom}
-              >
-                {isStoppingRoom ? "停止中..." : "强制停止当前回复"}
-              </button>
-              <span className="thread-live-badge">live</span>
-            </div>
-          ) : null}
+            ) : null}
 
-          <div ref={threadListRef} className="thread-list">
-            {room.roomMessages.length === 0 ? (
-              <div className="empty-panel thread-empty rich-empty-state">
-                <div className="empty-orbit" aria-hidden="true">
-                  <span className="empty-orbit-ring large" />
-                  <span className="empty-orbit-ring small" />
-                  <span className="empty-orbit-core" />
+            <div ref={threadListRef} className="thread-list">
+              {room.roomMessages.length === 0 ? (
+                <div className="empty-panel thread-empty rich-empty-state">
+                  <div className="empty-orbit" aria-hidden="true">
+                    <span className="empty-orbit-ring large" />
+                    <span className="empty-orbit-ring small" />
+                    <span className="empty-orbit-core" />
+                  </div>
+                  <div className="empty-copy-stack">
+                    <p className="section-label">准备开始</p>
+                    <h3>这个房间还没有第一条消息</h3>
+                    <p>先发一条清晰的目标描述，房间会在内部完成调度，再把适合展示给你的内容投递回来。</p>
+                  </div>
+                  <div className="starter-prompt-grid">
+                    {STARTER_PROMPTS.map((prompt) => (
+                      <button key={prompt} type="button" className="starter-prompt" onClick={() => setDraft(room.id, prompt)}>
+                        {prompt}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="empty-copy-stack">
-                  <p className="section-label">准备开始</p>
-                  <h3>这个房间还没有第一条消息</h3>
-                  <p>先发一条清晰的目标描述，房间会在内部完成调度，再把适合展示给你的内容投递回来。</p>
-                </div>
-                <div className="starter-prompt-grid">
-                  {STARTER_PROMPTS.map((prompt) => (
-                    <button key={prompt} type="button" className="starter-prompt" onClick={() => setDraft(room.id, prompt)}>
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              room.roomMessages.map((message, index) => {
-                const shouldShowState = message.role === "assistant" && (message.kind !== "answer" || message.status !== "completed");
-                const shouldRenderMarkdown = message.role === "assistant" || message.source === "agent_emit";
-                const isLatestMessage = index === room.roomMessages.length - 1;
-                const inlineToolEntries = roomThreadToolEntries.get(message.id) ?? [];
-                const inlineDraftEntries = roomThreadDraftEntries.get(message.id) ?? [];
-                const inlineArtifacts = [
-                  ...inlineToolEntries.map((entry) => ({ kind: "tool" as const, sequence: entry.event.sequence, id: entry.id, entry })),
-                  ...inlineDraftEntries.map((entry) => ({ kind: "draft" as const, sequence: entry.event.sequence, id: entry.id, entry })),
-                ].sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id));
-                return (
-                  <Fragment key={message.id}>
-                    <article
-                      className={`${getMessageCardClass(message)}${isLatestMessage ? " is-latest" : ""}`}
-                      style={isLatestMessage ? undefined : { animationDelay: `${Math.min(index * 34, 180)}ms` }}
-                    >
-                      <div className={`message-avatar ${message.role}`} aria-hidden="true">
-                        {getSenderMonogram(message.sender.name)}
-                      </div>
-                      <div className="thread-message-content">
-                        <div className="thread-message-topline">
-                          <div className="thread-message-heading">
-                            <span className="thread-message-kicker">{getMessageKicker(message)}</span>
-                            <strong>{message.sender.name}</strong>
-                          </div>
-                          <span>{formatTimestamp(message.createdAt)}</span>
+              ) : (
+                room.roomMessages.map((message, index) => {
+                  const shouldShowState = message.role === "assistant" && (message.kind !== "answer" || message.status !== "completed");
+                  const shouldRenderMarkdown = message.role === "assistant" || message.source === "agent_emit";
+                  const isLatestMessage = index === room.roomMessages.length - 1;
+                  const inlineToolEntries = roomThreadToolEntries.get(message.id) ?? [];
+                  const inlineDraftEntries = roomThreadDraftEntries.get(message.id) ?? [];
+                  const inlineArtifacts = [
+                    ...inlineToolEntries.map((entry) => ({ kind: "tool" as const, sequence: entry.event.sequence, id: entry.id, entry })),
+                    ...inlineDraftEntries.map((entry) => ({ kind: "draft" as const, sequence: entry.event.sequence, id: entry.id, entry })),
+                  ].sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id));
+                  return (
+                    <Fragment key={message.id}>
+                      <article
+                        className={`${getMessageCardClass(message)}${isLatestMessage ? " is-latest" : ""}`}
+                        style={isLatestMessage ? undefined : { animationDelay: `${Math.min(index * 34, 180)}ms` }}
+                      >
+                        <div className={`message-avatar ${message.role}`} aria-hidden="true">
+                          {getSenderMonogram(message.sender.name)}
                         </div>
-
-                        {(shouldShowState || message.receipts.length > 0) && (
-                          <div className="message-state-row">
-                            {shouldShowState ? <span className="meta-chip subtle">{ROOM_KIND_LABELS[message.kind]}</span> : null}
-                            {shouldShowState ? <span className="meta-chip subtle">{ROOM_STATUS_LABELS[message.status]}</span> : null}
-                            {message.final === false ? <span className="meta-chip subtle">过程消息</span> : null}
-                            {message.receipts.length > 0 ? <span className="meta-chip subtle">已读不回</span> : null}
+                        <div className="thread-message-content">
+                          <div className="thread-message-topline">
+                            <div className="thread-message-heading">
+                              <span className="thread-message-kicker">{getMessageKicker(message)}</span>
+                              <strong>{message.sender.name}</strong>
+                            </div>
+                            <span>{formatTimestamp(message.createdAt)}</span>
                           </div>
-                        )}
 
-                        {message.content ? (
-                          shouldRenderMarkdown ? (
-                            <MarkdownMessage className="thread-message-body markdown-body" content={message.content} />
-                          ) : (
-                            <div className="thread-message-body">{message.content}</div>
-                          )
-                        ) : null}
+                          {(shouldShowState || message.receipts.length > 0) && (
+                            <div className="message-state-row">
+                              {shouldShowState ? <span className="meta-chip subtle">{ROOM_KIND_LABELS[message.kind]}</span> : null}
+                              {shouldShowState ? <span className="meta-chip subtle">{ROOM_STATUS_LABELS[message.status]}</span> : null}
+                              {message.final === false ? <span className="meta-chip subtle">过程消息</span> : null}
+                              {message.receipts.length > 0 ? <span className="meta-chip subtle">已读不回</span> : null}
+                            </div>
+                          )}
 
-                        {message.attachments.length > 0 ? (
-                          <div className="message-image-grid">
-                            {message.attachments.map((attachment) => (
-                              <a key={attachment.id} className="message-image-link" href={attachment.url} target="_blank" rel="noreferrer">
-                                <Image
-                                  src={attachment.url}
-                                  alt={attachment.filename}
-                                  className="message-image-preview"
-                                  width={240}
-                                  height={180}
-                                  unoptimized
-                                />
-                                <span>{attachment.filename}</span>
-                              </a>
-                            ))}
-                          </div>
-                        ) : null}
+                          {message.content ? (
+                            shouldRenderMarkdown ? (
+                              <MarkdownMessage className="thread-message-body markdown-body" content={message.content} />
+                            ) : (
+                              <div className="thread-message-body">{message.content}</div>
+                            )
+                          ) : null}
 
-                        {message.receipts.length > 0 ? (
-                          <div className="message-receipt-note">
-                            {message.receipts.map((receipt) => `✓ ${receipt.participantName}`).join("  ")}
-                          </div>
-                        ) : null}
-                      </div>
-                    </article>
+                          {message.attachments.length > 0 ? (
+                            <div className="message-image-grid">
+                              {message.attachments.map((attachment) => (
+                                <a key={attachment.id} className="message-image-link" href={attachment.url} target="_blank" rel="noreferrer">
+                                  <Image
+                                    src={attachment.url}
+                                    alt={attachment.filename}
+                                    className="message-image-preview"
+                                    width={240}
+                                    height={180}
+                                    unoptimized
+                                  />
+                                  <span>{attachment.filename}</span>
+                                </a>
+                              ))}
+                            </div>
+                          ) : null}
 
-                    {inlineArtifacts.length > 0 ? (
-                      <div className="thread-turn-inline-stack draft-stack">
-                        {inlineArtifacts.map((artifact) => (
-                          artifact.kind === "tool" ? (
-                            <ToolHistoryInline
-                              key={artifact.id}
-                              entry={artifact.entry}
-                              defaultOpen={false}
-                            />
-                          ) : (
-                            <DraftHistoryInline
-                              key={artifact.id}
-                              entry={artifact.entry}
-                              defaultOpen={artifact.entry.segment.status === "streaming"}
-                            />
-                          )
-                        ))}
-                      </div>
-                    ) : null}
-                  </Fragment>
-                );
-              })
-            )}
-          </div>
+                          {message.receipts.length > 0 ? (
+                            <div className="message-receipt-note">
+                              {message.receipts.map((receipt) => `✓ ${receipt.participantName}`).join("  ")}
+                            </div>
+                          ) : null}
+                        </div>
+                      </article>
 
-          <form
-            className="composer-card compact-composer"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void submitMessage();
-            }}
-          >
+                      {inlineArtifacts.length > 0 ? (
+                        <div className="thread-turn-inline-stack draft-stack">
+                          {inlineArtifacts.map((artifact) => (
+                            artifact.kind === "tool" ? (
+                              <ToolHistoryInline
+                                key={artifact.id}
+                                entry={artifact.entry}
+                                defaultOpen={false}
+                              />
+                            ) : (
+                              <DraftHistoryInline
+                                key={artifact.id}
+                                entry={artifact.entry}
+                                defaultOpen={artifact.entry.segment.status === "streaming"}
+                              />
+                            )
+                          ))}
+                        </div>
+                      ) : null}
+                    </Fragment>
+                  );
+                })
+              )}
+            </div>
+          </section>
+
+          <div className="room-composer-dock">
+            <form
+              className="composer-card compact-composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitMessage();
+              }}
+            >
             <div className="composer-toolbar">
               <div className="composer-tool-group">
                 <label className="field-block inline-field compact-width composer-inline-field" htmlFor="room-sender-select">
@@ -979,8 +1014,45 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
               </span>
               <span className="composer-note">最多 {MAX_MESSAGE_IMAGE_ATTACHMENTS} 张图片，可直接粘贴截图。</span>
             </div>
-          </form>
-        </section>
+
+            <div className="room-mobile-workbench-bar" aria-label="手机工作台切换">
+              <button
+                type="button"
+                className={!workbenchOpen ? "tab-button active" : "tab-button"}
+                onClick={() => setWorkbenchOpen(false)}
+              >
+                聊天
+              </button>
+              <button
+                type="button"
+                className={workbenchOpen && inspectorTab === "console" ? "tab-button active" : "tab-button"}
+                onClick={() => {
+                  if (workbenchOpen && inspectorTab === "console") {
+                    setWorkbenchOpen(false);
+                    return;
+                  }
+                  openWorkbenchTab("console");
+                }}
+              >
+                执行
+              </button>
+              <button
+                type="button"
+                className={workbenchOpen && inspectorTab === "room" ? "tab-button active" : "tab-button"}
+                onClick={() => {
+                  if (workbenchOpen && inspectorTab === "room") {
+                    setWorkbenchOpen(false);
+                    return;
+                  }
+                  openWorkbenchTab("room");
+                }}
+              >
+                设置
+              </button>
+            </div>
+            </form>
+          </div>
+        </div>
 
         {workbenchOpen ? (
           <aside className="surface-panel section-panel room-side-panel page-enter page-enter-delay-1">

@@ -96,6 +96,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [loadingModelConfigs, setLoadingModelConfigs] = useState(true);
   const [compactionThresholdInput, setCompactionThresholdInput] = useState("");
@@ -129,7 +130,6 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const shellTitle = useMemo(() => getShellTitle(pathname), [pathname]);
   const activeTopbarRoomId = useMemo(() => {
     if (!pathname.startsWith("/rooms/")) {
       return "";
@@ -137,6 +137,23 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
 
     return pathname.split("/")[2] ?? "";
   }, [pathname]);
+  const activeTopbarRoom = useMemo(() => {
+    if (!activeTopbarRoomId) {
+      return null;
+    }
+
+    return [...activeRooms, ...archivedRooms].find((room) => room.id === activeTopbarRoomId) ?? null;
+  }, [activeRooms, activeTopbarRoomId, archivedRooms]);
+  const shellTitle = useMemo(() => {
+    if (pathname.startsWith("/rooms/") && activeTopbarRoom) {
+      return {
+        title: activeTopbarRoom.title,
+        subtitle: "消息优先显示，执行与设置按需展开。",
+      };
+    }
+
+    return getShellTitle(pathname);
+  }, [activeTopbarRoom, pathname]);
   const globalModelConfigValue = useMemo(() => {
     if (agents.length === 0) {
       return EMPTY_MODEL_CONFIG_VALUE;
@@ -256,8 +273,32 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
     setCompactionThresholdInput(formatCompactionThreshold(globalCompactionThresholdValue));
   }, [globalCompactionThresholdValue]);
 
+  useEffect(() => {
+    setMobileControlsOpen(false);
+  }, [pathname]);
+
+  const themeStatusText = themeMounted
+    ? themePreference === "system"
+      ? `系统${RESOLVED_THEME_LABELS[systemTheme]}`
+      : `当前${RESOLVED_THEME_LABELS[resolvedTheme]}`
+    : "外观";
+  const modelStatusText = loadingModelConfigs
+    ? "模型加载中"
+    : globalModelConfigValue === MIXED_MODEL_CONFIG_VALUE
+      ? "当前未统一"
+      : selectedGlobalModelConfig?.name || "未配置模型";
+
+  const shellClasses = [
+    "app-shell",
+    sidebarOpen ? "sidebar-open" : "",
+    pathname.startsWith("/rooms/") ? "room-detail-route" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const isRoomDetailRoute = pathname.startsWith("/rooms/");
+
   return (
-    <div className={`app-shell${sidebarOpen ? " sidebar-open" : ""}`}>
+    <div className={shellClasses}>
       <aside className="app-sidebar">
         <section className="sidebar-overview-panel surface-panel">
           <div className="sidebar-brand">
@@ -408,7 +449,24 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
             <h2>{shellTitle.title}</h2>
             <p>{shellTitle.subtitle}</p>
           </div>
-          <div className="topbar-actions">
+          <div className="topbar-mobile-summary">
+            {activeTopbarRoomId ? (
+              <Link href={`/rooms/${activeTopbarRoomId}/logs`} className="secondary-button">
+                Log
+              </Link>
+            ) : null}
+            <span className="meta-chip subtle theme-status-chip">{themeStatusText}</span>
+            <span className="meta-chip subtle theme-status-chip">{modelStatusText}</span>
+            <button
+              type="button"
+              className="ghost-button topbar-mobile-toggle"
+              aria-expanded={mobileControlsOpen}
+              onClick={() => setMobileControlsOpen((value) => !value)}
+            >
+              {mobileControlsOpen ? (isRoomDetailRoute ? "收起全局" : "收起全局控制") : isRoomDetailRoute ? "全局" : "展开全局控制"}
+            </button>
+          </div>
+          <div className={mobileControlsOpen ? "topbar-actions mobile-open" : "topbar-actions"}>
             {activeTopbarRoomId ? (
               <Link href={`/rooms/${activeTopbarRoomId}/logs`} className="secondary-button">
                 Log
@@ -484,19 +542,9 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
               ))}
             </div>
             <span className="meta-chip subtle theme-status-chip">
-              {themeMounted
-                ? themePreference === "system"
-                  ? `系统${RESOLVED_THEME_LABELS[systemTheme]}`
-                  : `当前${RESOLVED_THEME_LABELS[resolvedTheme]}`
-                : "外观"}
+              {themeStatusText}
             </span>
-            <span className="meta-chip subtle theme-status-chip">
-              {loadingModelConfigs
-                ? "模型加载中"
-                : globalModelConfigValue === MIXED_MODEL_CONFIG_VALUE
-                  ? "当前未统一"
-                  : selectedGlobalModelConfig?.name || "未配置模型"}
-            </span>
+            <span className="meta-chip subtle theme-status-chip">{modelStatusText}</span>
           </div>
         </header>
 
