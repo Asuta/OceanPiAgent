@@ -76,6 +76,7 @@ import {
   fetchWorkspaceEnvelope,
   postRoomCommand,
 } from "@/components/workspace/persistence";
+import { applyRoomManagementActionsToRooms } from "@/components/workspace/room-management-actions";
 import {
   dedupeAgentTurns,
   mergeAgentTurns,
@@ -2076,6 +2077,49 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const applyRoomActionsEphemeral = useCallback(
+    (agentId: RoomAgentId, actions: RoomToolActionUnion[]) => {
+      if (actions.length === 0) {
+        return;
+      }
+
+      skipNextServerPersistRef.current = true;
+      setRooms((current) => {
+        const nextRooms = applyRoomManagementActionsToRooms({
+          rooms: current,
+          actions,
+          actorAgentId: agentId,
+          agentDefinitions: agentsRef.current,
+        });
+
+        const changed =
+          nextRooms.length !== current.length
+          || nextRooms.some((room, index) => room !== current[index]);
+
+        if (!changed) {
+          return current;
+        }
+
+        roomsRef.current = nextRooms;
+        setAgentStates((currentAgentStates) => {
+          const nextAgentStates = ensureAgentStateMap(currentAgentStates, agentsRef.current, nextRooms);
+          const agentStateChanged = Object.keys(nextAgentStates).some(
+            (key) => nextAgentStates[key as RoomAgentId] !== currentAgentStates[key as RoomAgentId],
+          ) || Object.keys(currentAgentStates).some((key) => !(key in nextAgentStates));
+
+          if (!agentStateChanged) {
+            return currentAgentStates;
+          }
+
+          agentStatesRef.current = nextAgentStates;
+          return nextAgentStates;
+        });
+        return nextRooms;
+      });
+    },
+    [],
+  );
+
   const updateAgentTurnsEphemeral = useCallback(
     (agentId: RoomAgentId, updater: (turns: AgentRoomTurn[]) => AgentRoomTurn[]) => {
       skipNextServerPersistRef.current = true;
@@ -2189,6 +2233,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     updateAgentState,
     updateAgentTurnsEphemeral,
     updateRoomStateEphemeral,
+    applyRoomActionsEphemeral,
     applyReceiptUpdateToAllAgentConsolesEphemeral,
     normalizeAssistantMeta,
   });

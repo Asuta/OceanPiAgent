@@ -8,6 +8,7 @@ import type {
   RoomMessage,
   RoomMessageReceiptUpdate,
   RoomSession,
+  RoomToolActionUnion,
   RoomWorkspaceState,
 } from "@/lib/chat/types";
 import { applyMessageReceiptUpdate, createTimestamp, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
@@ -47,6 +48,7 @@ export function useRoomStreamingSend(args: {
   updateAgentState: (agentId: RoomAgentId, updater: (state: AgentSharedState) => AgentSharedState) => void;
   updateAgentTurnsEphemeral: (agentId: RoomAgentId, updater: (turns: AgentRoomTurn[]) => AgentRoomTurn[]) => void;
   updateRoomStateEphemeral: (roomId: string, updater: (room: RoomSession) => RoomSession) => void;
+  applyRoomActionsEphemeral: (agentId: RoomAgentId, actions: RoomToolActionUnion[]) => void;
   applyReceiptUpdateToAllAgentConsolesEphemeral: (update: RoomMessageReceiptUpdate) => void;
   normalizeAssistantMeta: (value: unknown) => AgentRoomTurn["meta"] | undefined;
 }) {
@@ -62,6 +64,7 @@ export function useRoomStreamingSend(args: {
     updateAgentState,
     updateAgentTurnsEphemeral,
     updateRoomStateEphemeral,
+    applyRoomActionsEphemeral,
     applyReceiptUpdateToAllAgentConsolesEphemeral,
     normalizeAssistantMeta,
   } = args;
@@ -247,6 +250,10 @@ export function useRoomStreamingSend(args: {
               return;
             }
 
+            if (tool.status === "success" && tool.roomAction) {
+              applyRoomActionsEphemeral(activeTurnAgentId, [tool.roomAction]);
+            }
+
             updateAgentTurnsEphemeral(activeTurnAgentId, (turns) =>
               turns.map((turn) =>
                 turn.id === activeTurnId
@@ -402,6 +409,7 @@ export function useRoomStreamingSend(args: {
       updateAgentState,
       updateAgentTurnsEphemeral,
       updateRoomStateEphemeral,
+      applyRoomActionsEphemeral,
     ],
   );
 
