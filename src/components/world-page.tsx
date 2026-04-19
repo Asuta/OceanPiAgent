@@ -5,7 +5,7 @@ import { useWorkspaceAgentsState, useWorkspaceRoomsState } from "@/components/wo
 
 export function WorldPage() {
   const { rooms, hydrated } = useWorkspaceRoomsState();
-  const { agents, agentStates } = useWorkspaceAgentsState();
+  const { agents, agentStates, workspaceRuntimeState } = useWorkspaceAgentsState();
 
   return (
     <div className="page-stack world-page">
@@ -21,7 +21,7 @@ export function WorldPage() {
 
       {hydrated ? (
         <section className="surface-panel section-panel page-enter page-enter-delay-1">
-          <AgentWorldPanel agents={agents} rooms={rooms} agentStates={agentStates} />
+          <AgentWorldPanel agents={agents} rooms={rooms} agentStates={agentStates} runtimeState={workspaceRuntimeState} />
         </section>
       ) : (
         <section className="surface-panel empty-panel large">正在恢复像素办公室...</section>

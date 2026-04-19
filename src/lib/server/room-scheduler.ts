@@ -16,8 +16,10 @@ import {
   extractAssistantMetaFromRoomTurnError,
   runPreparedRoomTurn,
   runRoomTurnNonStreaming,
+  type RoomTurnCallbacks,
   type RunRoomTurnResult,
 } from "@/lib/server/room-runner";
+import { clearAgentRuntime, finishAgentToolRuntime, startAgentToolRuntime } from "@/lib/server/workspace-runtime-store";
 import { applyRoomTurnToWorkspace } from "@/lib/server/workspace-state";
 import { resolveSettingsWithModelConfig } from "@/lib/server/model-config-store";
 import { loadWorkspaceEnvelope, mutateWorkspace } from "@/lib/server/workspace-store";
@@ -30,6 +32,7 @@ export interface RoomSchedulerRunHooks {
   signal?: AbortSignal;
   onTurnStart?: (turn: AgentRoomTurn) => void | Promise<void>;
   onTextDelta?: (delta: string) => void | Promise<void>;
+  onToolStart?: (tool: { toolCallId: string; toolName: string; arguments?: unknown }) => void | Promise<void>;
   onTool?: (tool: ToolExecution) => void | Promise<void>;
   onRoomMessagePreview?: (message: RoomMessage) => void | Promise<void>;
   onRoomMessage?: (message: RoomMessage) => void | Promise<void>;
@@ -277,6 +280,51 @@ async function emit<T>(callback: ((value: T) => void | Promise<void>) | undefine
   await callback(value);
 }
 
+function createSchedulerTurnCallbacks(args: {
+  hooks: RoomSchedulerRunHooks;
+  turnCallbacks?: RoomTurnCallbacks;
+}): RoomTurnCallbacks | undefined {
+  const { hooks, turnCallbacks } = args;
+  if (
+    !turnCallbacks
+    && !hooks.onTextDelta
+    && !hooks.onToolStart
+    && !hooks.onTool
+    && !hooks.onRoomMessagePreview
+    && !hooks.onRoomMessage
+    && !hooks.onReceiptUpdate
+  ) {
+    return undefined;
+  }
+
+  return {
+    onTextDelta: (delta) => {
+      void emit(turnCallbacks?.onTextDelta, delta);
+      return emit(hooks.onTextDelta, delta);
+    },
+    onToolStart: (tool) => {
+      void emit(turnCallbacks?.onToolStart, tool);
+      return emit(hooks.onToolStart, tool);
+    },
+    onTool: (tool) => {
+      void emit(turnCallbacks?.onTool, tool);
+      return emit(hooks.onTool, tool);
+    },
+    onRoomMessagePreview: (message) => {
+      void emit(turnCallbacks?.onRoomMessagePreview, message);
+      return emit(hooks.onRoomMessagePreview, message);
+    },
+    onRoomMessage: (message) => {
+      void emit(turnCallbacks?.onRoomMessage, message);
+      return emit(hooks.onRoomMessage, message);
+    },
+    onReceiptUpdate: (update) => {
+      void emit(turnCallbacks?.onReceiptUpdate, update);
+      return emit(hooks.onReceiptUpdate, update);
+    },
+  };
+}
+
 async function executeScheduledTurn(args: {
   workspace: RoomWorkspaceState;
   room: RoomSession;
@@ -284,10 +332,16 @@ async function executeScheduledTurn(args: {
   participant: RoomSession["participants"][number];
   unseenMessages: RoomMessage[];
   anchorMessageId?: string;
+  turnId: string;
   hooks: RoomSchedulerRunHooks;
+  turnCallbacks?: RoomTurnCallbacks;
   deps: RoomSchedulerDependencies;
 }): Promise<RunRoomTurnResult> {
   const resolvedSelection = await args.deps.resolveSettingsWithModelConfig(getSchedulerSettings(args.workspace, args.targetAgentId));
+  const schedulerTurnCallbacks = createSchedulerTurnCallbacks({
+    hooks: args.hooks,
+    turnCallbacks: args.turnCallbacks,
+  });
 
   if (!hasStreamingHooks(args.hooks)) {
     const schedulerPacket = createSchedulerPacket({
@@ -302,15 +356,15 @@ async function executeScheduledTurn(args: {
       workspace: args.workspace,
       roomId: args.room.id,
       agentId: args.targetAgentId,
+      turnId: args.turnId,
       message: schedulerPacket,
       anchorMessageId: args.anchorMessageId,
       settings: resolvedSelection.settings,
       modelConfigOverrides: resolvedSelection.modelConfigOverrides,
       ...(args.hooks.signal ? { signal: args.hooks.signal } : {}),
-    });
+    }, schedulerTurnCallbacks);
   }
 
-  const turnId = `stream:${createUuid()}`;
   const schedulerPacket = createSchedulerPacket({
     room: args.room,
     participant: args.participant,
@@ -322,7 +376,7 @@ async function executeScheduledTurn(args: {
   await emit(
     args.hooks.onTurnStart,
     createPendingTurn({
-      turnId,
+      turnId: args.turnId,
       agentId: args.targetAgentId,
       agentLabel: args.participant.name,
       schedulerPacket,
@@ -334,7 +388,7 @@ async function executeScheduledTurn(args: {
     workspace: args.workspace,
     roomId: args.room.id,
     agentId: args.targetAgentId,
-    turnId,
+    turnId: args.turnId,
     message: schedulerPacket,
     anchorMessageId: args.anchorMessageId,
     settings: resolvedSelection.settings,
@@ -342,13 +396,7 @@ async function executeScheduledTurn(args: {
   });
   preparedInput.modelConfigOverrides = resolvedSelection.modelConfigOverrides;
 
-  return args.deps.runPreparedRoomTurn(preparedInput, {
-    onTextDelta: (delta) => emit(args.hooks.onTextDelta, delta),
-    onTool: (tool) => emit(args.hooks.onTool, tool),
-    onRoomMessagePreview: (message) => emit(args.hooks.onRoomMessagePreview, message),
-    onRoomMessage: (message) => emit(args.hooks.onRoomMessage, message),
-    onReceiptUpdate: (update) => emit(args.hooks.onReceiptUpdate, update),
-  });
+  return args.deps.runPreparedRoomTurn(preparedInput, schedulerTurnCallbacks);
 }
 
 export async function runRoomSchedulerNow(
@@ -375,6 +423,7 @@ export async function runRoomSchedulerNow(
     ...(combinedSignal ? { signal: combinedSignal } : {}),
     ...(overrides.onTurnStart ? { onTurnStart: overrides.onTurnStart } : {}),
     ...(overrides.onTextDelta ? { onTextDelta: overrides.onTextDelta } : {}),
+    ...(overrides.onToolStart ? { onToolStart: overrides.onToolStart } : {}),
     ...(overrides.onTool ? { onTool: overrides.onTool } : {}),
     ...(overrides.onRoomMessagePreview ? { onRoomMessagePreview: overrides.onRoomMessagePreview } : {}),
     ...(overrides.onRoomMessage ? { onRoomMessage: overrides.onRoomMessage } : {}),
@@ -462,6 +511,24 @@ export async function runRoomSchedulerNow(
     }
 
     const targetAgentId = roundPlan.participant.agentId ?? room.agentId;
+    const turnId = `scheduler:${createUuid()}`;
+    const runtimeCallbacks: RoomTurnCallbacks = {
+      onToolStart: (tool) => {
+        startAgentToolRuntime({
+          agentId: targetAgentId,
+          roomId,
+          turnId,
+          toolCallId: tool.toolCallId,
+          toolName: tool.toolName,
+        });
+      },
+      onTool: (tool) => {
+        finishAgentToolRuntime({
+          agentId: targetAgentId,
+          toolCallId: tool.id,
+        });
+      },
+    };
     let result: RunRoomTurnResult;
     try {
       result = await executeScheduledTurn({
@@ -471,7 +538,9 @@ export async function runRoomSchedulerNow(
         participant: roundPlan.participant,
         unseenMessages: roundPlan.unseenMessages,
         anchorMessageId: roundPlan.anchorMessageId,
+        turnId,
         hooks,
+        turnCallbacks: runtimeCallbacks,
         deps,
       });
     } catch (error) {
@@ -485,6 +554,12 @@ export async function runRoomSchedulerNow(
         await hooks.onError(error, meta);
       }
       throw error;
+    } finally {
+      clearAgentRuntime({
+        agentId: targetAgentId,
+        roomId,
+        turnId,
+      });
     }
 
     const latestWorkspace = await deps.loadWorkspaceEnvelope();

@@ -5,6 +5,7 @@ import {
   buildBrowserWorkspaceCacheState,
   buildWorkspaceBootstrapState,
   mergeBrowserWorkspaceIntoSnapshot,
+  mergeCrossTabBrowserWorkspaceIntoSnapshot,
 } from "@/components/workspace/browser-workspace-cache";
 import type { AgentRoomTurn, ProviderCompatibility } from "@/lib/chat/types";
 import { createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
@@ -215,4 +216,70 @@ test("mergeBrowserWorkspaceIntoSnapshot restores richer room history without rev
   assert.equal(restored.rooms[0]?.roomMessages.length, 2);
   assert.equal(restored.rooms[0]?.roomMessages[0]?.id, userMessage.id);
   assert.equal(restored.rooms[0]?.roomMessages[1]?.id, answerMessage.id);
+});
+
+test("mergeCrossTabBrowserWorkspaceIntoSnapshot applies newer turn details without switching this tab", () => {
+  const currentWorkspace = createDefaultWorkspaceState();
+  const primaryRoom = currentWorkspace.rooms[0]!;
+  const secondaryRoom = {
+    ...createDefaultWorkspaceState().rooms[0]!,
+    id: "room-2",
+    title: "Beta Room",
+    updatedAt: "2026-04-19T10:00:01.000Z",
+  };
+
+  const baseTurn: AgentRoomTurn = {
+    id: "turn-1",
+    agent: {
+      id: "concierge",
+      label: "Harbor Concierge",
+    },
+    userMessage: createRoomMessage(primaryRoom.id, "user", "Please investigate", "user", { seq: 1 }),
+    assistantContent: "",
+    tools: [],
+    emittedMessages: [],
+    status: "running",
+    resolvedModel: "gpt-5.4",
+  };
+
+  currentWorkspace.rooms = [primaryRoom, secondaryRoom];
+  currentWorkspace.activeRoomId = secondaryRoom.id;
+  currentWorkspace.agentStates.concierge = {
+    ...currentWorkspace.agentStates.concierge,
+    agentTurns: [baseTurn],
+    updatedAt: "2026-04-19T10:00:00.000Z",
+  };
+
+  const browserWorkspace = structuredClone(currentWorkspace);
+  browserWorkspace.activeRoomId = primaryRoom.id;
+  browserWorkspace.agentStates.concierge = {
+    ...browserWorkspace.agentStates.concierge,
+    agentTurns: [
+      {
+        ...baseTurn,
+        tools: [
+          {
+            id: "tool-1",
+            sequence: 1,
+            toolName: "web_search",
+            displayName: "Web Search",
+            inputSummary: "latest workspace docs",
+            inputText: "",
+            resultPreview: "",
+            outputText: "",
+            status: "success",
+            durationMs: 12,
+          },
+        ],
+      },
+    ],
+    updatedAt: "2026-04-19T10:00:05.000Z",
+  };
+
+  const merged = mergeCrossTabBrowserWorkspaceIntoSnapshot(currentWorkspace, browserWorkspace);
+
+  assert.equal(merged.activeRoomId, secondaryRoom.id);
+  assert.equal(merged.agentStates.concierge?.agentTurns[0]?.tools.length, 1);
+  assert.equal(merged.agentStates.concierge?.agentTurns[0]?.tools[0]?.displayName, "Web Search");
+  assert.equal(merged.agentStates.concierge?.updatedAt, "2026-04-19T10:00:05.000Z");
 });

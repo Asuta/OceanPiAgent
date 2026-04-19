@@ -160,6 +160,7 @@ test("keeps idle agents in resting mode", () => {
 
   assert.equal(snapshot.agents.find((agent) => agent.agentId === "concierge")?.status, "resting");
   assert.equal(snapshot.agents.find((agent) => agent.agentId === "concierge")?.targetZone, "lounge");
+  assert.equal(snapshot.agents.find((agent) => agent.agentId === "concierge")?.movementDurationMs, 5_000);
 });
 
 test("keeps plain text conversation in resting mode and shows a chat bubble", () => {
@@ -183,7 +184,7 @@ test("keeps plain text conversation in resting mode and shows a chat bubble", ()
   assert.equal(concierge?.pulse?.kind, "chat");
 });
 
-test("moves an agent to working mode only when a tool is actively running", () => {
+test("moves an agent to working mode only when backend runtime says a tool is actively running", () => {
   const snapshot = buildAgentWorldSnapshot({
     agents: AGENTS,
     rooms: [createRoom()],
@@ -204,6 +205,20 @@ test("moves an agent to working mode only when a tool is actively running", () =
       ]),
       operator: createState([]),
     },
+    runtimeState: {
+      agentStates: {
+        concierge: {
+          agentId: "concierge",
+          roomId: "room-1",
+          turnId: "turn-live",
+          toolCallId: "tool-live",
+          toolName: "web_search",
+          status: "working",
+          startedAt: "2026-04-19T10:00:20.000Z",
+          updatedAt: "2026-04-19T10:00:21.000Z",
+        },
+      },
+    },
     currentRoomId: "room-1",
     now: Date.parse("2026-04-19T10:00:25.000Z"),
   });
@@ -212,6 +227,39 @@ test("moves an agent to working mode only when a tool is actively running", () =
   assert.equal(concierge?.status, "working");
   assert.equal(concierge?.targetZone, "workspace");
   assert.equal(concierge?.pulse?.kind, "work");
+  assert.equal(concierge?.movementDurationMs, 2_000);
+});
+
+test("uses backend runtime state to show working mode before a persisted tool result exists", () => {
+  const snapshot = buildAgentWorldSnapshot({
+    agents: AGENTS,
+    rooms: [createRoom()],
+    agentStates: {
+      concierge: createState([]),
+      operator: createState([]),
+    },
+    runtimeState: {
+      agentStates: {
+        concierge: {
+          agentId: "concierge",
+          roomId: "room-1",
+          turnId: "turn-live",
+          toolCallId: "tool-live",
+          toolName: "web_search",
+          status: "working",
+          startedAt: "2026-04-19T10:00:20.000Z",
+          updatedAt: "2026-04-19T10:00:21.000Z",
+        },
+      },
+    },
+    currentRoomId: "room-1",
+    now: Date.parse("2026-04-19T10:00:22.000Z"),
+  } as Parameters<typeof buildAgentWorldSnapshot>[0]);
+
+  const concierge = snapshot.agents.find((agent) => agent.agentId === "concierge");
+  assert.equal(concierge?.status, "working");
+  assert.equal(concierge?.recentToolName, "web_search");
+  assert.equal(concierge?.targetZone, "workspace");
 });
 
 test("keeps an agent at the desk briefly after tool completion, then lets it rest again", () => {
@@ -230,16 +278,39 @@ test("keeps an agent at the desk briefly after tool completion, then lets it res
     rooms: [createRoom()],
     agentStates: state,
     currentRoomId: "room-1",
-    now: Date.parse("2026-04-19T10:00:11.000Z"),
+    now: Date.parse("2026-04-19T10:00:25.000Z"),
   });
   const staleSnapshot = buildAgentWorldSnapshot({
     agents: AGENTS,
     rooms: [createRoom()],
     agentStates: state,
     currentRoomId: "room-1",
-    now: Date.parse("2026-04-19T10:00:20.000Z"),
+    now: Date.parse("2026-04-19T10:00:31.000Z"),
   });
 
   assert.equal(recentSnapshot.agents.find((agent) => agent.agentId === "concierge")?.status, "working");
   assert.equal(staleSnapshot.agents.find((agent) => agent.agentId === "concierge")?.status, "resting");
+});
+
+test("prefers a recent chat bubble when a working agent just emitted a room message", () => {
+  const snapshot = buildAgentWorldSnapshot({
+    agents: AGENTS,
+    rooms: [createRoom()],
+    agentStates: {
+      concierge: createState([
+        createTurn({
+          emittedMessages: [createMessage({ createdAt: "2026-04-19T10:00:10.000Z", content: "我已经把结果发到房间里啦" })],
+          tools: [createTool({ displayName: "Web Search" })],
+        }),
+      ]),
+      operator: createState([]),
+    },
+    currentRoomId: "room-1",
+    now: Date.parse("2026-04-19T10:00:12.000Z"),
+  });
+
+  const concierge = snapshot.agents.find((agent) => agent.agentId === "concierge");
+  assert.equal(concierge?.status, "working");
+  assert.equal(concierge?.pulse?.kind, "chat");
+  assert.equal(concierge?.pulse?.label, "我已经把结果发到房间里啦");
 });

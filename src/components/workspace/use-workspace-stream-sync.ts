@@ -9,10 +9,11 @@ type MutableRef<T> = {
 export function useWorkspaceStreamSync(args: {
   hydrated: boolean;
   workspaceVersionRef: MutableRef<number>;
+  workspaceRuntimeVersionRef: MutableRef<number>;
   applyWorkspaceStreamEvent: (event: WorkspaceStreamEvent) => void;
   refreshWorkspaceFromServer: () => Promise<{ version?: number; state?: RoomWorkspaceState } | null>;
 }) {
-  const { hydrated, workspaceVersionRef, applyWorkspaceStreamEvent, refreshWorkspaceFromServer } = args;
+  const { hydrated, workspaceVersionRef, workspaceRuntimeVersionRef, applyWorkspaceStreamEvent, refreshWorkspaceFromServer } = args;
 
   useEffect(() => {
     if (!hydrated) {
@@ -23,7 +24,22 @@ export function useWorkspaceStreamSync(args: {
     workspaceEvents.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data) as WorkspaceStreamEvent;
-        if (typeof payload.version === "number" && payload.version > workspaceVersionRef.current) {
+        if (payload.type === "snapshot" && typeof payload.version === "number" && payload.version >= workspaceVersionRef.current) {
+          applyWorkspaceStreamEvent(payload);
+          return;
+        }
+
+        if (payload.type === "patch" && typeof payload.version === "number" && payload.version > workspaceVersionRef.current) {
+          applyWorkspaceStreamEvent(payload);
+          return;
+        }
+
+        if (payload.type === "runtime-snapshot") {
+          applyWorkspaceStreamEvent(payload);
+          return;
+        }
+
+        if (payload.type === "runtime-patch" && payload.runtimeVersion > workspaceRuntimeVersionRef.current) {
           applyWorkspaceStreamEvent(payload);
         }
       } catch {
@@ -38,5 +54,5 @@ export function useWorkspaceStreamSync(args: {
     return () => {
       workspaceEvents.close();
     };
-  }, [applyWorkspaceStreamEvent, hydrated, refreshWorkspaceFromServer, workspaceVersionRef]);
+  }, [applyWorkspaceStreamEvent, hydrated, refreshWorkspaceFromServer, workspaceRuntimeVersionRef, workspaceVersionRef]);
 }

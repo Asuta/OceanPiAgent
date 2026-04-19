@@ -29,6 +29,7 @@ import type {
   RoomToolContext,
   ThinkingLevel,
   ToolExecution,
+  ToolExecutionStart,
   ToolScope,
 } from "@/lib/chat/types";
 import { coerceMaxToolLoopSteps } from "@/lib/chat/types";
@@ -79,6 +80,7 @@ interface ResponsesContinuationContext {
 
 interface StreamConversationCallbacks {
   onTextDelta?: (delta: string) => void;
+  onToolStart?: (tool: ToolExecutionStart) => void;
   onTool?: (tool: ToolExecution) => void;
   onRoomMessagePreview?: (preview: RoomMessagePreviewEmission) => void;
 }
@@ -776,6 +778,16 @@ async function runConversationAttempt(args: {
       } else {
         clearFinalRoomDeliveryShortCircuit();
       }
+      return;
+    }
+
+    if (event.type === "tool_execution_start") {
+      clearFinalRoomDeliveryShortCircuit();
+      args.callbacks?.onToolStart?.({
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        arguments: event.args,
+      });
       return;
     }
 

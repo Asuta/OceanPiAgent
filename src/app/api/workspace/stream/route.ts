@@ -2,6 +2,7 @@ import { ensureChannelRuntimeStarted } from "@/lib/server/channel-runtime";
 import { ensureCronDispatcherStarted } from "@/lib/server/cron-dispatcher";
 import type { WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
 import { loadWorkspaceEnvelope, subscribeWorkspaceEvents } from "@/lib/server/workspace-store";
+import { loadWorkspaceRuntimeEnvelope, subscribeWorkspaceRuntimeEvents } from "@/lib/server/workspace-runtime-store";
 
 export const runtime = "nodejs";
 
@@ -22,8 +23,18 @@ export async function GET(request: Request) {
         updatedAt: initialEnvelope.updatedAt,
         state: initialEnvelope.state,
       }));
+      const initialRuntimeEnvelope = loadWorkspaceRuntimeEnvelope();
+      controller.enqueue(encodeEvent({
+        type: "runtime-snapshot",
+        runtimeVersion: initialRuntimeEnvelope.runtimeVersion,
+        updatedAt: initialRuntimeEnvelope.updatedAt,
+        state: initialRuntimeEnvelope.state,
+      }));
 
       const unsubscribe = subscribeWorkspaceEvents((event) => {
+        controller.enqueue(encodeEvent(event));
+      });
+      const unsubscribeRuntime = subscribeWorkspaceRuntimeEvents((event) => {
         controller.enqueue(encodeEvent(event));
       });
       const heartbeat = setInterval(() => {
@@ -33,6 +44,7 @@ export async function GET(request: Request) {
       request.signal.addEventListener("abort", () => {
         clearInterval(heartbeat);
         unsubscribe();
+        unsubscribeRuntime();
         controller.close();
       }, { once: true });
     },

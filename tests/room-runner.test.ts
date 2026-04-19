@@ -43,6 +43,8 @@ async function withTempCwd(run: () => Promise<void>) {
 test("runPreparedRoomTurn streams tool side effects and returns final room result", async () => {
   await withTempCwd(async () => {
     const callbackEvents: string[] = [];
+    const toolStarts: string[] = [];
+    const toolEnds: string[] = [];
     const result = await runPreparedRoomTurn(
       {
         message: {
@@ -112,6 +114,11 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
         },
         conversationRunner: async (_messages, _settings, callbacks) => {
           callbacks?.onTextDelta?.("Done. ");
+          (callbacks as { onToolStart?: (tool: { toolCallId: string }) => void }).onToolStart?.({
+            toolCallId: "tool-1",
+            toolName: "send_message_to_room",
+            arguments: {},
+          });
           callbacks?.onTool?.({
             id: "tool-1",
             sequence: 1,
@@ -130,6 +137,11 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
               status: "completed",
               final: true,
             },
+          });
+          (callbacks as { onToolStart?: (tool: { toolCallId: string }) => void }).onToolStart?.({
+            toolCallId: "tool-2",
+            toolName: "read_no_reply",
+            arguments: {},
           });
           callbacks?.onTool?.({
             id: "tool-2",
@@ -168,6 +180,9 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
       },
       {
         onTextDelta: () => callbackEvents.push("text"),
+        ...( {
+          onToolStart: (tool: { toolCallId: string }) => toolStarts.push(tool.toolCallId),
+        } as unknown as Record<string, unknown>),
         onTool: () => callbackEvents.push("tool"),
         onRoomMessage: () => callbackEvents.push("room-message"),
         onReceiptUpdate: () => callbackEvents.push("receipt"),
@@ -175,6 +190,9 @@ test("runPreparedRoomTurn streams tool side effects and returns final room resul
     );
 
     assert.deepEqual(callbackEvents, ["text", "tool", "room-message", "tool", "receipt"]);
+    toolEnds.push(...result.turn.tools.map((tool) => tool.id));
+    assert.deepEqual(toolStarts, ["tool-1", "tool-2"]);
+    assert.deepEqual(toolEnds, ["tool-1", "tool-2"]);
     assert.equal(result.turn.status, "completed");
     assert.equal(result.turn.assistantContent, "Done. Internal note.");
     assert.equal(result.emittedMessages.length, 1);

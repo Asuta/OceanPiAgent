@@ -1,7 +1,7 @@
 "use client";
 
 import { getRoomAgent } from "@/lib/chat/workspace-domain";
-import type { AgentRoomTurn, AgentSharedState, RoomAgentDefinition, RoomAgentId, RoomMessage, RoomSession } from "@/lib/chat/types";
+import type { AgentRoomTurn, AgentSharedState, RoomAgentDefinition, RoomAgentId, RoomMessage, RoomSession, WorkspaceRuntimeState } from "@/lib/chat/types";
 
 export type AgentWorldStatus = "resting" | "working";
 
@@ -47,6 +47,7 @@ export interface AgentWorldModel {
   recentToolName: string | null;
   recentMessage: string | null;
   colorSeed: number;
+  movementDurationMs: number;
 }
 
 export interface AgentWorldSnapshot {
@@ -65,10 +66,12 @@ const WORLD_ZONES: WorldZone[] = [
   { id: "workspace", label: "Work Room", shortLabel: "工作区", x: 52, y: 12, width: 44, height: 74 },
 ];
 
-const REST_WANDER_INTERVAL_MS = 4_000;
-const WORK_FINISH_GRACE_MS = 4_500;
+const REST_WANDER_INTERVAL_MS = 5_000;
+const WORK_FINISH_GRACE_MS = 20_000;
 const CHAT_BUBBLE_TTL_MS = 7_000;
 const WORK_BUBBLE_TTL_MS = 5_500;
+const REST_TRAVEL_DURATION_MS = 5_000;
+const WORK_TRAVEL_DURATION_MS = 2_000;
 
 const LOUNGE_WAYPOINTS: AgentWorldPoint[] = [
   { x: 14, y: 30, label: "Lounge path A" },
@@ -127,12 +130,6 @@ function getLatestToolTurn(turns: AgentRoomTurn[]): AgentRoomTurn | null {
     .sort((left, right) => getTurnActivityTime(right) - getTurnActivityTime(left))[0] ?? null;
 }
 
-function getLatestRunningToolTurn(turns: AgentRoomTurn[]): AgentRoomTurn | null {
-  return [...turns]
-    .filter((turn) => (turn.status === "running" || turn.status === "continued") && turn.tools.length > 0)
-    .sort((left, right) => getTurnActivityTime(right) - getTurnActivityTime(left))[0] ?? null;
-}
-
 function getRecentToolCompletion(turns: AgentRoomTurn[]): { at: string | null; toolName: string | null } {
   const latestToolTurn = getLatestToolTurn(turns);
   if (!latestToolTurn) {
@@ -154,7 +151,7 @@ function getLatestChatPulse(turns: AgentRoomTurn[]): { at: string | null; messag
 
   return {
     at: latestMessage.createdAt,
-    message: truncateText(latestMessage.content, 18),
+    message: truncateText(latestMessage.content, 36),
   };
 }
 
@@ -187,6 +184,7 @@ export function buildAgentWorldSnapshot(args: {
   agents: RoomAgentDefinition[];
   rooms: RoomSession[];
   agentStates: Record<RoomAgentId, AgentSharedState>;
+  runtimeState?: WorkspaceRuntimeState;
   currentRoomId?: string;
   now?: number;
 }): AgentWorldSnapshot {
@@ -208,33 +206,35 @@ export function buildAgentWorldSnapshot(args: {
       const turns = state?.agentTurns ?? [];
       const relatedRooms = activeRooms.filter((room) => room.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === agentId));
       const latestTurn = getLatestTurn(turns);
-      const latestRunningToolTurn = getLatestRunningToolTurn(turns);
       const recentToolCompletion = getRecentToolCompletion(turns);
       const latestChatPulse = getLatestChatPulse(turns);
+      const runtimeEntry = args.runtimeState?.agentStates[agentId];
       const toolCompletionIsFresh = isFresh(recentToolCompletion.at, now, WORK_FINISH_GRACE_MS);
-      const isWorking = Boolean(latestRunningToolTurn) || toolCompletionIsFresh;
+      const isWorking = Boolean(runtimeEntry) || toolCompletionIsFresh;
       const desk = createDeskPoint(index);
       const target = isWorking ? desk : createRestTarget(index, now);
       const status: AgentWorldStatus = isWorking ? "working" : "resting";
+      const hasFreshChatPulse = isFresh(latestChatPulse.at, now, CHAT_BUBBLE_TTL_MS);
 
       let pulse: WorldEventPulse | null = null;
-      if (isWorking) {
-        pulse = {
-          kind: "work",
-          label: latestRunningToolTurn?.tools.at(-1)?.displayName || recentToolCompletion.toolName || "正在用电脑",
-          expiresAt: new Date(now + WORK_BUBBLE_TTL_MS).toISOString(),
-        };
-      } else if (isFresh(latestChatPulse.at, now, CHAT_BUBBLE_TTL_MS)) {
+      if (hasFreshChatPulse) {
         pulse = {
           kind: "chat",
           label: latestChatPulse.message || "聊两句",
           expiresAt: latestChatPulse.at || new Date(now + CHAT_BUBBLE_TTL_MS).toISOString(),
+        };
+      } else if (isWorking) {
+        pulse = {
+          kind: "work",
+          label: runtimeEntry?.toolName || recentToolCompletion.toolName || "正在用电脑",
+          expiresAt: new Date(now + WORK_BUBBLE_TTL_MS).toISOString(),
         };
       }
 
       const lastActiveAt = [
         latestTurn?.emittedMessages.at(-1)?.createdAt ?? null,
         latestTurn?.userMessage.createdAt ?? null,
+        runtimeEntry?.updatedAt ?? null,
         state?.updatedAt ?? null,
       ]
         .sort((left, right) => getSortableTime(right) - getSortableTime(left))[0] ?? null;
@@ -256,9 +256,10 @@ export function buildAgentWorldSnapshot(args: {
         pulse,
         lastActiveAt,
         resolvedModel: state?.resolvedModel || null,
-        recentToolName: latestRunningToolTurn?.tools.at(-1)?.displayName ?? recentToolCompletion.toolName,
+        recentToolName: runtimeEntry?.toolName ?? recentToolCompletion.toolName,
         recentMessage: latestChatPulse.message,
         colorSeed: index,
+        movementDurationMs: status === "working" ? WORK_TRAVEL_DURATION_MS : REST_TRAVEL_DURATION_MS,
       } satisfies AgentWorldModel;
     });
 

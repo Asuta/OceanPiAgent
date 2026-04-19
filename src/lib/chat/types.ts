@@ -48,6 +48,12 @@ export interface ToolExecutionDetails {
   aborted?: boolean;
 }
 
+export interface ToolExecutionStart {
+  toolCallId: string;
+  toolName: string;
+  arguments?: unknown;
+}
+
 export type RoomAgentId = string;
 
 export type RoomMembershipRole = "owner" | "member";
@@ -576,6 +582,21 @@ export interface RoomWorkspaceState {
   agentStates: Record<RoomAgentId, AgentSharedState>;
   activeRoomId: string;
   selectedConsoleAgentId?: RoomAgentId;
+}
+
+export interface AgentRuntimeState {
+  agentId: RoomAgentId;
+  roomId: string;
+  turnId: string;
+  toolCallId: string;
+  toolName: string;
+  status: "working";
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceRuntimeState {
+  agentStates: Partial<Record<RoomAgentId, AgentRuntimeState>>;
 }
 
 export type CronDeliveryPolicy = "silent" | "only_on_result" | "always_post_summary";

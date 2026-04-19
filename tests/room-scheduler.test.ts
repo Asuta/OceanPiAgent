@@ -4,6 +4,7 @@ import { createSchedulerPacket } from "@/lib/chat/room-scheduler";
 import { addAgentParticipantToRoom } from "@/lib/chat/room-actions";
 import { appendMessageToRoom, createAgentOwnedRoomSession, createAgentSharedState, createDefaultWorkspaceState, createRoomMessage } from "@/lib/chat/workspace-domain";
 import type { RunRoomTurnResult } from "@/lib/server/room-runner";
+import { loadWorkspaceRuntimeEnvelope, resetWorkspaceRuntimeStateForTest } from "@/lib/server/workspace-runtime-store";
 import {
   enqueueRoomScheduler,
   getRoomSchedulerQueueSnapshotForTest,
@@ -183,6 +184,126 @@ test("runRoomSchedulerNow advances multi-agent room work on the server and settl
   assert.equal(nextRoom.scheduler.status, "idle");
   assert.equal(nextRoom.roomMessages.some((message) => message.content === "Concierge handed this to Researcher."), true);
   assert.equal(nextRoom.agentTurns.length, 2);
+});
+
+test("runRoomSchedulerNow exposes backend runtime state while a scheduled tool is executing", async () => {
+  await resetRoomSchedulerStateForTest();
+  resetWorkspaceRuntimeStateForTest();
+
+  let state = createDefaultWorkspaceState();
+  let room = state.rooms[0]!;
+  room = appendMessageToRoom(
+    room,
+    createRoomMessage(room.id, "user", "Please look this up.", "user", {
+      sender: {
+        id: "local-operator",
+        name: "You",
+        role: "participant",
+      },
+    }),
+  );
+  state = {
+    ...state,
+    rooms: [room],
+  };
+
+  const toolStarted = createDeferred<void>();
+  const allowTurnToFinish = createDeferred<void>();
+  const loadWorkspaceEnvelope = async () => ({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    state,
+  });
+  const mutateWorkspace = async (mutator: (workspace: typeof state) => Promise<typeof state> | typeof state) => {
+    state = await mutator(state);
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+  };
+
+  const schedulerRun = runRoomSchedulerNow(room.id, {
+    loadWorkspaceEnvelope,
+    mutateWorkspace,
+    runRoomTurnNonStreaming: async ({ roomId, message, agentId, turnId }, callbacks) => {
+      callbacks?.onToolStart?.({
+        toolCallId: "tool-live",
+        toolName: "web_search",
+        arguments: { query: "harbor weather" },
+      });
+      toolStarted.resolve();
+      await allowTurnToFinish.promise;
+      callbacks?.onTool?.({
+        id: "tool-live",
+        sequence: 1,
+        toolName: "web_search",
+        displayName: "Web Search",
+        inputSummary: "harbor weather",
+        inputText: "{\"query\":\"harbor weather\"}",
+        resultPreview: "Sunny",
+        outputText: "Sunny",
+        status: "success",
+        durationMs: 20,
+      });
+
+      return {
+        turn: {
+          id: turnId ?? `turn-${agentId}`,
+          agent: {
+            id: agentId,
+            label: agentId,
+          },
+          userMessage: {
+            ...createRoomMessage(roomId, "system", message.content, "system", {
+              sender: message.sender,
+              kind: "system",
+            }),
+            id: message.id,
+          },
+          assistantContent: "Fetched it.",
+          tools: [
+            {
+              id: "tool-live",
+              sequence: 1,
+              toolName: "web_search",
+              displayName: "Web Search",
+              inputSummary: "harbor weather",
+              inputText: "{\"query\":\"harbor weather\"}",
+              resultPreview: "Sunny",
+              outputText: "Sunny",
+              status: "success",
+              durationMs: 20,
+            },
+          ],
+          emittedMessages: [],
+          status: "completed",
+          resolvedModel: "generic/fake-model",
+        },
+        resolvedModel: "generic/fake-model",
+        compatibility: {
+          providerKey: "generic",
+          providerLabel: "Generic",
+          baseUrl: "",
+          chatCompletionsToolStyle: "tools",
+          responsesContinuation: "replay",
+          responsesPayloadMode: "json",
+          notes: [],
+        },
+        emittedMessages: [],
+        receiptUpdates: [],
+        roomActions: [],
+      } satisfies RunRoomTurnResult;
+    },
+  });
+
+  await toolStarted.promise;
+  assert.equal(loadWorkspaceRuntimeEnvelope().state.agentStates.concierge?.toolName, "web_search");
+
+  allowTurnToFinish.resolve();
+  await schedulerRun;
+
+  assert.equal(loadWorkspaceRuntimeEnvelope().state.agentStates.concierge, undefined);
 });
 
 test("runRoomSchedulerNow emits streaming callbacks for each scheduled turn", async () => {

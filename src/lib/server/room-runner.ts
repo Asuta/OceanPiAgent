@@ -24,6 +24,7 @@ import type {
   RoomToolActionUnion,
   RoomToolContext,
   ToolExecution,
+  ToolExecutionStart,
   TurnTimelineEvent,
 } from "@/lib/chat/types";
 import { createUuid } from "@/lib/utils/uuid";
@@ -372,6 +373,7 @@ type RoomConversationRunner = (
   settings: ChatSettings,
   callbacks?: {
     onTextDelta?: (delta: string) => void;
+    onToolStart?: (tool: ToolExecutionStart) => void;
     onTool?: (tool: ToolExecution) => void;
     onRoomMessagePreview?: (preview: RoomMessagePreviewEmission) => void;
   },
@@ -489,6 +491,7 @@ export interface RunRoomTurnResult extends RoomChatResponseBody {
 
 export interface RoomTurnCallbacks {
   onTextDelta?: (delta: string) => void;
+  onToolStart?: (tool: ToolExecutionStart) => void;
   onTool?: (tool: ToolExecution) => void;
   onRoomMessagePreview?: (message: RoomMessage) => void;
   onRoomMessage?: (message: RoomMessage) => void;
@@ -663,6 +666,12 @@ export async function runPreparedRoomTurn(
           recordAgentTextDelta(args.agent.id, runContext.requestId, delta);
           accumulator.handleTextDelta(delta);
         },
+        onToolStart: (tool) => {
+          if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
+            return;
+          }
+          callbacks?.onToolStart?.(tool);
+        },
         onRoomMessagePreview: (preview: RoomMessagePreviewEmission) => {
           if (!isCurrentAgentRun(args.agent.id, runContext.requestId)) {
             return;
@@ -779,9 +788,9 @@ export async function runPreparedRoomTurn(
   }
 }
 
-export async function runRoomTurnNonStreaming(args: RunRoomTurnInput): Promise<RunRoomTurnResult> {
+export async function runRoomTurnNonStreaming(args: RunRoomTurnInput, callbacks?: RoomTurnCallbacks): Promise<RunRoomTurnResult> {
   try {
-    return await runPreparedRoomTurn(await buildPreparedInputFromWorkspace(args));
+    return await runPreparedRoomTurn(await buildPreparedInputFromWorkspace(args), callbacks);
   } catch (error) {
     if (!(error instanceof RoomTurnExecutionError)) {
       throw error;

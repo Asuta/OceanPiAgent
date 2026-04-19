@@ -3,7 +3,7 @@
 import type { CSSProperties } from "react";
 import { useAgentWorldState } from "@/components/workspace/use-agent-world-state";
 import { formatTimestamp } from "@/components/workspace-provider";
-import type { AgentSharedState, RoomAgentDefinition, RoomAgentId, RoomSession } from "@/lib/chat/types";
+import type { AgentSharedState, RoomAgentDefinition, RoomAgentId, RoomSession, WorkspaceRuntimeState } from "@/lib/chat/types";
 
 function getWorldSummary(status: string) {
   switch (status) {
@@ -18,12 +18,14 @@ export function AgentWorldPanel(props: {
   agents: RoomAgentDefinition[];
   rooms: RoomSession[];
   agentStates: Record<RoomAgentId, AgentSharedState>;
+  runtimeState?: WorkspaceRuntimeState;
   currentRoomId?: string;
 }) {
   const snapshot = useAgentWorldState({
     agents: props.agents,
     rooms: props.rooms,
     agentStates: props.agentStates,
+    runtimeState: props.runtimeState,
     currentRoomId: props.currentRoomId,
   });
 
@@ -91,6 +93,7 @@ export function AgentWorldPanel(props: {
                   left: `${agent.target.x}%`,
                   top: `${agent.target.y}%`,
                   "--agent-hue": `${(agent.colorSeed * 47) % 360}deg`,
+                  "--agent-travel-duration": `${agent.movementDurationMs}ms`,
                 } as CSSProperties
               }
             >

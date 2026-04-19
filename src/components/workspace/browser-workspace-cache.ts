@@ -3,6 +3,7 @@ import type {
   AgentSharedState,
   AssistantMessageMeta,
   DraftTextSegment,
+  RoomSession,
   RoomAgentId,
   RoomMessage,
   RoomWorkspaceState,
@@ -41,6 +42,15 @@ export interface BrowserWorkspaceCacheRecord {
 function hasSupersetIds<T extends { id: string }>(candidate: T[], baseline: T[]): boolean {
   const candidateIds = new Set(candidate.map((item) => item.id));
   return baseline.every((item) => candidateIds.has(item.id));
+}
+
+function getSortableTime(value: string | null | undefined): number {
+  if (!value) {
+    return 0;
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function mergeTurnsKeepingOrder(serverTurns: AgentRoomTurn[], cachedTurns: AgentRoomTurn[]): AgentRoomTurn[] {
@@ -260,6 +270,85 @@ export function mergeBrowserWorkspaceIntoSnapshot(
 
   return {
     ...serverSnapshot,
+    rooms: mergedRooms,
+    agentStates: mergedAgentStates,
+  };
+}
+
+function mergeCrossTabRoom(baseRoom: RoomSession, browserRoom: RoomSession): RoomSession {
+  const browserUpdatedAt = getSortableTime(browserRoom.updatedAt);
+  const baseUpdatedAt = getSortableTime(baseRoom.updatedAt);
+  const browserMessages = dedupeRoomMessages(browserRoom.roomMessages);
+  const shouldUseBrowserMessages = browserUpdatedAt > baseUpdatedAt
+    || (browserMessages.length >= baseRoom.roomMessages.length && hasSupersetIds(browserMessages, baseRoom.roomMessages));
+
+  if (browserUpdatedAt <= baseUpdatedAt && !shouldUseBrowserMessages) {
+    return baseRoom;
+  }
+
+  return {
+    ...baseRoom,
+    ...(browserUpdatedAt > baseUpdatedAt ? browserRoom : {}),
+    agentTurns: baseRoom.agentTurns,
+    roomMessages: shouldUseBrowserMessages ? browserMessages : baseRoom.roomMessages,
+  };
+}
+
+function mergeCrossTabAgentState(baseState: AgentSharedState, browserState: AgentSharedState): AgentSharedState {
+  const browserUpdatedAt = getSortableTime(browserState.updatedAt);
+  const baseUpdatedAt = getSortableTime(baseState.updatedAt);
+  const browserTurnsAreSuperset = hasSupersetIds(browserState.agentTurns, baseState.agentTurns);
+  const shouldUseBrowserState = browserUpdatedAt > baseUpdatedAt
+    || (browserTurnsAreSuperset && browserState.agentTurns.length >= baseState.agentTurns.length);
+
+  return shouldUseBrowserState ? browserState : baseState;
+}
+
+export function mergeCrossTabBrowserWorkspaceIntoSnapshot(
+  currentSnapshot: RoomWorkspaceState,
+  browserSnapshot: RoomWorkspaceState | null,
+): RoomWorkspaceState {
+  if (!browserSnapshot) {
+    return currentSnapshot;
+  }
+
+  const browserRoomsById = new Map(browserSnapshot.rooms.map((room) => [room.id, room]));
+  let roomsChanged = false;
+  const mergedRooms = currentSnapshot.rooms.map((room) => {
+    const browserRoom = browserRoomsById.get(room.id);
+    if (!browserRoom) {
+      return room;
+    }
+
+    const mergedRoom = mergeCrossTabRoom(room, browserRoom);
+    if (mergedRoom !== room) {
+      roomsChanged = true;
+    }
+    return mergedRoom;
+  });
+
+  let agentStatesChanged = false;
+  const mergedAgentStates = { ...currentSnapshot.agentStates };
+
+  for (const [agentId, state] of Object.entries(currentSnapshot.agentStates) as [RoomAgentId, AgentSharedState][]) {
+    const browserState = browserSnapshot.agentStates[agentId];
+    if (!browserState) {
+      continue;
+    }
+
+    const mergedState = mergeCrossTabAgentState(state, browserState);
+    if (mergedState !== state) {
+      mergedAgentStates[agentId] = mergedState;
+      agentStatesChanged = true;
+    }
+  }
+
+  if (!roomsChanged && !agentStatesChanged) {
+    return currentSnapshot;
+  }
+
+  return {
+    ...currentSnapshot,
     rooms: mergedRooms,
     agentStates: mergedAgentStates,
   };

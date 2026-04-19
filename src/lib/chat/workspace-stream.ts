@@ -1,5 +1,6 @@
 import type {
   AgentRoomTurn,
+  AgentRuntimeState,
   AgentSharedState,
   ChatSettings,
   ProviderCompatibility,
@@ -8,6 +9,7 @@ import type {
   RoomParticipant,
   RoomSchedulerState,
   RoomSession,
+  WorkspaceRuntimeState,
   RoomWorkspaceState,
 } from "@/lib/chat/types";
 import { dedupeRoomMessages, sortRoomsForDisplay, upsertMessageToRoom } from "@/lib/chat/workspace-domain";
@@ -51,6 +53,11 @@ export interface WorkspaceStatePatch {
   selectedConsoleAgentId?: RoomAgentId | null;
 }
 
+export interface WorkspaceRuntimeStatePatch {
+  agentStates?: Partial<Record<RoomAgentId, AgentRuntimeState>>;
+  removedAgentIds?: RoomAgentId[];
+}
+
 export type WorkspaceStreamEvent =
   | {
       type: "snapshot";
@@ -63,6 +70,18 @@ export type WorkspaceStreamEvent =
       version: number;
       updatedAt: string;
       patch: WorkspaceStatePatch;
+    }
+  | {
+      type: "runtime-snapshot";
+      runtimeVersion: number;
+      updatedAt: string;
+      state: WorkspaceRuntimeState;
+    }
+  | {
+      type: "runtime-patch";
+      runtimeVersion: number;
+      updatedAt: string;
+      patch: WorkspaceRuntimeStatePatch;
     };
 
 function stableStringify(value: unknown): string {
@@ -363,5 +382,53 @@ export function applyWorkspaceStatePatch(state: RoomWorkspaceState, patch: Works
             selectedConsoleAgentId: state.selectedConsoleAgentId,
           }
         : {}),
+  };
+}
+
+export function createWorkspaceRuntimeStatePatch(previous: WorkspaceRuntimeState, next: WorkspaceRuntimeState): WorkspaceRuntimeStatePatch {
+  const patch: WorkspaceRuntimeStatePatch = {};
+  const changedAgentStates: Partial<Record<RoomAgentId, AgentRuntimeState>> = {};
+  const removedAgentIds: RoomAgentId[] = [];
+
+  for (const [agentId, nextState] of Object.entries(next.agentStates) as Array<[RoomAgentId, AgentRuntimeState]>) {
+    const previousState = previous.agentStates[agentId];
+    if (!previousState || stableStringify(previousState) !== stableStringify(nextState)) {
+      changedAgentStates[agentId] = nextState;
+    }
+  }
+
+  for (const agentId of Object.keys(previous.agentStates) as RoomAgentId[]) {
+    if (!(agentId in next.agentStates)) {
+      removedAgentIds.push(agentId);
+    }
+  }
+
+  if (Object.keys(changedAgentStates).length > 0) {
+    patch.agentStates = changedAgentStates;
+  }
+
+  if (removedAgentIds.length > 0) {
+    patch.removedAgentIds = removedAgentIds;
+  }
+
+  return patch;
+}
+
+export function applyWorkspaceRuntimeStatePatch(state: WorkspaceRuntimeState, patch: WorkspaceRuntimeStatePatch): WorkspaceRuntimeState {
+  if (!patch.agentStates && !patch.removedAgentIds?.length) {
+    return state;
+  }
+
+  const nextAgentStates = { ...state.agentStates };
+  for (const agentId of patch.removedAgentIds ?? []) {
+    delete nextAgentStates[agentId];
+  }
+
+  for (const [agentId, agentState] of Object.entries(patch.agentStates ?? {}) as Array<[RoomAgentId, AgentRuntimeState]>) {
+    nextAgentStates[agentId] = agentState;
+  }
+
+  return {
+    agentStates: nextAgentStates,
   };
 }

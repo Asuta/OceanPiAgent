@@ -31,6 +31,7 @@ import type {
   RoomSchedulerState,
   RoomSender,
   RoomSession,
+  WorkspaceRuntimeState,
   RoomWorkspaceState,
   ToolExecution,
 } from "@/lib/chat/types";
@@ -70,7 +71,7 @@ import {
   sortRoomParticipants,
   sortRoomsForDisplay,
 } from "@/lib/chat/workspace-domain";
-import { applyWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
+import { applyWorkspaceRuntimeStatePatch, applyWorkspaceStatePatch, type WorkspaceStreamEvent } from "@/lib/chat/workspace-stream";
 import {
   clearPersistedWorkspaceState,
   fetchWorkspaceEnvelope,
@@ -183,6 +184,7 @@ interface WorkspaceContextValue {
   activeRoomId: string;
   activeRoom: RoomSession | null;
   agentStates: Record<RoomAgentId, AgentSharedState>;
+  workspaceRuntimeState: WorkspaceRuntimeState;
   agentCompactionFeedback: Record<RoomAgentId, AgentCompactionFeedback | null>;
   runningAgentRequestIds: Record<string, string>;
   selectedConsoleAgentId: RoomAgentId | null;
@@ -227,7 +229,7 @@ type WorkspaceRoomsContextValue = Pick<
 
 type WorkspaceAgentsContextValue = Pick<
   WorkspaceContextValue,
-  "agents" | "agentStates" | "agentCompactionFeedback" | "runningAgentRequestIds" | "selectedConsoleAgentId"
+  "agents" | "agentStates" | "workspaceRuntimeState" | "agentCompactionFeedback" | "runningAgentRequestIds" | "selectedConsoleAgentId"
 >;
 
 type WorkspaceActionsContextValue = Omit<
@@ -292,6 +294,12 @@ function ensureAgentStateMap(
     }
   }
   return nextState;
+}
+
+function createEmptyWorkspaceRuntimeState(): WorkspaceRuntimeState {
+  return {
+    agentStates: {},
+  };
 }
 
 function ensureAgentFeedbackMap(
@@ -1770,6 +1778,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [agents, setAgents] = useState<RoomAgentDefinition[]>(ROOM_AGENTS);
   const [rooms, setRooms] = useState<RoomSession[]>([]);
   const [agentStates, setAgentStates] = useState<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates(ROOM_AGENTS));
+  const [workspaceRuntimeState, setWorkspaceRuntimeState] = useState<WorkspaceRuntimeState>(createEmptyWorkspaceRuntimeState);
   const [agentCompactionFeedback, setAgentCompactionFeedback] = useState<Record<RoomAgentId, AgentCompactionFeedback | null>>(
     createInitialAgentCompactionFeedback(ROOM_AGENTS),
   );
@@ -1785,7 +1794,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const agentsRef = useRef<RoomAgentDefinition[]>(ROOM_AGENTS);
   const roomsRef = useRef<RoomSession[]>([]);
   const agentStatesRef = useRef<Record<RoomAgentId, AgentSharedState>>(createInitialAgentStates(ROOM_AGENTS));
+  const workspaceRuntimeStateRef = useRef<WorkspaceRuntimeState>(createEmptyWorkspaceRuntimeState());
   const workspaceVersionRef = useRef(0);
+  const workspaceRuntimeVersionRef = useRef(0);
   const activeRoomIdRef = useRef("");
   const selectedConsoleAgentIdRef = useRef<RoomAgentId | null>(null);
   const skipNextServerPersistRef = useRef(false);
@@ -1844,10 +1855,30 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [applyWorkspaceSnapshot],
   );
 
+  const applyWorkspaceRuntimeSnapshot = useCallback((snapshot: WorkspaceRuntimeState, runtimeVersion: number) => {
+    const nextRuntimeState: WorkspaceRuntimeState = {
+      agentStates: { ...snapshot.agentStates },
+    };
+    workspaceRuntimeStateRef.current = nextRuntimeState;
+    workspaceRuntimeVersionRef.current = runtimeVersion;
+    setWorkspaceRuntimeState(nextRuntimeState);
+  }, []);
+
   const applyWorkspaceStreamEvent = useCallback(
     (event: WorkspaceStreamEvent) => {
       if (event.type === "snapshot") {
         applyWorkspaceSnapshot(event.state, event.version, { skipServerPersist: true });
+        return;
+      }
+
+      if (event.type === "runtime-snapshot") {
+        applyWorkspaceRuntimeSnapshot(event.state, event.runtimeVersion);
+        return;
+      }
+
+      if (event.type === "runtime-patch") {
+        const nextRuntimeState = applyWorkspaceRuntimeStatePatch(workspaceRuntimeStateRef.current, event.patch);
+        applyWorkspaceRuntimeSnapshot(nextRuntimeState, event.runtimeVersion);
         return;
       }
 
@@ -1864,7 +1895,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const nextState = applyWorkspaceStatePatch(baseState, event.patch);
       applyWorkspaceSnapshot(nextState, event.version, { skipServerPersist: true });
     },
-    [applyWorkspaceSnapshot],
+    [applyWorkspaceRuntimeSnapshot, applyWorkspaceSnapshot],
   );
 
   const runRoomCommandRequest = useCallback(
@@ -2007,6 +2038,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   useWorkspaceStreamSync({
     hydrated,
     workspaceVersionRef,
+    workspaceRuntimeVersionRef,
     applyWorkspaceStreamEvent,
     refreshWorkspaceFromServer,
   });
@@ -2018,6 +2050,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     agentStatesRef.current = agentStates;
   }, [agentStates]);
+
+  useEffect(() => {
+    workspaceRuntimeStateRef.current = workspaceRuntimeState;
+  }, [workspaceRuntimeState]);
 
   useEffect(() => {
     activeRoomIdRef.current = activeRoomId;
@@ -2241,12 +2277,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const clearAllWorkspace = useCallback(async () => {
     const initialRoom = createRoomSession(1, DEFAULT_AGENT_ID, agentsRef.current);
     const initialAgentStates = createInitialAgentStates(agentsRef.current);
+    const initialRuntimeState = createEmptyWorkspaceRuntimeState();
 
     roomsRef.current = [initialRoom];
     agentStatesRef.current = initialAgentStates;
+    workspaceRuntimeStateRef.current = initialRuntimeState;
+    workspaceRuntimeVersionRef.current = 0;
 
     setRooms([initialRoom]);
     setAgentStates(initialAgentStates);
+    setWorkspaceRuntimeState(initialRuntimeState);
     setAgentCompactionFeedback(createInitialAgentCompactionFeedback(agentsRef.current));
     setActiveRoomId(initialRoom.id);
     setSelectedConsoleAgentId(initialRoom.agentId);
@@ -2528,11 +2568,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     () => ({
       agents,
       agentStates,
+      workspaceRuntimeState,
       agentCompactionFeedback,
       runningAgentRequestIds,
       selectedConsoleAgentId,
     }),
-    [agents, agentCompactionFeedback, agentStates, runningAgentRequestIds, selectedConsoleAgentId],
+    [agents, agentCompactionFeedback, agentStates, runningAgentRequestIds, selectedConsoleAgentId, workspaceRuntimeState],
   );
 
   const actionsContextValue = useMemo<WorkspaceActionsContextValue>(

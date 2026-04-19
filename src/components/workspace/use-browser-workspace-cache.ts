@@ -3,6 +3,8 @@ import type { AgentSharedState, RoomAgentId, RoomSession } from "@/lib/chat/type
 import { saveWorkspaceBootstrapToLocalStorage, saveWorkspaceStateToIndexedDb } from "@/components/workspace/persistence";
 import { buildWorkspaceStateSnapshot } from "@/components/workspace/workspace-state";
 
+const BROWSER_CACHE_WRITE_DEBOUNCE_MS = 80;
+
 export function useBrowserWorkspaceCache(args: {
   hydrated: boolean;
   rooms: RoomSession[];
@@ -25,7 +27,7 @@ export function useBrowserWorkspaceCache(args: {
     saveWorkspaceBootstrapToLocalStorage(snapshot);
     const timer = window.setTimeout(() => {
       void saveWorkspaceStateToIndexedDb(snapshot);
-    }, 200);
+    }, BROWSER_CACHE_WRITE_DEBOUNCE_MS);
 
     return () => {
       window.clearTimeout(timer);
