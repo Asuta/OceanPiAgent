@@ -72,6 +72,13 @@ async function fetchModelConfigs(): Promise<ModelConfig[]> {
 }
 
 function getShellTitle(pathname: string) {
+  if (pathname.startsWith("/world")) {
+    return {
+      title: "像素办公室",
+      subtitle: "用单独页面观察整个工作区里所有 Agent 的状态演出。",
+    };
+  }
+
   if (pathname.startsWith("/settings")) {
     return {
       title: "工作台设置",
@@ -329,6 +336,13 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
           <nav className="sidebar-nav" aria-label="主导航">
             <Link href="/rooms" className={pathname === "/rooms" ? "nav-link active" : "nav-link"} onClick={() => setSidebarOpen(false)}>
               房间总览
+            </Link>
+            <Link
+              href="/world"
+              className={pathname.startsWith("/world") ? "nav-link active" : "nav-link"}
+              onClick={() => setSidebarOpen(false)}
+            >
+              像素办公室
             </Link>
             <Link
               href="/settings"
