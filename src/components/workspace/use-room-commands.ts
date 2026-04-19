@@ -134,6 +134,26 @@ export function useRoomCommands(args: {
     [clearDraftForRoom, runRoomCommandRequest, setSelectedSenderByRoomId],
   );
 
+  const ensureWorldDirectRoom = useCallback(
+    async (agentId: RoomAgentId) => {
+      const snapshot = await runRoomCommandRequest({
+        type: "ensure_world_direct_room",
+        agentId,
+      });
+      const nextRoom = snapshot?.roomId ? snapshot.rooms.find((room) => room.id === snapshot.roomId) ?? null : null;
+      if (nextRoom) {
+        setActiveRoomId(nextRoom.id);
+        setSelectedConsoleAgentId(getPrimaryRoomAgentId(nextRoom));
+        setSelectedSenderByRoomId((current) => ({
+          ...current,
+          [nextRoom.id]: defaultLocalParticipantId,
+        }));
+      }
+      return nextRoom;
+    },
+    [defaultLocalParticipantId, runRoomCommandRequest, setActiveRoomId, setSelectedConsoleAgentId, setSelectedSenderByRoomId],
+  );
+
   const clearRoom = useCallback(
     async (roomId: string) => {
       await runRoomCommandRequest(
@@ -226,6 +246,7 @@ export function useRoomCommands(args: {
 
   return {
     createRoom,
+    ensureWorldDirectRoom,
     renameRoom,
     archiveRoom,
     toggleRoomPinned,

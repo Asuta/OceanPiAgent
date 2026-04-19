@@ -16,8 +16,14 @@ const createRoomSchema = baseSchema.extend({
   agentId: z.string().trim().min(1).max(120).optional(),
 });
 
+const ensureWorldDirectRoomSchema = baseSchema.extend({
+  type: z.literal("ensure_world_direct_room"),
+  agentId: z.string().trim().min(1).max(120),
+});
+
 const commandSchema = z.discriminatedUnion("type", [
   createRoomSchema,
+  ensureWorldDirectRoomSchema,
   baseSchema.extend({ type: z.literal("rename_room"), roomId: z.string().trim().min(1).max(120), title: z.string().trim().min(1).max(120) }),
   baseSchema.extend({ type: z.literal("archive_room"), roomId: z.string().trim().min(1).max(120) }),
   baseSchema.extend({ type: z.literal("toggle_room_pinned"), roomId: z.string().trim().min(1).max(120) }),

@@ -23,6 +23,7 @@ import { RoomCronPanel } from "@/components/room-cron-panel";
 import { useRoomDetailState } from "@/components/room/use-room-detail-state";
 import { DraftHistoryInline } from "@/components/workspace/draft-history-inline";
 import { ToolHistoryInline } from "@/components/workspace/tool-history-inline";
+import { isWorldDirectRoom } from "@/lib/chat/workspace-domain";
 import type { AgentRoomTurn, MessageImageAttachment, RoomAgentId, RoomMessage } from "@/lib/chat/types";
 
 function getTurnRoomId(turn: { userMessage: { roomId: string }; emittedMessages: Array<{ roomId: string }> }) {
@@ -262,6 +263,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
   const lastThreadRoomIdRef = useRef<string | null>(null);
 
   const room = getRoomById(roomId);
+  const isWorldDirect = room ? isWorldDirectRoom(room) : false;
 
   useEffect(() => {
     setPendingAttachments([]);
@@ -1063,7 +1065,9 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                 <p className="muted-copy">
                   {inspectorTab === "console"
                     ? `当前已记录 ${roomTurnStats.turns} 轮轨迹、${roomTurnStats.tools} 次工具调用。`
-                    : `当前房间有 ${room.participants.length} 位参与者，owner 为 ${ownerParticipant?.name ?? "none"}。`}
+                    : isWorldDirect
+                      ? "这是一个像素办公室里的单聊房间，成员固定为你和当前 Agent。"
+                      : `当前房间有 ${room.participants.length} 位参与者，owner 为 ${ownerParticipant?.name ?? "none"}。`}
                 </p>
               </div>
               <div className="inspector-tabs">
@@ -1224,7 +1228,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                     <div className="section-heading-row compact-align">
                       <div>
                         <p className="section-label">参与者</p>
-                        <h3>管理当前房间</h3>
+                        <h3>{isWorldDirect ? "这个房间的成员是固定的" : "管理当前房间"}</h3>
                       </div>
                     </div>
 
@@ -1243,7 +1247,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                             <div className="participant-actions">
                               {isOwner ? <span className="meta-chip">owner</span> : null}
                               <span className="meta-chip subtle">{participant.runtimeKind}</span>
-                              {isAgent ? (
+                              {!isWorldDirect && isAgent ? (
                                 <>
                                   <button type="button" className="mini-button" onClick={() => void moveAgentParticipant(room.id, participant.id, -1)} disabled={isRunning}>
                                     上移
@@ -1256,7 +1260,7 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                                   </button>
                                 </>
                               ) : null}
-                              {participant.id !== "local-operator" ? (
+                              {!isWorldDirect && participant.id !== "local-operator" ? (
                                 <button type="button" className="mini-button danger-text" onClick={() => void removeParticipant(room.id, participant.id)} disabled={isRunning}>
                                   移除
                                 </button>
@@ -1267,43 +1271,49 @@ export function RoomDetailPage({ roomId }: { roomId: string }) {
                       })}
                     </div>
 
-                    <div className="inline-action-row stretch top-gap">
-                      <input
-                        className="text-input"
-                        value={newParticipantName}
-                        onChange={(event) => setNewParticipantName(event.target.value)}
-                        placeholder="新增人工参与者"
-                      />
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        onClick={() => {
-                          void addHumanParticipant(room.id, newParticipantName);
-                          setNewParticipantName("");
-                        }}
-                        disabled={!newParticipantName.trim() || isRunning}
-                      >
-                        添加
-                      </button>
-                    </div>
-
-                    <div className="agent-preset-row top-gap">
-                      {agents.map((agent) => {
-                        const exists = room.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === agent.id);
-                        return (
+                    {isWorldDirect ? (
+                      <p className="composer-note top-gap">世界单聊房间固定为 1 位人类参与者和 1 位 Agent，不支持在这里增删成员或改排序。</p>
+                    ) : (
+                      <>
+                        <div className="inline-action-row stretch top-gap">
+                          <input
+                            className="text-input"
+                            value={newParticipantName}
+                            onChange={(event) => setNewParticipantName(event.target.value)}
+                            placeholder="新增人工参与者"
+                          />
                           <button
-                            key={agent.id}
                             type="button"
-                            className={exists ? "preset-chip active" : "preset-chip"}
-                            onClick={() => void addAgentParticipant(room.id, agent.id)}
-                            disabled={exists || isRunning}
+                            className="secondary-button"
+                            onClick={() => {
+                              void addHumanParticipant(room.id, newParticipantName);
+                              setNewParticipantName("");
+                            }}
+                            disabled={!newParticipantName.trim() || isRunning}
                           >
-                            <strong>{agent.label}</strong>
-                            <span>{exists ? "已加入该房间" : "添加到当前房间"}</span>
+                            添加
                           </button>
-                        );
-                      })}
-                    </div>
+                        </div>
+
+                        <div className="agent-preset-row top-gap">
+                          {agents.map((agent) => {
+                            const exists = room.participants.some((participant) => participant.runtimeKind === "agent" && participant.agentId === agent.id);
+                            return (
+                              <button
+                                key={agent.id}
+                                type="button"
+                                className={exists ? "preset-chip active" : "preset-chip"}
+                                onClick={() => void addAgentParticipant(room.id, agent.id)}
+                                disabled={exists || isRunning}
+                              >
+                                <strong>{agent.label}</strong>
+                                <span>{exists ? "已加入该房间" : "添加到当前房间"}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
                   </section>
 
                   <section className="subtle-panel danger-panel">

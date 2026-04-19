@@ -200,6 +200,7 @@ interface WorkspaceContextValue {
   isAgentCompacting: (agentId: RoomAgentId) => boolean;
   isRoomRunning: (roomId: string) => boolean;
   createRoom: (agentId?: RoomAgentId) => Promise<RoomSession | null>;
+  ensureWorldDirectRoom: (agentId: RoomAgentId) => Promise<RoomSession | null>;
   createAgentDefinition: (input: AgentMutationInput) => Promise<RoomAgentDefinition>;
   renameRoom: (roomId: string, title: string) => Promise<void>;
   archiveRoom: (roomId: string) => Promise<void>;
@@ -2231,6 +2232,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const {
     createRoom,
+    ensureWorldDirectRoom,
     renameRoom,
     archiveRoom,
     toggleRoomPinned,
@@ -2588,6 +2590,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       isAgentCompacting,
       isRoomRunning,
       createRoom,
+      ensureWorldDirectRoom,
       createAgentDefinition,
       renameRoom,
       archiveRoom,
@@ -2617,6 +2620,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       compactAgentContext,
       clearRoom,
       createRoom,
+      ensureWorldDirectRoom,
       deleteRoom,
       getAgentDefinition,
       getRoomById,

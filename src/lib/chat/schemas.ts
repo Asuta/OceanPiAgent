@@ -16,6 +16,7 @@ export const roomAgentIdSchema = z.string().trim().min(1).max(120);
 const providerKeySchema = z.enum(["openai", "right_codes", "generic"]);
 const providerModeSchema = z.enum(["auto", "openai", "right_codes", "generic"]);
 const apiFormatSchema = z.enum(["chat_completions", "responses"]);
+const roomKindSchema = z.enum(["standard", "world_direct"]);
 const thinkingLevelSchema = z.preprocess((value) => (value === "minimal" ? "none" : value), z.enum(THINKING_LEVELS));
 const compactionPreferenceSchema = z.enum(COMPACTION_PREFERENCES);
 export const modelConfigKindSchema = z.enum(["openai_compatible", "pi_builtin"]);
@@ -428,6 +429,7 @@ const roomSessionSchema = z.object({
   id: z.string(),
   title: z.string(),
   agentId: roomAgentIdSchema,
+  kind: roomKindSchema.optional(),
   archivedAt: z.string().nullable(),
   pinnedAt: z.string().nullable(),
   ownerParticipantId: z.string().nullable(),

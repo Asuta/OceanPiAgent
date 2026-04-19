@@ -319,6 +319,8 @@ export interface RoomAgentDefinition extends RoomAgentSnapshot {
   instruction: string;
 }
 
+export type RoomKind = "standard" | "world_direct";
+
 export interface AgentSharedState {
   settings: ChatSettings;
   agentTurns: AgentRoomTurn[];
@@ -564,6 +566,7 @@ export interface RoomSession {
   id: string;
   title: string;
   agentId: RoomAgentId;
+  kind?: RoomKind;
   archivedAt: string | null;
   pinnedAt: string | null;
   ownerParticipantId: string | null;

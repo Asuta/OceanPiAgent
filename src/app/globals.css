@@ -1875,6 +1875,108 @@ html[data-theme="dark"] .thread-list::before {
   font-weight: 700;
 }
 
+.world-page-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
+.world-page-workspace.has-chat-panel {
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.9fr);
+  align-items: start;
+}
+
+.world-page-scene {
+  min-width: 0;
+}
+
+.agent-world-agent {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  appearance: none;
+  color: inherit;
+  font: inherit;
+}
+
+.agent-world-agent {
+  cursor: pointer;
+}
+
+.agent-world-agent.is-selected {
+  filter: drop-shadow(0 0 0.6rem rgba(15, 135, 115, 0.28));
+  z-index: 3;
+}
+
+.agent-world-agent:focus-visible,
+.agent-world-card-button:focus-visible {
+  outline: 2px solid rgba(15, 135, 115, 0.6);
+  outline-offset: 4px;
+}
+
+.agent-world-card-button {
+  width: 100%;
+  appearance: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.agent-world-card-button.is-selected {
+  border-color: rgba(15, 135, 115, 0.36);
+  box-shadow: 0 18px 34px rgba(24, 53, 49, 0.12);
+}
+
+.world-chat-panel {
+  display: grid;
+  gap: 14px;
+  min-height: 0;
+  padding: 18px;
+  align-self: stretch;
+}
+
+.world-chat-placeholder-panel {
+  min-height: 420px;
+}
+
+.world-chat-placeholder {
+  display: grid;
+  align-content: center;
+  gap: 10px;
+  min-height: 100%;
+  color: var(--ink-soft);
+}
+
+.world-chat-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.world-chat-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.world-chat-live-banner {
+  margin-bottom: 0;
+}
+
+.world-chat-thread-list {
+  min-height: 320px;
+  max-height: min(68vh, 760px);
+}
+
+.world-chat-composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+}
+
 @keyframes world-agent-bob {
   0%,
   100% {
@@ -3911,6 +4013,15 @@ html[data-theme="dark"] .thread-message-body.markdown-body th {
 
   .agent-world-stage {
     min-height: 340px;
+  }
+
+  .world-page-workspace.has-chat-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .world-chat-placeholder-panel,
+  .world-chat-panel {
+    min-height: 0;
   }
 
   .agent-world-legend,

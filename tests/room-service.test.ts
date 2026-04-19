@@ -263,6 +263,113 @@ test("runRoomCommand create_room returns the new room even when a pinned room st
   assert.equal(created.room?.title, "Room 2");
 });
 
+test("runRoomCommand ensure_world_direct_room creates one fixed direct room per agent and reuses it", async () => {
+  const harness = createRoomServiceHarness();
+
+  const created = await runRoomCommand(
+    {
+      type: "ensure_world_direct_room",
+      agentId: "researcher",
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+
+  assert.ok(created.room);
+  assert.equal(created.room?.kind, "world_direct");
+  assert.equal(created.room?.agentId, "researcher");
+  assert.equal(created.room?.participants.length, 2);
+  assert.equal(created.room?.participants.filter((participant) => participant.runtimeKind === "human").length, 1);
+  assert.equal(created.room?.participants.filter((participant) => participant.runtimeKind === "agent").length, 1);
+  assert.ok(created.envelope.state.agentStates.researcher);
+
+  const reused = await runRoomCommand(
+    {
+      type: "ensure_world_direct_room",
+      agentId: "researcher",
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+
+  assert.equal(reused.room?.id, created.room?.id);
+  assert.equal(reused.envelope.state.rooms.filter((room) => room.kind === "world_direct" && room.agentId === "researcher").length, 1);
+});
+
+test("runRoomCommand world direct rooms reject participant-management mutations", async () => {
+  const harness = createRoomServiceHarness();
+  const directRoom = await runRoomCommand(
+    {
+      type: "ensure_world_direct_room",
+      agentId: "researcher",
+    },
+    {
+      ...harness.deps,
+      enqueueRoomScheduler: async () => {},
+      stopRoomScheduler: async () => {},
+    },
+  );
+
+  const roomId = directRoom.room!.id;
+
+  await assert.rejects(
+    () =>
+      runRoomCommand(
+        {
+          type: "add_human_participant",
+          roomId,
+          name: "Alice",
+        },
+        {
+          ...harness.deps,
+          enqueueRoomScheduler: async () => {},
+          stopRoomScheduler: async () => {},
+        },
+      ),
+    /locked to a single human and a single agent/i,
+  );
+
+  await assert.rejects(
+    () =>
+      runRoomCommand(
+        {
+          type: "add_agent_participant",
+          roomId,
+          agentId: "planner",
+        },
+        {
+          ...harness.deps,
+          enqueueRoomScheduler: async () => {},
+          stopRoomScheduler: async () => {},
+        },
+      ),
+    /locked to a single human and a single agent/i,
+  );
+
+  await assert.rejects(
+    () =>
+      runRoomCommand(
+        {
+          type: "remove_participant",
+          roomId,
+          participantId: "researcher",
+        },
+        {
+          ...harness.deps,
+          enqueueRoomScheduler: async () => {},
+          stopRoomScheduler: async () => {},
+        },
+      ),
+    /locked to a single human and a single agent/i,
+  );
+});
+
 test("runRoomCommand clear_room resets transcript, scheduler state, and room errors", async () => {
   const harness = createRoomServiceHarness();
   const state = harness.getState();

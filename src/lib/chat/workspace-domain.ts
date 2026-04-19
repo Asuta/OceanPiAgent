@@ -232,6 +232,34 @@ export function createRoomSession(index: number, agentId: RoomAgentId = DEFAULT_
     id: createUuid(),
     title: `Room ${index}`,
     agentId,
+    kind: "standard",
+    archivedAt: null,
+    pinnedAt: null,
+    ownerParticipantId: DEFAULT_LOCAL_PARTICIPANT_ID,
+    receiptRevision: 0,
+    participants,
+    scheduler: createSchedulerState(agentId),
+    roomMessages: [],
+    agentTurns: [],
+    error: "",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+export function createWorldDirectRoomSession(agentId: RoomAgentId, agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): RoomSession {
+  const timestamp = createTimestamp();
+  const agent = getRoomAgent(agentId, agentDefinitions);
+  const participants = sortRoomParticipants([
+    createHumanParticipant(DEFAULT_LOCAL_PARTICIPANT_SENDER.name),
+    createAgentParticipant(agentId, 1, agentDefinitions),
+  ]);
+
+  return {
+    id: createUuid(),
+    title: agent.label,
+    agentId,
+    kind: "world_direct",
     archivedAt: null,
     pinnedAt: null,
     ownerParticipantId: DEFAULT_LOCAL_PARTICIPANT_ID,
@@ -264,6 +292,7 @@ export function createExternalRoomSession(args: {
     id: args.roomId,
     title: args.title,
     agentId: args.agentId,
+    kind: "standard",
     archivedAt: null,
     pinnedAt: null,
     ownerParticipantId: args.humanParticipantId,
@@ -276,6 +305,14 @@ export function createExternalRoomSession(args: {
     createdAt: timestamp,
     updatedAt: timestamp,
   };
+}
+
+export function isWorldDirectRoom(room: RoomSession): boolean {
+  return room.kind === "world_direct";
+}
+
+export function getWorldDirectRoomForAgent(rooms: RoomSession[], agentId: RoomAgentId): RoomSession | null {
+  return rooms.find((room) => room.kind === "world_direct" && room.agentId === agentId) ?? null;
 }
 
 export function createDefaultWorkspaceState(agentDefinitions: RoomAgentDefinition[] = ROOM_AGENTS): RoomWorkspaceState {

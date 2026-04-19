@@ -3,8 +3,11 @@ import {
   createAgentSharedState,
   createTimestamp,
   createRoomSession,
+  createWorldDirectRoomSession,
   DEFAULT_AGENT_ID,
   DEFAULT_LOCAL_PARTICIPANT_ID as DEFAULT_LOCAL_PARTICIPANT_KEY,
+  getWorldDirectRoomForAgent,
+  isWorldDirectRoom,
   sortRoomsForDisplay,
 } from "@/lib/chat/workspace-domain";
 import {
@@ -46,6 +49,7 @@ type RoomServiceDependencies = {
 
 export type RoomCommandInput =
   | { type: "create_room"; agentId?: RoomAgentId }
+  | { type: "ensure_world_direct_room"; agentId: RoomAgentId }
   | { type: "rename_room"; roomId: string; title: string }
   | { type: "archive_room"; roomId: string }
   | { type: "toggle_room_pinned"; roomId: string }
@@ -75,6 +79,12 @@ function requireRoom(workspace: RoomWorkspaceState, roomId: string): RoomSession
 function assertRoomNotRunning(room: RoomSession): void {
   if (room.scheduler.status === "running") {
     throw new Error("Room is currently running.");
+  }
+}
+
+function assertRoomAllowsParticipantManagement(room: RoomSession): void {
+  if (isWorldDirectRoom(room)) {
+    throw new Error("World direct rooms are locked to a single human and a single agent.");
   }
 }
 
@@ -230,6 +240,46 @@ export async function runRoomCommand(
     return getRoomResult(envelope, createdRoomId);
   }
 
+  if (input.type === "ensure_world_direct_room") {
+    let directRoomId = "";
+    const envelope = await applyMutation((workspace, agentDefinitions) => {
+      const existingRoom = getWorldDirectRoomForAgent(workspace.rooms, input.agentId);
+      const nextAgentStates = ensureAgentStates(workspace, [input.agentId]);
+
+      if (existingRoom) {
+        directRoomId = existingRoom.id;
+        const nextWorkspace = nextAgentStates === workspace.agentStates
+          ? workspace
+          : {
+              ...workspace,
+              agentStates: nextAgentStates,
+            };
+
+        if (!existingRoom.archivedAt) {
+          return nextWorkspace;
+        }
+
+        return {
+          ...updateRoomById(nextWorkspace, existingRoom.id, (entry) => ({
+            ...entry,
+            archivedAt: null,
+            updatedAt: createTimestamp(),
+          })),
+          agentStates: nextAgentStates,
+        };
+      }
+
+      const room = createWorldDirectRoomSession(input.agentId, agentDefinitions);
+      directRoomId = room.id;
+      return {
+        ...workspace,
+        rooms: sortRoomsForDisplay([room, ...workspace.rooms]),
+        agentStates: nextAgentStates,
+      };
+    }, deps);
+    return getRoomResult(envelope, directRoomId);
+  }
+
   if (input.type === "send_message") {
     await appendUserRoomMessage({
       roomId: input.roomId,
@@ -311,6 +361,7 @@ export async function runRoomCommand(
   }
 
   if (input.type === "add_human_participant") {
+    assertRoomAllowsParticipantManagement(room);
     const name = input.name.trim();
     if (!name) {
       throw new Error("Participant name cannot be empty.");
@@ -326,6 +377,7 @@ export async function runRoomCommand(
   }
 
   if (input.type === "add_agent_participant") {
+    assertRoomAllowsParticipantManagement(room);
     const envelope = await applyMutation((workspace, agentDefinitions) => ({
       ...updateRoomById(workspace, input.roomId, (entry) =>
         addAgentParticipantToRoom({ room: entry, agentId: input.agentId, agentDefinitions })),
@@ -335,17 +387,20 @@ export async function runRoomCommand(
   }
 
   if (input.type === "remove_participant") {
+    assertRoomAllowsParticipantManagement(room);
     const envelope = await applyMutation((workspace) =>
       updateRoomById(workspace, input.roomId, (entry) => removeParticipantFromRoom({ room: entry, participantId: input.participantId })), deps);
     return getRoomResult(envelope, input.roomId);
   }
 
   if (input.type === "toggle_agent_participant") {
+    assertRoomAllowsParticipantManagement(room);
     const envelope = await applyMutation((workspace) =>
       updateRoomById(workspace, input.roomId, (entry) => toggleAgentParticipantInRoom({ room: entry, participantId: input.participantId })), deps);
     return getRoomResult(envelope, input.roomId);
   }
 
+  assertRoomAllowsParticipantManagement(room);
   const envelope = await applyMutation((workspace) =>
     updateRoomById(
       workspace,

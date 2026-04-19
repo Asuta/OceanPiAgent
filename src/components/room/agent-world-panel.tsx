@@ -20,6 +20,8 @@ export function AgentWorldPanel(props: {
   agentStates: Record<RoomAgentId, AgentSharedState>;
   runtimeState?: WorkspaceRuntimeState;
   currentRoomId?: string;
+  selectedAgentId?: string | null;
+  onAgentSelect?: (agentId: RoomAgentId) => void;
 }) {
   const snapshot = useAgentWorldState({
     agents: props.agents,
@@ -51,7 +53,7 @@ export function AgentWorldPanel(props: {
           </div>
         </div>
 
-        <div className="agent-world-stage playful" role="img" aria-label="A playful pixel office showing agents wandering in the lounge or working at their desks.">
+        <div className="agent-world-stage playful" role="group" aria-label="A playful pixel office showing agents wandering in the lounge or working at their desks.">
           <div className="agent-world-stage-backdrop" aria-hidden="true" />
           {snapshot.zones.map((zone) => (
             <div
@@ -85,9 +87,10 @@ export function AgentWorldPanel(props: {
           ))}
 
           {snapshot.agents.map((agent) => (
-            <article
+            <button
+              type="button"
               key={agent.agentId}
-              className={`agent-world-agent status-${agent.status}${agent.isMoving ? " is-moving" : ""}${agent.isCurrentRoomParticipant ? " is-current-room" : ""}`}
+              className={`agent-world-agent status-${agent.status}${agent.isMoving ? " is-moving" : ""}${agent.isCurrentRoomParticipant ? " is-current-room" : ""}${props.selectedAgentId === agent.agentId ? " is-selected" : ""}`}
               style={
                 {
                   left: `${agent.position.x}%`,
@@ -95,6 +98,8 @@ export function AgentWorldPanel(props: {
                   "--agent-hue": `${(agent.colorSeed * 47) % 360}deg`,
                 } as CSSProperties
               }
+              onClick={() => props.onAgentSelect?.(agent.agentId)}
+              aria-pressed={props.selectedAgentId === agent.agentId}
             >
               <span className="agent-world-agent-shadow" aria-hidden="true" />
               <span className="agent-world-agent-sprite" aria-hidden="true">
@@ -103,7 +108,7 @@ export function AgentWorldPanel(props: {
               </span>
               <span className="agent-world-agent-name">{agent.label}</span>
               {agent.pulse ? <span className={`agent-world-pulse pulse-${agent.pulse.kind}`}>{agent.pulse.label}</span> : null}
-            </article>
+            </button>
           ))}
         </div>
 
@@ -125,7 +130,13 @@ export function AgentWorldPanel(props: {
 
         <div className="agent-world-roster">
           {snapshot.agents.map((agent) => (
-            <article key={`${agent.agentId}-card`} className={`agent-world-card status-${agent.status}`}>
+            <button
+              type="button"
+              key={`${agent.agentId}-card`}
+              className={`agent-world-card agent-world-card-button status-${agent.status}${props.selectedAgentId === agent.agentId ? " is-selected" : ""}`}
+              onClick={() => props.onAgentSelect?.(agent.agentId)}
+              aria-pressed={props.selectedAgentId === agent.agentId}
+            >
               <div className="agent-world-card-topline">
                 <div>
                   <strong>{agent.label}</strong>
@@ -147,7 +158,7 @@ export function AgentWorldPanel(props: {
                 {agent.roomTitles.length > 0 ? `房间: ${agent.roomTitles.join("、")}` : "还没有加入任何活跃房间"}
               </p>
               {agent.lastActiveAt ? <p className="composer-note">最后活动: {formatTimestamp(agent.lastActiveAt)}</p> : null}
-            </article>
+            </button>
           ))}
         </div>
       </section>
