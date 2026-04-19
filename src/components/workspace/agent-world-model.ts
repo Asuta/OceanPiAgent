@@ -1,27 +1,12 @@
 "use client";
 
+import { createPixelOfficeLayout, type AgentWorldPoint, type WorldZone, type WorldZoneId } from "@/components/workspace/agent-world-layout";
+import type { PathfindingWorld } from "@/components/workspace/agent-world-pathfinding";
 import { getRoomAgent } from "@/lib/chat/workspace-domain";
 import type { AgentRoomTurn, AgentSharedState, RoomAgentDefinition, RoomAgentId, RoomMessage, RoomSession, WorkspaceRuntimeState } from "@/lib/chat/types";
 
 export type AgentWorldStatus = "resting" | "working";
-
-export type WorldZoneId = "lounge" | "workspace";
-
-export interface WorldZone {
-  id: WorldZoneId;
-  label: string;
-  shortLabel: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-export interface AgentWorldPoint {
-  x: number;
-  y: number;
-  label: string;
-}
+export type { AgentWorldPoint, WorldZone, WorldZoneId } from "@/components/workspace/agent-world-layout";
 
 export interface WorldEventPulse {
   kind: "chat" | "work";
@@ -53,6 +38,7 @@ export interface AgentWorldModel {
 export interface AgentWorldSnapshot {
   agents: AgentWorldModel[];
   zones: WorldZone[];
+  world: PathfindingWorld;
   generatedAt: string;
 }
 
@@ -61,26 +47,12 @@ const STATUS_LABELS: Record<AgentWorldStatus, string> = {
   working: "工作中",
 };
 
-const WORLD_ZONES: WorldZone[] = [
-  { id: "lounge", label: "Lounge", shortLabel: "休息区", x: 4, y: 12, width: 40, height: 74 },
-  { id: "workspace", label: "Work Room", shortLabel: "工作区", x: 52, y: 12, width: 44, height: 74 },
-];
-
 const REST_WANDER_INTERVAL_MS = 5_000;
 const WORK_FINISH_GRACE_MS = 20_000;
 const CHAT_BUBBLE_TTL_MS = 7_000;
 const WORK_BUBBLE_TTL_MS = 5_500;
 const REST_TRAVEL_DURATION_MS = 5_000;
 const WORK_TRAVEL_DURATION_MS = 2_000;
-
-const LOUNGE_WAYPOINTS: AgentWorldPoint[] = [
-  { x: 14, y: 30, label: "Lounge path A" },
-  { x: 22, y: 48, label: "Lounge path B" },
-  { x: 32, y: 28, label: "Lounge path C" },
-  { x: 18, y: 68, label: "Lounge path D" },
-  { x: 35, y: 62, label: "Lounge path E" },
-  { x: 28, y: 78, label: "Lounge path F" },
-];
 
 function getSortableTime(value: string | null | undefined): number {
   if (!value) {
@@ -155,20 +127,9 @@ function getLatestChatPulse(turns: AgentRoomTurn[]): { at: string | null; messag
   };
 }
 
-function createDeskPoint(index: number): AgentWorldPoint {
-  const columns = 3;
-  const row = Math.floor(index / columns);
-  const column = index % columns;
-  return {
-    x: 62 + column * 11,
-    y: 34 + row * 22,
-    label: `Desk ${index + 1}`,
-  };
-}
-
-function createRestTarget(index: number, now: number): AgentWorldPoint {
+function createRestTarget(index: number, now: number, waypoints: AgentWorldPoint[]): AgentWorldPoint {
   const step = Math.floor(now / REST_WANDER_INTERVAL_MS);
-  const waypoint = LOUNGE_WAYPOINTS[(index + step) % LOUNGE_WAYPOINTS.length] ?? LOUNGE_WAYPOINTS[0]!;
+  const waypoint = waypoints[(index + step) % waypoints.length] ?? waypoints[0]!;
   const jitterPhase = (index * 19 + step * 7) % 5;
   const jitterX = (jitterPhase - 2) * 1.2;
   const jitterY = (((index * 11 + step * 5) % 5) - 2) * 1.1;
@@ -198,8 +159,11 @@ export function buildAgentWorldSnapshot(args: {
     ),
   ]);
 
-  const agents = [...agentIds]
-    .sort((left, right) => getRoomAgent(left, args.agents).label.localeCompare(getRoomAgent(right, args.agents).label))
+  const sortedAgentIds = [...agentIds]
+    .sort((left, right) => getRoomAgent(left, args.agents).label.localeCompare(getRoomAgent(right, args.agents).label));
+  const layout = createPixelOfficeLayout(sortedAgentIds.length);
+
+  const agents = sortedAgentIds
     .map((agentId, index) => {
       const definition = getRoomAgent(agentId, args.agents);
       const state = args.agentStates[agentId];
@@ -211,8 +175,9 @@ export function buildAgentWorldSnapshot(args: {
       const runtimeEntry = args.runtimeState?.agentStates[agentId];
       const toolCompletionIsFresh = isFresh(recentToolCompletion.at, now, WORK_FINISH_GRACE_MS);
       const isWorking = Boolean(runtimeEntry) || toolCompletionIsFresh;
-      const desk = createDeskPoint(index);
-      const target = isWorking ? desk : createRestTarget(index, now);
+      const deskLayout = layout.desks[index];
+      const desk = deskLayout?.desk ?? { x: 62, y: 34, label: `Desk ${index + 1}` };
+      const target = isWorking ? (deskLayout?.workstation ?? desk) : createRestTarget(index, now, layout.loungeWaypoints);
       const status: AgentWorldStatus = isWorking ? "working" : "resting";
       const hasFreshChatPulse = isFresh(latestChatPulse.at, now, CHAT_BUBBLE_TTL_MS);
 
@@ -265,7 +230,8 @@ export function buildAgentWorldSnapshot(args: {
 
   return {
     agents,
-    zones: WORLD_ZONES,
+    zones: layout.zones,
+    world: layout.world,
     generatedAt: new Date(now).toISOString(),
   };
 }

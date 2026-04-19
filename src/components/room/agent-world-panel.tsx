@@ -87,13 +87,12 @@ export function AgentWorldPanel(props: {
           {snapshot.agents.map((agent) => (
             <article
               key={agent.agentId}
-              className={`agent-world-agent status-${agent.status}${agent.isCurrentRoomParticipant ? " is-current-room" : ""}`}
+              className={`agent-world-agent status-${agent.status}${agent.isMoving ? " is-moving" : ""}${agent.isCurrentRoomParticipant ? " is-current-room" : ""}`}
               style={
                 {
-                  left: `${agent.target.x}%`,
-                  top: `${agent.target.y}%`,
+                  left: `${agent.position.x}%`,
+                  top: `${agent.position.y}%`,
                   "--agent-hue": `${(agent.colorSeed * 47) % 360}deg`,
-                  "--agent-travel-duration": `${agent.movementDurationMs}ms`,
                 } as CSSProperties
               }
             >

@@ -1722,16 +1722,17 @@ html[data-theme="dark"] .thread-list::before {
   margin-left: -59px;
   margin-top: -42px;
   transform: translateZ(0);
-  transition:
-    left var(--agent-travel-duration, 3200ms) linear,
-    top var(--agent-travel-duration, 3200ms) linear,
-    filter 220ms ease;
+  transition: filter 220ms ease;
   z-index: 2;
   will-change: left, top;
 }
 
 .agent-world-agent.status-working {
   animation: world-agent-bob 1.2s steps(2, end) infinite;
+}
+
+.agent-world-agent.is-moving .agent-world-agent-sprite {
+  animation: world-agent-walk 0.5s steps(2, end) infinite;
 }
 
 .agent-world-agent.status-resting .agent-world-agent-sprite {
@@ -1893,6 +1894,17 @@ html[data-theme="dark"] .thread-list::before {
 
   50% {
     filter: saturate(1.1) brightness(1.04);
+  }
+}
+
+@keyframes world-agent-walk {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(1px);
   }
 }
 

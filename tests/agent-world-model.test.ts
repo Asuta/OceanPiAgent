@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildAgentWorldSnapshot } from "@/components/workspace/agent-world-model";
+import { isWorldPointBlocked } from "@/components/workspace/agent-world-pathfinding";
 import type { AgentRoomTurn, AgentSharedState, RoomAgentDefinition, RoomMessage, RoomParticipant, RoomSession, ToolExecution } from "@/lib/chat/types";
 
 const AGENTS: RoomAgentDefinition[] = [
@@ -228,6 +229,8 @@ test("moves an agent to working mode only when backend runtime says a tool is ac
   assert.equal(concierge?.targetZone, "workspace");
   assert.equal(concierge?.pulse?.kind, "work");
   assert.equal(concierge?.movementDurationMs, 2_000);
+  assert.equal(snapshot.world.obstacles.length > 0, true);
+  assert.equal(isWorldPointBlocked(snapshot.world, { x: concierge!.target.x, y: concierge!.target.y }), false);
 });
 
 test("uses backend runtime state to show working mode before a persisted tool result exists", () => {
